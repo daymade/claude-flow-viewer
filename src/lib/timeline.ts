@@ -73,7 +73,7 @@ function parseTimeToMs(timeStr: string): number {
   return ((h * 60 + m) * 60 + s) * 1000
 }
 
-function formatTokens(n: number): string {
+export function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
   return String(n)
 }

@@ -1,5 +1,5 @@
 import type { ProjectMeta, SessionMeta } from '../types/session'
-import { scanSessionMetadata, quickScanMetadata, decodeProjectName, extractShortName, disambiguateShortNames } from './parser'
+import { quickScanMetadata, decodeProjectName, extractShortName, disambiguateShortNames } from './parser'
 
 const MAX_SESSIONS_PER_PROJECT = 50
 const PREVIEW_BYTES = 4096

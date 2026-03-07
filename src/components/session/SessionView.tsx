@@ -1,6 +1,8 @@
 import { useRef, useCallback, useMemo, useState, useEffect } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+
+const REMARK_PLUGINS = [remarkGfm]
 import type { SessionData, SessionMessage, FilterState, PromptIndexEntry, TimelineEvent } from '../../types/session'
 import { extractTimelineEvents } from '../../lib/timeline'
 import { Timeline } from './Timeline'
@@ -108,6 +110,11 @@ function PromptIndex({ prompts, onJump }: { prompts: PromptIndexEntry[]; onJump:
   const hoverTimer = useRef<ReturnType<typeof setTimeout>>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
+  // Cleanup hover timer on unmount
+  useEffect(() => {
+    return () => { if (hoverTimer.current) clearTimeout(hoverTimer.current) }
+  }, [])
+
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     dragging.current = true
@@ -130,7 +137,7 @@ function PromptIndex({ prompts, onJump }: { prompts: PromptIndexEntry[]; onJump:
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
-  }, [height])
+  }, []) // startH.current captures height at drag start, no need for height dep
 
   const showPopover = useCallback((num: number, btnEl: HTMLElement) => {
     if (hoverTimer.current) clearTimeout(hoverTimer.current)
@@ -197,7 +204,7 @@ function PromptIndex({ prompts, onJump }: { prompts: PromptIndexEntry[]; onJump:
             <span className="text-[10px] text-gray-400 font-mono">{hoveredPrompt.time}</span>
           </div>
           <div className="text-sm text-gray-700 prose prose-sm prose-gray max-w-none [&_pre]:bg-gray-50 [&_pre]:p-2 [&_pre]:rounded [&_pre]:text-xs [&_code]:text-xs [&_code]:bg-gray-100 [&_code]:px-1 [&_code]:rounded">
-            <Markdown remarkPlugins={[remarkGfm]}>{hoveredPrompt.fullText}</Markdown>
+            <Markdown remarkPlugins={REMARK_PLUGINS}>{hoveredPrompt.fullText}</Markdown>
           </div>
         </div>
       )}

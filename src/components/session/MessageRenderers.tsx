@@ -1,6 +1,9 @@
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { SessionMessage, FilterState } from '../../types/session'
+import { formatTokens } from '../../lib/timeline'
+
+const REMARK_PLUGINS = [remarkGfm]
 
 // ━━━ L0: User Prompt ━━━ THE HERO ━━━
 
@@ -59,7 +62,7 @@ export function PromptBlock({ msg, searchQuery }: {
 export function AiTextBlock({ msg }: { msg: Extract<SessionMessage, { kind: 'ai-text' }> }) {
   return (
     <div className="mt-3 mb-2 pl-6 pr-2 text-[15px] leading-[1.8] text-gray-700 break-words prose prose-gray max-w-none prose-p:my-2 prose-headings:mt-5 prose-headings:mb-2.5 prose-headings:text-gray-900 prose-headings:font-semibold prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-pre:bg-gray-900 prose-pre:text-gray-100 prose-pre:text-sm prose-pre:leading-relaxed prose-pre:rounded-md prose-code:text-sm prose-code:bg-gray-100 prose-code:text-gray-800 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0 prose-a:text-blue-600 prose-a:no-underline hover:prose-a:underline prose-table:text-sm [&_table]:block [&_table]:overflow-x-auto prose-th:px-3 prose-th:py-2 prose-th:bg-gray-50 prose-th:text-left prose-th:whitespace-nowrap prose-td:px-3 prose-td:py-2 prose-td:border-gray-200 prose-td:whitespace-nowrap prose-blockquote:border-l-gray-300 prose-blockquote:text-gray-600 prose-hr:my-5 prose-img:rounded-md prose-strong:text-gray-900">
-      <Markdown remarkPlugins={[remarkGfm]}>{msg.text}</Markdown>
+      <Markdown remarkPlugins={REMARK_PLUGINS}>{msg.text}</Markdown>
     </div>
   )
 }
@@ -252,9 +255,7 @@ export function ClearDivider({ msg }: { msg: Extract<SessionMessage, { kind: 'cl
 
 export function CompactBoundaryDivider({ msg }: { msg: Extract<SessionMessage, { kind: 'compact-boundary' }> }) {
   const tokenDisplay = msg.preTokens > 0
-    ? msg.preTokens >= 1000
-      ? `${(msg.preTokens / 1000).toFixed(1)}K tokens`
-      : `${msg.preTokens} tokens`
+    ? `${formatTokens(msg.preTokens)} tokens`
     : null
 
   return (

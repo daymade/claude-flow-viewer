@@ -25,7 +25,6 @@ export function AppShell() {
   const { loadSession, loadDirectory, loadAllProjectSessions } = useFileLoader()
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT)
   const dragging = useRef(false)
-  const dragRef = useRef<HTMLDivElement>(null)
 
   // Drag handle for resizable sidebar
   const onDragStart = useCallback((e: React.MouseEvent) => {
@@ -155,7 +154,6 @@ export function AppShell() {
 
         {/* Drag handle */}
         <div
-          ref={dragRef}
           onMouseDown={onDragStart}
           className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-violet-400/30 active:bg-violet-400/50 transition-colors z-10"
         />

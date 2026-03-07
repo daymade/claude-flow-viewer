@@ -245,37 +245,31 @@ function toolSummary(item: Record<string, unknown>): string {
   const name = String(item.name || 'unknown')
   const inp = (item.input || {}) as Record<string, unknown>
 
-  switch (name) {
-    case 'Read':
+  switch (name.toLowerCase()) {
     case 'read':
       return `Read ${getFilename(String(inp.file_path || inp.filePath || ''))}`
-    case 'Write':
     case 'write':
       return `Write ${getFilename(String(inp.file_path || inp.filePath || ''))}`
-    case 'Edit':
     case 'edit':
       return `Edit ${getFilename(String(inp.file_path || inp.filePath || ''))}`
-    case 'Bash':
     case 'bash':
       return `$ ${inp.description || String(inp.command || '').slice(0, 60)}`
-    case 'Glob':
     case 'glob':
       return `Glob ${inp.pattern || ''}`
-    case 'Grep':
     case 'grep':
       return `Grep '${inp.pattern || ''}'`
-    case 'Agent':
-    case 'Task':
+    case 'agent':
+    case 'task':
       return `Agent: ${inp.description || String(inp.prompt || '').slice(0, 60)}`
-    case 'ToolSearch':
+    case 'toolsearch':
       return `ToolSearch: ${inp.query || ''}`
-    case 'SendMessage':
+    case 'sendmessage':
       return `\u2192 Sent to ${inp.recipient || inp.teammate_id || '?'}: ${String(inp.summary || inp.content || '').slice(0, 60)}`
-    case 'TaskCreate':
+    case 'taskcreate':
       return `Created task: ${String(inp.subject || inp.description || '').slice(0, 60)}`
-    case 'TaskUpdate':
+    case 'taskupdate':
       return `Updated task #${inp.id || inp.task_id || '?'}: ${inp.status || ''}`
-    case 'TaskList':
+    case 'tasklist':
       return 'Listed tasks'
     default:
       return name

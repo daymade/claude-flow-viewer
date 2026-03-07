@@ -3,8 +3,6 @@ export interface TreeAnalysis {
   activeUuids: Set<string>
   /** Map from fork parent uuid -> array of abandoned branch record groups */
   forkPoints: Map<string, Record<string, unknown>[][]>
-  /** Set of uuids that are /clear command records */
-  clearUuids: Set<string>
   /** Plan mode transitions */
   planTransitions: Array<{ uuid: string; type: 'enter' | 'exit'; planPreview?: string }>
   /** Whether the JSONL has tree data (uuid/parentUuid fields) */
@@ -23,14 +21,6 @@ function extractTextFromContent(content: unknown): string {
     }
   }
   return ''
-}
-
-function hasClearCommand(record: Record<string, unknown>): boolean {
-  const message = record.message as Record<string, unknown> | undefined
-  if (!message) return false
-  const content = message.content
-  const text = extractTextFromContent(content)
-  return text.includes('<command-name>/clear</command-name>')
 }
 
 function detectPlanTransition(record: Record<string, unknown>, uuid: string): { uuid: string; type: 'enter' | 'exit'; planPreview?: string } | null {
@@ -88,7 +78,6 @@ export function analyzeConversationTree(records: Record<string, unknown>[]): Tre
   const empty: TreeAnalysis = {
     activeUuids: new Set(),
     forkPoints: new Map(),
-    clearUuids: new Set(),
     planTransitions: [],
     hasTreeData: false,
   }
@@ -213,17 +202,7 @@ export function analyzeConversationTree(records: Record<string, unknown>[]): Tre
     forkPoints.set(parentUuid, abandonedBranches)
   }
 
-  // Step 5: Detect /clear commands in active path
-  const clearUuids = new Set<string>()
-  for (const uuid of activeUuids) {
-    const rec = byUuid.get(uuid)
-    if (!rec) continue
-    if (hasClearCommand(rec)) {
-      clearUuids.add(uuid)
-    }
-  }
-
-  // Step 6: Detect plan mode transitions in active path (preserve order)
+  // Step 5: Detect plan mode transitions in active path (preserve order)
   const planTransitions: TreeAnalysis['planTransitions'] = []
   for (const rec of records) {
     const uuid = rec.uuid
@@ -238,7 +217,6 @@ export function analyzeConversationTree(records: Record<string, unknown>[]): Tre
   return {
     activeUuids,
     forkPoints,
-    clearUuids,
     planTransitions,
     hasTreeData: true,
   }

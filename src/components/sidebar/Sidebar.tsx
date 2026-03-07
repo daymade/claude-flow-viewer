@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import type { ProjectMeta } from '../../types/session'
 
 function formatFileSize(bytes: number): string {
@@ -18,22 +18,21 @@ interface SidebarProps {
 }
 
 export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searchQuery, activeHeatmap, onSelectSession, onLoadAllSessions }: SidebarProps) {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set<string>())
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set<string>())
 
-  // Auto-expand the project containing the active session
-  const prevActiveProject = useRef(activeProjectEncoded)
-  if (activeProjectEncoded && activeProjectEncoded !== prevActiveProject.current) {
-    prevActiveProject.current = activeProjectEncoded
-    if (!expanded.has(activeProjectEncoded)) {
-      // Mutate during render is safe for derived state sync
-      expanded.add(activeProjectEncoded)
-    }
-  }
-  // Auto-expand first project on initial load
-  if (expanded.size === 0 && projects.length > 0) {
-    const first = activeProjectEncoded || projects[0].encodedName
-    expanded.add(first)
-  }
+  // Auto-expand the project containing the active session, or first project on initial load
+  useEffect(() => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (activeProjectEncoded && !prev.has(activeProjectEncoded)) {
+        next.add(activeProjectEncoded)
+      }
+      if (next.size === 0 && projects.length > 0) {
+        next.add(activeProjectEncoded || projects[0].encodedName)
+      }
+      return next.size === prev.size ? prev : next
+    })
+  }, [activeProjectEncoded, projects])
 
   const filteredProjects = useMemo(() => {
     if (!searchQuery) return projects
