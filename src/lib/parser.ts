@@ -1,0 +1,692 @@
+import type { SessionData, SessionMeta, SessionMessage, PromptIndexEntry } from '../types/session'
+import { detectDecision } from './decision-detector'
+import { analyzeConversationTree } from './tree-parser'
+import { computeHeatmap } from './heatmap'
+
+// --- Timestamp ---
+
+function parseTimestamp(value: unknown): Date | null {
+  if (!value) return null
+  if (typeof value === 'string') {
+    const d = new Date(value)
+    return isNaN(d.getTime()) ? null : d
+  }
+  if (typeof value === 'number') {
+    const d = new Date(value)
+    return isNaN(d.getTime()) ? null : d
+  }
+  return null
+}
+
+function extractTimestamp(data: Record<string, unknown>): Date {
+  for (const path of ['timestamp', 'snapshot.timestamp', 'message.timestamp']) {
+    let val: unknown = data
+    for (const part of path.split('.')) {
+      val = (val as Record<string, unknown>)?.[part]
+    }
+    const ts = parseTimestamp(val)
+    if (ts) return ts
+  }
+  return new Date()
+}
+
+function formatDateTime(d: Date): string {
+  const year = d.getFullYear()
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  const hour = String(d.getHours()).padStart(2, '0')
+  const min = String(d.getMinutes()).padStart(2, '0')
+  return `${year}-${month}-${day} ${hour}:${min}`
+}
+
+function formatTime(d: Date): string {
+  const h = String(d.getHours()).padStart(2, '0')
+  const m = String(d.getMinutes()).padStart(2, '0')
+  const s = String(d.getSeconds()).padStart(2, '0')
+  return `${h}:${m}:${s}`
+}
+
+// --- Project name ---
+
+export function decodeProjectName(encoded: string): string {
+  if (encoded.startsWith('-')) {
+    return '/' + encoded.slice(1).replaceAll('-', '/')
+  }
+  return encoded
+}
+
+export function extractShortName(encoded: string): string {
+  const segments = encoded.split('-').filter(Boolean)
+  if (segments.length === 0) return encoded
+
+  const last = segments[segments.length - 1]
+  if (last.length >= 3) return last
+
+  for (let i = segments.length - 2; i >= 0; i--) {
+    if (segments[i].length >= 3) {
+      return segments[i] + '/' + last
+    }
+  }
+  return last
+}
+
+export function disambiguateShortNames(projects: Array<{ encodedName: string; shortName: string }>) {
+  const countMap = new Map<string, number>()
+  for (const p of projects) {
+    countMap.set(p.shortName, (countMap.get(p.shortName) || 0) + 1)
+  }
+
+  for (const [name, count] of countMap) {
+    if (count <= 1) continue
+    const dupes = projects.filter(p => p.shortName === name)
+
+    let disambiguated = false
+    for (let depth = 1; depth <= 5; depth++) {
+      const labels = dupes.map(p => {
+        const segments = p.encodedName.split('-').filter(Boolean)
+        const shortSegCount = name.split('/').length
+        const parentIdx = segments.length - shortSegCount - depth
+        return parentIdx >= 0 ? segments[parentIdx] : ''
+      })
+      const unique = new Set(labels)
+      if (unique.size === dupes.length) {
+        for (let i = 0; i < dupes.length; i++) {
+          dupes[i].shortName = `${name} (${labels[i]})`
+        }
+        disambiguated = true
+        break
+      }
+    }
+
+    if (!disambiguated) {
+      for (let i = 0; i < dupes.length; i++) {
+        dupes[i].shortName = `${name} #${i + 1}`
+      }
+    }
+  }
+}
+
+// --- Message classification ---
+
+type ContentClass =
+  | { type: 'real-prompt' }
+  | { type: 'team-message'; from: string; color: string; summary: string; content: string; isProtocol: boolean }
+  | { type: 'task-event'; taskId: string; status: string; summary: string }
+  | { type: 'system'; skip: true }
+
+const PROTOCOL_EVENTS = ['idle_notification', 'shutdown_approved', 'teammate_terminated', 'shutdown_request']
+
+function classifyUserContent(text: string): ContentClass {
+  const t = text.trim()
+
+  if (t.startsWith('<local-command') || t.startsWith('<command-') || t.startsWith('<system-reminder>')) {
+    return { type: 'system', skip: true }
+  }
+
+  if (t.startsWith('<teammate-message')) {
+    const fromMatch = t.match(/teammate_id="([^"]*)"/)
+    const colorMatch = t.match(/color="([^"]*)"/)
+    const summaryMatch = t.match(/summary="([^"]*)"/)
+    const from = fromMatch?.[1] || 'unknown'
+    const color = colorMatch?.[1] || 'blue'
+    const summary = summaryMatch?.[1] || ''
+
+    // Extract inner content (between opening tag end and closing tag)
+    const tagEndIdx = t.indexOf('>')
+    const closeIdx = t.lastIndexOf('</teammate-message>')
+    const inner = (tagEndIdx >= 0 && closeIdx > tagEndIdx) ? t.slice(tagEndIdx + 1, closeIdx).trim() : t
+
+    // Detect protocol events (JSON with known event types)
+    let isProtocol = false
+    try {
+      const parsed = JSON.parse(inner)
+      if (parsed && typeof parsed === 'object' && PROTOCOL_EVENTS.includes(parsed.type || parsed.event)) {
+        isProtocol = true
+      }
+    } catch { /* not JSON, that's fine */ }
+
+    return { type: 'team-message', from, color, summary, content: inner, isProtocol }
+  }
+
+  if (t.startsWith('<task-notification')) {
+    const taskIdMatch = t.match(/<task-id>\s*(.*?)\s*<\/task-id>/s)
+    const statusMatch = t.match(/<status>\s*(.*?)\s*<\/status>/s)
+    const summaryMatch = t.match(/<summary>\s*(.*?)\s*<\/summary>/s)
+    return {
+      type: 'task-event',
+      taskId: taskIdMatch?.[1] || '?',
+      status: statusMatch?.[1] || 'unknown',
+      summary: summaryMatch?.[1] || '',
+    }
+  }
+
+  if (!t) return { type: 'system', skip: true }
+  return { type: 'real-prompt' }
+}
+
+function classifyUserMessage(msg: Record<string, unknown>): ContentClass | null {
+  if (msg.type !== 'user') return null
+  if (msg.isMeta) return null
+  if (msg.isCompactSummary) return null
+  const message = msg.message as Record<string, unknown> | undefined
+  const content = message?.content
+  if (typeof content === 'string') {
+    return classifyUserContent(content)
+  }
+  if (Array.isArray(content)) {
+    if (content.every((c) => typeof c === 'object' && c !== null && (c as Record<string, unknown>).type === 'tool_result')) {
+      return null
+    }
+    for (const c of content) {
+      if (typeof c !== 'object' || c === null) continue
+      const item = c as Record<string, unknown>
+      if (item.type === 'text' || item.type === 'input_text') {
+        const text = String(item.text || '')
+        if (text.trim()) {
+          const cls = classifyUserContent(text)
+          if (cls.type !== 'system') return cls
+        }
+      }
+    }
+  }
+  return null
+}
+
+function getUserText(msg: Record<string, unknown>): string {
+  const message = msg.message as Record<string, unknown> | undefined
+  const content = message?.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    const parts: string[] = []
+    for (const c of content) {
+      if (typeof c !== 'object' || c === null) continue
+      const item = c as Record<string, unknown>
+      if (item.type === 'text' || item.type === 'input_text') {
+        parts.push(String(item.text || ''))
+      } else if (item.type === 'image' || item.type === 'image_url') {
+        parts.push('[Image]')
+      }
+    }
+    return parts.join('\n')
+  }
+  return ''
+}
+
+function getUserImages(msg: Record<string, unknown>): import('../types/session').EmbeddedImage[] {
+  const message = msg.message as Record<string, unknown> | undefined
+  const content = message?.content
+  if (!Array.isArray(content)) return []
+  const images: import('../types/session').EmbeddedImage[] = []
+  for (const c of content) {
+    if (typeof c !== 'object' || c === null) continue
+    const item = c as Record<string, unknown>
+    if (item.type === 'image') {
+      const source = item.source as Record<string, unknown> | undefined
+      if (source?.type === 'base64' && typeof source.data === 'string' && typeof source.media_type === 'string') {
+        images.push({
+          mediaType: source.media_type as string,
+          dataUrl: `data:${source.media_type};base64,${source.data}`,
+        })
+      }
+    }
+  }
+  return images
+}
+
+// --- Tool summary ---
+
+function getFilename(fp: string): string {
+  if (!fp) return ''
+  const parts = fp.split('/')
+  return parts[parts.length - 1] || fp
+}
+
+function toolSummary(item: Record<string, unknown>): string {
+  const name = String(item.name || 'unknown')
+  const inp = (item.input || {}) as Record<string, unknown>
+
+  switch (name) {
+    case 'Read':
+    case 'read':
+      return `Read ${getFilename(String(inp.file_path || inp.filePath || ''))}`
+    case 'Write':
+    case 'write':
+      return `Write ${getFilename(String(inp.file_path || inp.filePath || ''))}`
+    case 'Edit':
+    case 'edit':
+      return `Edit ${getFilename(String(inp.file_path || inp.filePath || ''))}`
+    case 'Bash':
+    case 'bash':
+      return `$ ${inp.description || String(inp.command || '').slice(0, 60)}`
+    case 'Glob':
+    case 'glob':
+      return `Glob ${inp.pattern || ''}`
+    case 'Grep':
+    case 'grep':
+      return `Grep '${inp.pattern || ''}'`
+    case 'Agent':
+    case 'Task':
+      return `Agent: ${inp.description || String(inp.prompt || '').slice(0, 60)}`
+    case 'ToolSearch':
+      return `ToolSearch: ${inp.query || ''}`
+    case 'SendMessage':
+      return `\u2192 Sent to ${inp.recipient || inp.teammate_id || '?'}: ${String(inp.summary || inp.content || '').slice(0, 60)}`
+    case 'TaskCreate':
+      return `Created task: ${String(inp.subject || inp.description || '').slice(0, 60)}`
+    case 'TaskUpdate':
+      return `Updated task #${inp.id || inp.task_id || '?'}: ${inp.status || ''}`
+    case 'TaskList':
+      return 'Listed tasks'
+    default:
+      return name
+  }
+}
+
+// --- Record classification helper ---
+
+interface ClassifyResult {
+  messages: SessionMessage[]
+  isPrompt: boolean
+  isClear: boolean
+}
+
+/**
+ * Classify a single JSONL record into SessionMessage(s).
+ * When `promptCounter` is provided, user prompts increment it and use its value.
+ * When `promptCounter` is null, prompt numbering is skipped (for abandoned branches).
+ */
+function classifyRecord(
+  data: Record<string, unknown>,
+  promptCounter: { value: number } | null,
+  prompts: PromptIndexEntry[] | null,
+): ClassifyResult {
+  const result: ClassifyResult = { messages: [], isPrompt: false, isClear: false }
+  const msgType = data.type
+
+  // Classify user messages
+  if (msgType === 'user' && !data.isMeta) {
+    const cls = classifyUserMessage(data)
+
+    if (cls?.type === 'real-prompt') {
+      result.isPrompt = true
+      const text = getUserText(data)
+      const images = getUserImages(data)
+      const ts = extractTimestamp(data)
+      const time = formatTime(ts)
+      if (promptCounter) {
+        promptCounter.value++
+        const decision = detectDecision(text, promptCounter.value)
+        result.messages.push({ kind: 'user-prompt', promptNum: promptCounter.value, text, images, time, decision })
+        prompts?.push({
+          num: promptCounter.value,
+          preview: text.slice(0, 100).replace(/\n/g, ' '),
+          fullText: text,
+          time,
+          decision,
+        })
+      } else {
+        const decision = detectDecision(text, 0)
+        result.messages.push({ kind: 'user-prompt', promptNum: 0, text, images, time, decision })
+      }
+      return result
+    }
+
+    if (cls?.type === 'team-message') {
+      result.messages.push({
+        kind: 'team-message',
+        from: cls.from,
+        color: cls.color,
+        summary: cls.summary,
+        content: cls.content,
+        isProtocol: cls.isProtocol,
+      })
+      return result
+    }
+
+    if (cls?.type === 'task-event') {
+      result.messages.push({
+        kind: 'task-event',
+        taskId: cls.taskId,
+        status: cls.status,
+        summary: cls.summary,
+      })
+      return result
+    }
+
+    // Check if this is a /clear command (system skip) — mark it so caller can inject clear-divider
+    if (cls?.type === 'system') {
+      const text = getUserText(data)
+      if (text.includes('<command-name>/clear</command-name>')) {
+        result.isClear = true
+      }
+    }
+  }
+
+  // Tool results (user type with tool_result content)
+  if (msgType === 'user') {
+    const message = data.message as Record<string, unknown> | undefined
+    const contentArr = message?.content
+    if (Array.isArray(contentArr)) {
+      for (const c of contentArr) {
+        if (typeof c !== 'object' || c === null) continue
+        const item = c as Record<string, unknown>
+        if (item.type !== 'tool_result') continue
+        let resultContent = item.content
+        if (Array.isArray(resultContent)) {
+          resultContent = (resultContent as Record<string, unknown>[])
+            .filter((rc) => rc.type === 'text')
+            .map((rc) => String(rc.text || ''))
+            .join('\n')
+        }
+        const full = String(resultContent || '')
+        const display = full.slice(0, 500) + (full.length > 500 ? `... (${full.length} chars)` : '')
+        result.messages.push({
+          kind: 'tool-result',
+          content: display,
+          isError: Boolean(item.is_error),
+        })
+      }
+    }
+    return result
+  }
+
+  // Assistant message
+  if (msgType === 'assistant') {
+    const message = data.message as Record<string, unknown> | undefined
+    const contentItems = message?.content
+    if (!Array.isArray(contentItems)) return result
+
+    for (const c of contentItems) {
+      if (typeof c !== 'object' || c === null) continue
+      const item = c as Record<string, unknown>
+
+      switch (item.type) {
+        case 'thinking': {
+          const thinking = String(item.thinking || '')
+          if (!thinking) break
+          result.messages.push({
+            kind: 'ai-thinking',
+            preview: thinking.slice(0, 120).replace(/\n/g, ' '),
+            full: thinking.slice(0, 3000) + (thinking.length > 3000 ? `\n... (${thinking.length} chars total)` : ''),
+          })
+          break
+        }
+        case 'text': {
+          const text = String(item.text || '').trim()
+          if (!text) break
+          result.messages.push({ kind: 'ai-text', text })
+          break
+        }
+        case 'tool_use': {
+          const summary = toolSummary(item)
+          result.messages.push({
+            kind: 'ai-tool-use',
+            summary,
+            name: String(item.name || 'unknown'),
+            input: (item.input || {}) as Record<string, unknown>,
+          })
+          break
+        }
+      }
+    }
+    return result
+  }
+
+  return result
+}
+
+// --- Main parsers ---
+
+export function parseSessionContent(content: string): SessionData {
+  // Step 1: Parse all lines into records
+  const lines = content.split('\n')
+  const records: Record<string, unknown>[] = []
+
+  for (const line of lines) {
+    if (!line.trim()) continue
+    try {
+      records.push(JSON.parse(line))
+    } catch {
+      continue
+    }
+  }
+
+  // Step 2: Pre-scan for compact_boundary and isCompactSummary records
+  const compactBoundaries = new Map<string, { trigger: 'auto' | 'manual'; preTokens: number; ts: string }>()
+  const compactSummaries = new Map<string, string>() // keyed by parentUuid (= boundary uuid) -> summary text
+
+  for (const rec of records) {
+    if (rec.type === 'system' && rec.subtype === 'compact_boundary' && typeof rec.uuid === 'string') {
+      const meta = rec.compactMetadata as Record<string, unknown> | undefined
+      const ts = extractTimestamp(rec)
+      compactBoundaries.set(rec.uuid as string, {
+        trigger: (meta?.trigger === 'manual' ? 'manual' : 'auto'),
+        preTokens: typeof meta?.preTokens === 'number' ? meta.preTokens : 0,
+        ts: formatTime(ts),
+      })
+    }
+    if (rec.isCompactSummary && typeof rec.parentUuid === 'string') {
+      const message = rec.message as Record<string, unknown> | undefined
+      const content = message?.content
+      const text = typeof content === 'string' ? content : ''
+      compactSummaries.set(rec.parentUuid as string, text.slice(0, 500))
+    }
+  }
+
+  // Step 3: Analyze conversation tree
+  const tree = analyzeConversationTree(records)
+
+  const planTransitionByUuid = new Map<string, Array<{ type: 'enter' | 'exit'; planPreview?: string }>>()
+  for (const pt of tree.planTransitions) {
+    const existing = planTransitionByUuid.get(pt.uuid)
+    if (existing) {
+      existing.push({ type: pt.type, planPreview: pt.planPreview })
+    } else {
+      planTransitionByUuid.set(pt.uuid, [{ type: pt.type, planPreview: pt.planPreview }])
+    }
+  }
+
+  // Step 5: Iterate records and build messages
+  const messages: SessionMessage[] = []
+  const prompts: PromptIndexEntry[] = []
+  const promptCounter = { value: 0 }
+
+  for (const data of records) {
+    const uuid = data.uuid as string | undefined
+
+    // 5a: Detect compact_boundary records and emit compact-boundary message
+    if (data.type === 'system' && data.subtype === 'compact_boundary' && typeof uuid === 'string') {
+      const boundary = compactBoundaries.get(uuid)
+      if (boundary) {
+        messages.push({
+          kind: 'compact-boundary',
+          timestamp: boundary.ts,
+          trigger: boundary.trigger,
+          preTokens: boundary.preTokens,
+          summaryText: compactSummaries.get(uuid) || '',
+        })
+      }
+      continue
+    }
+
+    // 5b: Skip isCompactSummary records (content folded into compact-boundary)
+    if (data.isCompactSummary) {
+      continue
+    }
+
+    // 5c: Detect /clear BEFORE tree filtering — /clear resets conversation context
+    // and creates tree discontinuities, so it may not be on the active path
+    if (data.type === 'user' && !data.isMeta) {
+      const msg = data.message as Record<string, unknown> | undefined
+      const rawContent = msg?.content
+      const rawText = typeof rawContent === 'string' ? rawContent : ''
+      if (rawText.includes('<command-name>/clear</command-name>')) {
+        const ts = extractTimestamp(data)
+        messages.push({ kind: 'clear-divider', timestamp: formatTime(ts) })
+        continue
+      }
+    }
+
+    // 5d: Skip abandoned branch records when tree data is available
+    if (tree.hasTreeData && typeof uuid === 'string' && !tree.activeUuids.has(uuid)) {
+      continue
+    }
+
+    // 5e: Inject plan-start/plan-end before the record's own messages
+    if (tree.hasTreeData && typeof uuid === 'string' && planTransitionByUuid.has(uuid)) {
+      const transitions = planTransitionByUuid.get(uuid)!
+      const ts = extractTimestamp(data)
+      const timestamp = formatTime(ts)
+      for (const pt of transitions) {
+        if (pt.type === 'enter') {
+          messages.push({ kind: 'plan-start', timestamp })
+        } else {
+          messages.push({ kind: 'plan-end', timestamp, planPreview: pt.planPreview || '' })
+        }
+      }
+    }
+
+    // 5f: Classify the record with the standard logic
+    const classified = classifyRecord(data, promptCounter, prompts)
+
+    // Skip system records that produced no messages
+    if (classified.messages.length === 0) {
+      continue
+    }
+
+    messages.push(...classified.messages)
+
+    // 5g: Inject fork-indicator after the current record if it's a fork point
+    if (tree.hasTreeData && typeof uuid === 'string' && tree.forkPoints.has(uuid)) {
+      const branches = tree.forkPoints.get(uuid)!
+      const ts = extractTimestamp(data)
+      const timestamp = formatTime(ts)
+
+      for (const branch of branches) {
+        // Classify abandoned branch records (no prompt numbering)
+        const abandonedMessages: SessionMessage[] = []
+        let abandonedPreview = ''
+
+        for (const abandonedRec of branch) {
+          const aClassified = classifyRecord(abandonedRec, null, null)
+          abandonedMessages.push(...aClassified.messages)
+
+          // Extract preview from first assistant text if not yet found
+          if (!abandonedPreview) {
+            for (const msg of aClassified.messages) {
+              if (msg.kind === 'ai-text') {
+                abandonedPreview = msg.text.slice(0, 100)
+                break
+              }
+            }
+          }
+        }
+
+        if (abandonedMessages.length > 0) {
+          messages.push({
+            kind: 'fork-indicator',
+            abandonedMessages,
+            abandonedPreview,
+            timestamp,
+          })
+        }
+      }
+    }
+  }
+
+  return { messages, prompts, heatmap: computeHeatmap(messages) }
+}
+
+export function scanSessionMetadata(content: string, sessionId: string, fileSize?: number): SessionMeta | null {
+  const lines = content.split('\n')
+  let startTime: Date | null = null
+  let promptCount = 0
+  let toolCount = 0
+  let recordCount = 0
+  let firstPromptPreview = ''
+
+  for (const line of lines) {
+    if (!line.trim()) continue
+    let data: Record<string, unknown>
+    try {
+      data = JSON.parse(line)
+      recordCount++
+    } catch {
+      continue
+    }
+
+    if (!startTime) {
+      startTime = extractTimestamp(data)
+    }
+
+    const cls = classifyUserMessage(data)
+    if (cls?.type === 'real-prompt') {
+      promptCount++
+      if (promptCount === 1) {
+        firstPromptPreview = getUserText(data).slice(0, 100).replace(/\n/g, ' ')
+      }
+    }
+
+    if (data.type === 'assistant') {
+      const message = data.message as Record<string, unknown> | undefined
+      const contentArr = message?.content
+      if (Array.isArray(contentArr)) {
+        toolCount += contentArr.filter((c) => typeof c === 'object' && c !== null && (c as Record<string, unknown>).type === 'tool_use').length
+      }
+    }
+  }
+
+  if (!startTime || promptCount === 0) return null
+
+  return {
+    id: sessionId,
+    startTime: startTime.toISOString(),
+    startDisplay: formatDateTime(startTime),
+    promptCount,
+    toolCount,
+    firstPromptPreview,
+    fileSize: fileSize ?? content.length,
+    recordCount,
+  }
+}
+
+/**
+ * Lightweight metadata scan from the first few KB of a JSONL file.
+ * Only extracts startTime and firstPromptPreview (promptCount/toolCount/recordCount are 0).
+ */
+export function quickScanMetadata(head: string, sessionId: string, fileSize: number): SessionMeta | null {
+  let startTime: Date | null = null
+  let firstPromptPreview = ''
+
+  for (const line of head.split('\n')) {
+    if (!line.trim()) continue
+    let data: Record<string, unknown>
+    try { data = JSON.parse(line) } catch { continue }
+
+    if (!startTime) {
+      startTime = extractTimestamp(data)
+    }
+
+    if (!firstPromptPreview) {
+      const cls = classifyUserMessage(data)
+      if (cls?.type === 'real-prompt') {
+        firstPromptPreview = getUserText(data).slice(0, 100).replace(/\n/g, ' ')
+      }
+    }
+
+    if (startTime && firstPromptPreview) break
+  }
+
+  if (!startTime || !firstPromptPreview) return null
+
+  return {
+    id: sessionId,
+    startTime: startTime.toISOString(),
+    startDisplay: formatDateTime(startTime),
+    promptCount: 0,
+    toolCount: 0,
+    firstPromptPreview,
+    fileSize,
+    recordCount: 0,
+  }
+}
