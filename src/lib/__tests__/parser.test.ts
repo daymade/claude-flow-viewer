@@ -649,8 +649,10 @@ describe('parseSessionContent', () => {
   })
 
   describe('persisted-output (tool result overflow to .txt file)', () => {
-    it('renders inline preview from persisted-output without needing external file', () => {
-      const persistedContent = `<persisted-output>\nOutput too large (34.1KB). Full output saved to: /Users/someone/.claude/projects/test/tool-results/toolu_abc.txt\n\nPreview (first 2KB):\nFound 249 files\n/path/to/file1.ts\n/path/to/file2.ts\n</persisted-output>`
+    const SESSION_ID = 'c83e2192-183d-4450-be6a-00c921c1e40e'
+
+    it('extracts clean preview and file reference from persisted-output', () => {
+      const persistedContent = `<persisted-output>\nOutput too large (34.1KB). Full output saved to: /Users/someone/.claude/projects/test/${SESSION_ID}/tool-results/toolu_abc.txt\n\nPreview (first 2KB):\nFound 249 files\n/path/to/file1.ts\n/path/to/file2.ts\n</persisted-output>`
       const content = jsonl(
         userMsg('u1', null, 'List all files'),
         assistantMsg('a1', 'u1', [
@@ -669,16 +671,20 @@ describe('parseSessionContent', () => {
       const toolResults = result.messages.filter(m => m.kind === 'tool-result')
       expect(toolResults).toHaveLength(1)
       if (toolResults[0].kind === 'tool-result') {
-        // Parser shows first 500 chars of the persisted-output text (which includes preview)
-        expect(toolResults[0].content).toContain('Output too large')
-        expect(toolResults[0].content).toContain('Found 249 files')
+        // Preview is the clean extracted content, NOT the raw XML tag
+        expect(toolResults[0].content).toBe('Found 249 files\n/path/to/file1.ts\n/path/to/file2.ts')
+        expect(toolResults[0].content).not.toContain('<persisted-output>')
+        expect(toolResults[0].content).not.toContain('Output too large')
+        // File reference is extracted as relative path
+        expect(toolResults[0].externalFile).toBe('tool-results/toolu_abc.txt')
+        expect(toolResults[0].totalSize).toBe('34.1KB')
         expect(toolResults[0].isError).toBe(false)
       }
     })
 
-    it('truncates persisted-output preview to 500 chars with suffix', () => {
-      const longPreview = 'x'.repeat(600)
-      const persistedContent = `<persisted-output>\nOutput too large (100KB). Full output saved to: /tmp/tool-results/out.txt\n\nPreview (first 2KB):\n${longPreview}\n</persisted-output>`
+    it('preserves full preview content without 500-char truncation', () => {
+      const longPreview = 'line '.repeat(500) // ~2500 chars
+      const persistedContent = `<persisted-output>\nOutput too large (100KB). Full output saved to: /tmp/x/${SESSION_ID}/tool-results/out.txt\n\nPreview (first 2KB):\n${longPreview}\n</persisted-output>`
       const content = jsonl(
         {
           type: 'user', sessionId: 'test-session', timestamp: '2026-03-07T10:00:00Z',
@@ -692,15 +698,15 @@ describe('parseSessionContent', () => {
       const toolResults = result.messages.filter(m => m.kind === 'tool-result')
       expect(toolResults).toHaveLength(1)
       if (toolResults[0].kind === 'tool-result') {
-        // Content should be truncated at 500 chars
-        expect(toolResults[0].content.length).toBeLessThan(persistedContent.length)
-        expect(toolResults[0].content).toContain('... (')
-        expect(toolResults[0].content).toContain('chars)')
+        // Full preview is preserved (not truncated to 500 chars)
+        expect(toolResults[0].content).toBe(longPreview)
+        expect(toolResults[0].totalSize).toBe('100KB')
+        expect(toolResults[0].externalFile).toBe('tool-results/out.txt')
       }
     })
 
     it('handles tool_result with array content containing persisted-output', () => {
-      const persistedText = '<persisted-output>\nOutput too large (50KB). Full output saved to: /tmp/out.txt\n\nPreview (first 2KB):\nSome preview data here\n</persisted-output>'
+      const persistedText = `<persisted-output>\nOutput too large (50KB). Full output saved to: /tmp/x/${SESSION_ID}/tool-results/arr.txt\n\nPreview (first 2KB):\nSome preview data here\n</persisted-output>`
       const content = jsonl(
         {
           type: 'user', sessionId: 'test-session', timestamp: '2026-03-07T10:00:00Z',
@@ -716,8 +722,29 @@ describe('parseSessionContent', () => {
       const toolResults = result.messages.filter(m => m.kind === 'tool-result')
       expect(toolResults).toHaveLength(1)
       if (toolResults[0].kind === 'tool-result') {
-        expect(toolResults[0].content).toContain('Output too large')
-        expect(toolResults[0].content).toContain('Some preview data here')
+        expect(toolResults[0].content).toBe('Some preview data here')
+        expect(toolResults[0].externalFile).toBe('tool-results/arr.txt')
+      }
+    })
+
+    it('normal (non-persisted) tool results still truncate to 500 chars', () => {
+      const longResult = 'x'.repeat(600)
+      const content = jsonl(
+        {
+          type: 'user', sessionId: 'test-session', timestamp: '2026-03-07T10:00:00Z',
+          message: { role: 'user', content: [
+            { tool_use_id: 't1', type: 'tool_result', content: longResult },
+          ] },
+        },
+      )
+      const result = parseSessionContent(content)
+
+      const toolResults = result.messages.filter(m => m.kind === 'tool-result')
+      expect(toolResults).toHaveLength(1)
+      if (toolResults[0].kind === 'tool-result') {
+        expect(toolResults[0].content.length).toBeLessThan(600)
+        expect(toolResults[0].content).toContain('... (600 chars)')
+        expect(toolResults[0].externalFile).toBeUndefined()
       }
     })
 
@@ -731,7 +758,7 @@ describe('parseSessionContent', () => {
           type: 'user', uuid: 'u2', parentUuid: 'a1', sessionId: 'test-session',
           timestamp: '2026-03-07T10:00:02.000Z',
           message: { role: 'user', content: [
-            { tool_use_id: 't1', type: 'tool_result', content: '<persisted-output>\nOutput too large\n</persisted-output>' },
+            { tool_use_id: 't1', type: 'tool_result', content: `<persisted-output>\nOutput too large (5KB). Full output saved to: /tmp/x/${SESSION_ID}/tool-results/t1.txt\n\nPreview (first 2KB):\nsome output\n</persisted-output>` },
           ] },
         },
         assistantMsg('a2', 'u2', [{ type: 'text', text: 'Done' }]),

@@ -241,6 +241,24 @@ function getFilename(fp: string): string {
   return parts[parts.length - 1] || fp
 }
 
+const PERSISTED_RE = /^<persisted-output>\n(.+?)\n\nPreview \(first \d+(?:\.\d+)?KB\):\n([\s\S]*?)\n<\/persisted-output>$/
+
+function parsePersistedOutput(text: string): { preview: string; relativePath: string | undefined; totalSize: string } | null {
+  const m = text.match(PERSISTED_RE)
+  if (!m) return null
+  const header = m[1]   // "Output too large (34.1KB). Full output saved to: /abs/path/tool-results/xxx.txt"
+  const preview = m[2]  // actual preview content
+
+  const sizeMatch = header.match(/\(([^)]+)\)/)
+  const totalSize = sizeMatch ? sizeMatch[1] : 'unknown'
+
+  // Extract relative path: .../sessionId/tool-results/filename.txt → tool-results/filename.txt
+  const pathMatch = header.match(/saved to: .+?\/[0-9a-f-]{36}\/(tool-results\/[^\s]+)/)
+  const relativePath = pathMatch ? pathMatch[1] : undefined
+
+  return { preview, relativePath, totalSize }
+}
+
 function toolSummary(item: Record<string, unknown>): string {
   const name = String(item.name || 'unknown')
   const inp = (item.input || {}) as Record<string, unknown>
@@ -373,12 +391,23 @@ function classifyRecord(
             .join('\n')
         }
         const full = String(resultContent || '')
-        const display = full.slice(0, 500) + (full.length > 500 ? `... (${full.length} chars)` : '')
-        result.messages.push({
-          kind: 'tool-result',
-          content: display,
-          isError: Boolean(item.is_error),
-        })
+        const persisted = parsePersistedOutput(full)
+        if (persisted) {
+          result.messages.push({
+            kind: 'tool-result',
+            content: persisted.preview,
+            isError: Boolean(item.is_error),
+            externalFile: persisted.relativePath,
+            totalSize: persisted.totalSize,
+          })
+        } else {
+          const display = full.slice(0, 500) + (full.length > 500 ? `... (${full.length} chars)` : '')
+          result.messages.push({
+            kind: 'tool-result',
+            content: display,
+            isError: Boolean(item.is_error),
+          })
+        }
       }
     }
     return result

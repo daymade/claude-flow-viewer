@@ -39,6 +39,34 @@ export function claudeDataPlugin(): Plugin {
           return
         }
 
+        if (url.startsWith('/api/tool-result/')) {
+          const rest = url.slice('/api/tool-result/'.length)
+          const parts = rest.split('/')
+          if (parts.length < 3) {
+            res.statusCode = 400
+            res.end('Need /api/tool-result/:project/:session/:relativePath')
+            return
+          }
+          const projectEncoded = decodeURIComponent(parts[0])
+          const sessionId = decodeURIComponent(parts[1])
+          const relativePath = decodeURIComponent(parts.slice(2).join('/'))
+          // Validate path to prevent directory traversal
+          if (relativePath.includes('..')) {
+            res.statusCode = 400
+            res.end('Invalid path')
+            return
+          }
+          const filePath = path.join(projectsDir, projectEncoded, sessionId, relativePath)
+          fs.promises.readFile(filePath, 'utf-8').then((content) => {
+            res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+            res.end(content)
+          }).catch(() => {
+            res.statusCode = 404
+            res.end('Tool result not found')
+          })
+          return
+        }
+
         if (url.startsWith('/api/session/')) {
           const rest = url.slice('/api/session/'.length)
           const slashIdx = rest.indexOf('/')

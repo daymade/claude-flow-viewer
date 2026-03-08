@@ -1,7 +1,9 @@
+import { useState, useCallback } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { SessionMessage, FilterState } from '../../types/session'
 import { formatTokens } from '../../lib/timeline'
+import { useAppState } from '../../hooks/useSessionStore'
 
 const REMARK_PLUGINS = [remarkGfm]
 
@@ -126,6 +128,34 @@ export function ToolCallLine({ msg }: { msg: Extract<SessionMessage, { kind: 'ai
 // ━━━ L4: Tool Result ━━━
 
 export function ToolResultBlock({ msg }: { msg: Extract<SessionMessage, { kind: 'tool-result' }> }) {
+  const { state } = useAppState()
+  const [fullContent, setFullContent] = useState<string | null>(null)
+  const [loadingFull, setLoadingFull] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  const loadFull = useCallback(async () => {
+    if (!msg.externalFile || !state.fileStore || !state.activeProjectEncoded || !state.activeSessionId) return
+    setLoadingFull(true)
+    setLoadError(null)
+    try {
+      // externalFile is "tool-results/filename.txt" (relative to session dir)
+      const content = await state.fileStore.readToolResult(
+        state.activeProjectEncoded,
+        state.activeSessionId,
+        msg.externalFile,
+      )
+      setFullContent(content)
+    } catch {
+      setLoadError('Failed to load full content')
+    } finally {
+      setLoadingFull(false)
+    }
+  }, [msg.externalFile, state.fileStore, state.activeProjectEncoded, state.activeSessionId])
+
+  const displayContent = fullContent ?? msg.content
+  const hasExternal = Boolean(msg.externalFile)
+  const showingFull = fullContent !== null
+
   return (
     <details className="ml-6">
       <summary className={`cursor-pointer py-0.5 pl-5 text-xs select-none transition-colors flex items-center gap-1.5 whitespace-nowrap ${
@@ -141,10 +171,35 @@ export function ToolResultBlock({ msg }: { msg: Extract<SessionMessage, { kind: 
           </svg>
         )}
         <span>{msg.isError ? 'Error' : 'Result'}</span>
+        {hasExternal && !showingFull && (
+          <span className="text-amber-500 font-normal ml-1">({msg.totalSize} on disk)</span>
+        )}
       </summary>
-      <pre className={`mt-0.5 ml-5 p-3 rounded text-[13px] max-h-[200px] overflow-auto whitespace-pre-wrap break-words leading-relaxed ${
+      <pre className={`mt-0.5 ml-5 p-3 rounded text-[13px] max-h-[400px] overflow-auto whitespace-pre-wrap break-words leading-relaxed ${
         msg.isError ? 'bg-red-50 text-red-600' : 'bg-gray-50 text-gray-500'
-      }`}>{msg.content}</pre>
+      }`}>{displayContent}</pre>
+      {hasExternal && !showingFull && (
+        <div className="ml-5 mt-1">
+          <button
+            onClick={loadFull}
+            disabled={loadingFull}
+            className="text-xs text-blue-500 hover:text-blue-700 hover:underline disabled:text-gray-400"
+          >
+            {loadingFull ? 'Loading...' : `Load full output (${msg.totalSize})`}
+          </button>
+          {loadError && <span className="text-xs text-red-500 ml-2">{loadError}</span>}
+        </div>
+      )}
+      {showingFull && (
+        <div className="ml-5 mt-1">
+          <button
+            onClick={() => setFullContent(null)}
+            className="text-xs text-gray-400 hover:text-gray-600 hover:underline"
+          >
+            Collapse to preview
+          </button>
+        </div>
+      )}
     </details>
   )
 }

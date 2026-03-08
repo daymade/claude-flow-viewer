@@ -8,6 +8,8 @@ export interface FileStore {
   scanProjects(): Promise<ProjectMeta[]>
   readSessionContent(projectEncoded: string, sessionId: string): Promise<string>
   scanAllProjectSessions(projectEncoded: string): Promise<SessionMeta[]>
+  /** Read a tool-result overflow file. relativePath is like "tool-results/xxx.txt" */
+  readToolResult(projectEncoded: string, sessionId: string, relativePath: string): Promise<string>
 }
 
 // --- File System Access API implementation ---
@@ -96,6 +98,21 @@ class FSAccessStore implements FileStore {
     const projectsDir = await this.findProjectsDir()
     const projectDir = await projectsDir.getDirectoryHandle(projectEncoded)
     const fileHandle = await projectDir.getFileHandle(`${sessionId}.jsonl`)
+    const file = await fileHandle.getFile()
+    return file.text()
+  }
+
+  async readToolResult(projectEncoded: string, sessionId: string, relativePath: string): Promise<string> {
+    const projectsDir = await this.findProjectsDir()
+    const projectDir = await projectsDir.getDirectoryHandle(projectEncoded)
+    const sessionDir = await projectDir.getDirectoryHandle(sessionId)
+    // relativePath is "tool-results/filename.txt"
+    const parts = relativePath.split('/')
+    let dir: FileSystemDirectoryHandle = sessionDir
+    for (const part of parts.slice(0, -1)) {
+      dir = await dir.getDirectoryHandle(part)
+    }
+    const fileHandle = await dir.getFileHandle(parts[parts.length - 1])
     const file = await fileHandle.getFile()
     return file.text()
   }
@@ -198,6 +215,10 @@ class InputFallbackStore implements FileStore {
     if (!file) throw new Error(`Session file not found: ${projectEncoded}/${sessionId}`)
     return file.text()
   }
+
+  async readToolResult(_projectEncoded: string, _sessionId: string, _relativePath: string): Promise<string> {
+    throw new Error('Tool result files are not available in input fallback mode')
+  }
 }
 
 // --- API-based implementation (auto-load from Vite dev server) ---
@@ -218,6 +239,12 @@ class APIFileStore implements FileStore {
   async readSessionContent(projectEncoded: string, sessionId: string): Promise<string> {
     const res = await fetch(`/api/session/${encodeURIComponent(projectEncoded)}/${encodeURIComponent(sessionId)}`)
     if (!res.ok) throw new Error(`Session fetch failed: ${res.status}`)
+    return res.text()
+  }
+
+  async readToolResult(projectEncoded: string, sessionId: string, relativePath: string): Promise<string> {
+    const res = await fetch(`/api/tool-result/${encodeURIComponent(projectEncoded)}/${encodeURIComponent(sessionId)}/${encodeURIComponent(relativePath)}`)
+    if (!res.ok) throw new Error(`Tool result fetch failed: ${res.status}`)
     return res.text()
   }
 }
