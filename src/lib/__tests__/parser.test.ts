@@ -648,6 +648,105 @@ describe('parseSessionContent', () => {
     })
   })
 
+  describe('persisted-output (tool result overflow to .txt file)', () => {
+    it('renders inline preview from persisted-output without needing external file', () => {
+      const persistedContent = `<persisted-output>\nOutput too large (34.1KB). Full output saved to: /Users/someone/.claude/projects/test/tool-results/toolu_abc.txt\n\nPreview (first 2KB):\nFound 249 files\n/path/to/file1.ts\n/path/to/file2.ts\n</persisted-output>`
+      const content = jsonl(
+        userMsg('u1', null, 'List all files'),
+        assistantMsg('a1', 'u1', [
+          { type: 'tool_use', id: 'toolu_abc', name: 'Bash', input: { command: 'find . -name "*.ts"' } },
+        ]),
+        {
+          type: 'user', uuid: 'u2', parentUuid: 'a1', sessionId: 'test-session',
+          timestamp: '2026-03-07T10:00:02.000Z',
+          message: { role: 'user', content: [
+            { tool_use_id: 'toolu_abc', type: 'tool_result', content: persistedContent },
+          ] },
+        },
+      )
+      const result = parseSessionContent(content)
+
+      const toolResults = result.messages.filter(m => m.kind === 'tool-result')
+      expect(toolResults).toHaveLength(1)
+      if (toolResults[0].kind === 'tool-result') {
+        // Parser shows first 500 chars of the persisted-output text (which includes preview)
+        expect(toolResults[0].content).toContain('Output too large')
+        expect(toolResults[0].content).toContain('Found 249 files')
+        expect(toolResults[0].isError).toBe(false)
+      }
+    })
+
+    it('truncates persisted-output preview to 500 chars with suffix', () => {
+      const longPreview = 'x'.repeat(600)
+      const persistedContent = `<persisted-output>\nOutput too large (100KB). Full output saved to: /tmp/tool-results/out.txt\n\nPreview (first 2KB):\n${longPreview}\n</persisted-output>`
+      const content = jsonl(
+        {
+          type: 'user', sessionId: 'test-session', timestamp: '2026-03-07T10:00:00Z',
+          message: { role: 'user', content: [
+            { tool_use_id: 'toolu_xyz', type: 'tool_result', content: persistedContent },
+          ] },
+        },
+      )
+      const result = parseSessionContent(content)
+
+      const toolResults = result.messages.filter(m => m.kind === 'tool-result')
+      expect(toolResults).toHaveLength(1)
+      if (toolResults[0].kind === 'tool-result') {
+        // Content should be truncated at 500 chars
+        expect(toolResults[0].content.length).toBeLessThan(persistedContent.length)
+        expect(toolResults[0].content).toContain('... (')
+        expect(toolResults[0].content).toContain('chars)')
+      }
+    })
+
+    it('handles tool_result with array content containing persisted-output', () => {
+      const persistedText = '<persisted-output>\nOutput too large (50KB). Full output saved to: /tmp/out.txt\n\nPreview (first 2KB):\nSome preview data here\n</persisted-output>'
+      const content = jsonl(
+        {
+          type: 'user', sessionId: 'test-session', timestamp: '2026-03-07T10:00:00Z',
+          message: { role: 'user', content: [
+            { tool_use_id: 'toolu_arr', type: 'tool_result', content: [
+              { type: 'text', text: persistedText },
+            ] },
+          ] },
+        },
+      )
+      const result = parseSessionContent(content)
+
+      const toolResults = result.messages.filter(m => m.kind === 'tool-result')
+      expect(toolResults).toHaveLength(1)
+      if (toolResults[0].kind === 'tool-result') {
+        expect(toolResults[0].content).toContain('Output too large')
+        expect(toolResults[0].content).toContain('Some preview data here')
+      }
+    })
+
+    it('persisted-output tool result does not affect prompt numbering', () => {
+      const content = jsonl(
+        userMsg('u1', null, 'Prompt 1'),
+        assistantMsg('a1', 'u1', [
+          { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } },
+        ]),
+        {
+          type: 'user', uuid: 'u2', parentUuid: 'a1', sessionId: 'test-session',
+          timestamp: '2026-03-07T10:00:02.000Z',
+          message: { role: 'user', content: [
+            { tool_use_id: 't1', type: 'tool_result', content: '<persisted-output>\nOutput too large\n</persisted-output>' },
+          ] },
+        },
+        assistantMsg('a2', 'u2', [{ type: 'text', text: 'Done' }]),
+        userMsg('u3', 'a2', 'Prompt 2'),
+        assistantMsg('a3', 'u3', [{ type: 'text', text: 'Response 2' }]),
+      )
+      const result = parseSessionContent(content)
+
+      const prompts = result.messages.filter(m => m.kind === 'user-prompt')
+      expect(prompts).toHaveLength(2)
+      expect(prompts[0]).toMatchObject({ promptNum: 1, text: 'Prompt 1' })
+      expect(prompts[1]).toMatchObject({ promptNum: 2, text: 'Prompt 2' })
+    })
+  })
+
   describe('graceful fallback', () => {
     it('works with JSONL that has no uuid/parentUuid fields', () => {
       const content = jsonl(
