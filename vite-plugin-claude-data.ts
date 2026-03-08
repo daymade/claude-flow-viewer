@@ -51,12 +51,13 @@ export function claudeDataPlugin(): Plugin {
           const sessionId = decodeURIComponent(parts[1])
           const relativePath = decodeURIComponent(parts.slice(2).join('/'))
           // Validate path to prevent directory traversal
-          if (relativePath.includes('..')) {
+          const filePath = path.join(projectsDir, projectEncoded, sessionId, relativePath)
+          const sessionDir = path.join(projectsDir, projectEncoded, sessionId)
+          if (!filePath.startsWith(sessionDir + path.sep)) {
             res.statusCode = 400
             res.end('Invalid path')
             return
           }
-          const filePath = path.join(projectsDir, projectEncoded, sessionId, relativePath)
           fs.promises.readFile(filePath, 'utf-8').then((content) => {
             res.setHeader('Content-Type', 'text/plain; charset=utf-8')
             res.end(content)

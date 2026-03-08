@@ -241,7 +241,7 @@ function getFilename(fp: string): string {
   return parts[parts.length - 1] || fp
 }
 
-const PERSISTED_RE = /^<persisted-output>\n(.+?)\n\nPreview \(first \d+(?:\.\d+)?KB\):\n([\s\S]*?)\n<\/persisted-output>$/
+const PERSISTED_RE = /^<persisted-output>\n(.+?)\n\nPreview \(first [^)]+\):\n([\s\S]*?)\n<\/persisted-output>$/
 
 function parsePersistedOutput(text: string): { preview: string; relativePath: string | undefined; totalSize: string } | null {
   const m = text.match(PERSISTED_RE)
