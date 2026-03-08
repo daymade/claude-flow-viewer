@@ -4,7 +4,7 @@ import { useAppState } from '../../hooks/useSessionStore'
 import { supportsDirectoryPicker } from '../../lib/fs-access'
 
 export function WelcomeScreen() {
-  const { loadDirectory, loadFromFiles, loadFromHandle } = useFileLoader()
+  const { loadDirectory, loadFromFiles, loadFromHandle, switchDirectory } = useFileLoader()
   const { state } = useAppState()
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
@@ -88,27 +88,23 @@ export function WelcomeScreen() {
           </div>
         ) : (
           <>
+            <button
+              onClick={switchDirectory}
+              disabled={state.loading}
+              className="w-full py-3.5 px-5 bg-violet-600 text-white rounded-xl font-semibold hover:bg-violet-700 active:bg-violet-800 disabled:opacity-50 transition-all duration-150 mb-3 cursor-pointer shadow-md shadow-violet-200 hover:shadow-lg hover:shadow-violet-200"
+            >
+              Load Sessions
+            </button>
+
             {supportsDirectoryPicker() && (
               <button
                 onClick={loadDirectory}
                 disabled={state.loading}
-                className="w-full py-3.5 px-5 bg-violet-600 text-white rounded-xl font-semibold hover:bg-violet-700 active:bg-violet-800 disabled:opacity-50 transition-all duration-150 mb-3 cursor-pointer shadow-md shadow-violet-200 hover:shadow-lg hover:shadow-violet-200"
+                className="w-full py-3.5 px-5 rounded-xl font-semibold disabled:opacity-50 transition-all duration-150 cursor-pointer bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200"
               >
-                Select Home Directory (~)
+                Or Select Folder Manually
               </button>
             )}
-
-            <button
-              onClick={() => inputRef.current?.click()}
-              disabled={state.loading}
-              className={`w-full py-3.5 px-5 rounded-xl font-semibold disabled:opacity-50 transition-all duration-150 cursor-pointer ${
-                supportsDirectoryPicker()
-                  ? 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200'
-                  : 'bg-violet-600 text-white hover:bg-violet-700 shadow-md shadow-violet-200'
-              }`}
-            >
-              {supportsDirectoryPicker() ? 'Or Select Folder Manually' : 'Select Home Directory'}
-            </button>
 
             <input
               type="file"

@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
 import { useAppState } from './useSessionStore'
-import { openDirectoryPicker, createStoreFromFiles, createStoreFromHandle } from '../lib/fs-access'
+import { openDirectoryPicker, createStoreFromFiles, createStoreFromHandle, tryAutoLoad } from '../lib/fs-access'
 import { parseSessionContent } from '../lib/parser'
 
 // --- Hash-based URL routing ---
@@ -87,5 +87,31 @@ export function useFileLoader() {
     }
   }, [state.fileStore, dispatch])
 
-  return { loadDirectory, loadFromFiles, loadFromHandle, loadSession, loadAllProjectSessions }
+  /** Try API first (dev server), fall back to directory picker */
+  const switchDirectory = useCallback(async () => {
+    dispatch({ type: 'RESET' })
+    dispatch({ type: 'LOAD_START' })
+    try {
+      const apiStore = await tryAutoLoad()
+      if (apiStore) {
+        const projects = await apiStore.scanProjects()
+        dispatch({ type: 'LOAD_PROJECTS', projects, fileStore: apiStore })
+        return
+      }
+    } catch { /* API not available, fall through */ }
+    // No API — open directory picker
+    try {
+      const store = await openDirectoryPicker()
+      const projects = await store.scanProjects()
+      dispatch({ type: 'LOAD_PROJECTS', projects, fileStore: store })
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        dispatch({ type: 'SET_ERROR', error: '' })
+        return
+      }
+      dispatch({ type: 'SET_ERROR', error: (err as Error).message })
+    }
+  }, [dispatch])
+
+  return { loadDirectory, loadFromFiles, loadFromHandle, loadSession, loadAllProjectSessions, switchDirectory }
 }

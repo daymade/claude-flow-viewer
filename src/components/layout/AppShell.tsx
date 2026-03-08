@@ -22,7 +22,7 @@ const SIDEBAR_DEFAULT = 280
 
 export function AppShell() {
   const { state, dispatch } = useAppState()
-  const { loadSession, loadDirectory, loadAllProjectSessions } = useFileLoader()
+  const { loadSession, switchDirectory, loadAllProjectSessions } = useFileLoader()
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT)
   const dragging = useRef(false)
 
@@ -104,7 +104,7 @@ export function AppShell() {
             </div>
             <h1 className="text-[13px] font-bold text-slate-900 tracking-tight">Decision Flow</h1>
             <button
-              onClick={() => { dispatch({ type: 'RESET' }); loadDirectory() }}
+              onClick={switchDirectory}
               className="ml-auto text-[10px] text-slate-400 hover:text-violet-600 cursor-pointer whitespace-nowrap font-medium transition-colors"
             >
               Switch
