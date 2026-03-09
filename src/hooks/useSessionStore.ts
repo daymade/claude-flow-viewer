@@ -52,6 +52,19 @@ export function reducer(state: AppState, action: Action): AppState {
         activeSessionId: action.sessionId,
         activeProjectEncoded: action.projectEncoded,
         activeSessionData: action.data,
+        // Enrich session markers from full parse (forks require tree analysis)
+        projects: state.projects.map(p =>
+          p.encodedName === action.projectEncoded
+            ? {
+                ...p,
+                sessions: p.sessions.map(s =>
+                  s.id === action.sessionId
+                    ? { ...s, markers: action.data.markers }
+                    : s
+                ),
+              }
+            : p
+        ),
       }
     case 'SET_ERROR':
       return { ...state, loading: false, error: action.error }

@@ -82,10 +82,10 @@ export default function App() {
   return (
     <AppContext.Provider value={{ state, dispatch }}>
       {state.loading && state.projects.length === 0 ? (
-        <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-violet-50/40 flex items-center justify-center">
+        <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-amber-50/40 flex items-center justify-center">
           <div className="flex flex-col items-center gap-3">
-            <div className="w-8 h-8 border-2 border-violet-300 border-t-violet-600 rounded-full animate-spin" />
-            <span className="text-violet-600 text-sm font-medium">Loading sessions from ~/.claude ...</span>
+            <div className="w-8 h-8 border-2 border-amber-300 border-t-amber-600 rounded-full animate-spin" />
+            <span className="text-amber-600 text-sm font-medium">Loading sessions from ~/.claude ...</span>
           </div>
         </div>
       ) : showWelcome ? (

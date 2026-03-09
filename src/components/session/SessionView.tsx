@@ -27,10 +27,20 @@ interface SessionViewProps {
 export function SessionView({ data, filter, searchQuery }: SessionViewProps) {
   const contentRef = useRef<HTMLDivElement>(null)
   const [activePromptNums, setActivePromptNums] = useState<Set<number>>(new Set())
+  const [scrollFraction, setScrollFraction] = useState(0)
+  const [viewportFraction, setViewportFraction] = useState(1)
+  const [promptPositions, setPromptPositions] = useState<Map<number, number>>(new Map())
+  const rafRef = useRef(0)
 
   const scrollToPrompt = useCallback((num: number) => {
     const el = contentRef.current?.querySelector(`[data-prompt="${num}"]`)
     el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
+
+  const scrollToFraction = useCallback((fraction: number) => {
+    const el = contentRef.current
+    if (!el || el.scrollHeight <= 0) return
+    el.scrollTop = Math.max(0, fraction * el.scrollHeight)
   }, [])
 
   const rendered = useMemo(
@@ -42,6 +52,67 @@ export function SessionView({ data, filter, searchQuery }: SessionViewProps) {
     () => extractTimelineEvents(data.messages),
     [data.messages],
   )
+
+  // Track scroll position for timeline minimap
+  useEffect(() => {
+    const el = contentRef.current
+    if (!el) return
+
+    const update = () => {
+      const sh = el.scrollHeight
+      if (sh <= 0) return
+      setScrollFraction(el.scrollTop / sh)
+      setViewportFraction(el.clientHeight / sh)
+    }
+
+    const onScroll = () => {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = requestAnimationFrame(update)
+    }
+
+    el.addEventListener('scroll', onScroll, { passive: true })
+    update()
+
+    const resizeObs = new ResizeObserver(update)
+    resizeObs.observe(el)
+
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      cancelAnimationFrame(rafRef.current)
+      resizeObs.disconnect()
+    }
+  }, [])
+
+  // Measure prompt element positions for timeline mapping
+  useEffect(() => {
+    const el = contentRef.current
+    if (!el) return
+
+    const measure = () => {
+      const sh = el.scrollHeight
+      if (sh <= 0) return
+      const containerRect = el.getBoundingClientRect()
+      const map = new Map<number, number>()
+      el.querySelectorAll('[data-prompt]').forEach(node => {
+        const htmlEl = node as HTMLElement
+        const num = Number(htmlEl.dataset.prompt)
+        if (isNaN(num)) return
+        const rect = htmlEl.getBoundingClientRect()
+        const offsetInContent = rect.top - containerRect.top + el.scrollTop
+        map.set(num, offsetInContent / sh)
+      })
+      setPromptPositions(map)
+    }
+
+    const raf = requestAnimationFrame(measure)
+    const resizeObs = new ResizeObserver(() => requestAnimationFrame(measure))
+    resizeObs.observe(el)
+
+    return () => {
+      cancelAnimationFrame(raf)
+      resizeObs.disconnect()
+    }
+  }, [rendered])
 
   // IntersectionObserver to track which prompts are visible
   useEffect(() => {
@@ -84,8 +155,12 @@ export function SessionView({ data, filter, searchQuery }: SessionViewProps) {
         <Timeline
           events={timelineEvents}
           onJump={scrollToPrompt}
+          onScrollTo={scrollToFraction}
           activeNums={activePromptNums}
           prompts={data.prompts}
+          scrollFraction={scrollFraction}
+          viewportFraction={viewportFraction}
+          promptPositions={promptPositions}
         />
       )}
     </div>
@@ -178,7 +253,7 @@ function PromptIndex({ prompts, onJump }: { prompts: PromptIndexEntry[]; onJump:
         onMouseDown={onDragStart}
         className="absolute bottom-0 left-0 right-0 h-2 cursor-row-resize group flex items-center justify-center"
       >
-        <div className="w-8 h-0.5 rounded-full bg-gray-300 group-hover:bg-violet-400 transition-colors" />
+        <div className="w-8 h-0.5 rounded-full bg-gray-300 group-hover:bg-amber-400 transition-colors" />
       </div>
     </div>
   )

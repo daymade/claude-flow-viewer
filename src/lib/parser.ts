@@ -676,60 +676,16 @@ export function parseSessionContent(content: string): SessionData {
     }
   }
 
-  return { messages, prompts, heatmap: computeHeatmap(messages) }
-}
-
-export function scanSessionMetadata(content: string, sessionId: string, fileSize?: number): SessionMeta | null {
-  const lines = content.split('\n')
-  let startTime: Date | null = null
-  let promptCount = 0
-  let toolCount = 0
-  let recordCount = 0
-  let firstPromptPreview = ''
-
-  for (const line of lines) {
-    if (!line.trim()) continue
-    let data: Record<string, unknown>
-    try {
-      data = JSON.parse(line)
-      recordCount++
-    } catch {
-      continue
-    }
-
-    if (!startTime) {
-      startTime = extractTimestamp(data)
-    }
-
-    const cls = classifyUserMessage(data)
-    if (cls?.type === 'real-prompt') {
-      promptCount++
-      if (promptCount === 1) {
-        firstPromptPreview = getUserText(data).slice(0, 100).replace(/\n/g, ' ')
-      }
-    }
-
-    if (data.type === 'assistant') {
-      const message = data.message as Record<string, unknown> | undefined
-      const contentArr = message?.content
-      if (Array.isArray(contentArr)) {
-        toolCount += contentArr.filter((c) => typeof c === 'object' && c !== null && (c as Record<string, unknown>).type === 'tool_use').length
-      }
-    }
+  // Count markers from parsed messages
+  const markers = { compacts: 0, plans: 0, clears: 0, forks: 0 }
+  for (const msg of messages) {
+    if (msg.kind === 'compact-boundary') markers.compacts++
+    else if (msg.kind === 'plan-start') markers.plans++
+    else if (msg.kind === 'clear-divider') markers.clears++
+    else if (msg.kind === 'fork-indicator' && msg.reason === 'user-decision') markers.forks++
   }
 
-  if (!startTime || promptCount === 0) return null
-
-  return {
-    id: sessionId,
-    startTime: startTime.toISOString(),
-    startDisplay: formatDateTime(startTime),
-    promptCount,
-    toolCount,
-    firstPromptPreview,
-    fileSize: fileSize ?? content.length,
-    recordCount,
-  }
+  return { messages, prompts, heatmap: computeHeatmap(messages), markers }
 }
 
 /**
@@ -772,3 +728,4 @@ export function quickScanMetadata(head: string, sessionId: string, fileSize: num
     recordCount: 0,
   }
 }
+

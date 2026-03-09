@@ -1,11 +1,20 @@
 import { useState, useMemo, useEffect } from 'react'
-import type { ProjectMeta } from '../../types/session'
+import type { ProjectMeta, SessionMarkers } from '../../types/session'
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
 }
+
+type MarkerFilterKey = keyof SessionMarkers
+
+const MARKER_FILTERS: { key: MarkerFilterKey; label: string; color: string; activeColor: string }[] = [
+  { key: 'forks', label: 'FRK', color: 'text-amber-500', activeColor: 'bg-amber-100 text-amber-700' },
+  { key: 'compacts', label: 'CMP', color: 'text-teal-500', activeColor: 'bg-teal-100 text-teal-700' },
+  { key: 'clears', label: 'CLR', color: 'text-gray-500', activeColor: 'bg-gray-200 text-gray-700' },
+  { key: 'plans', label: 'PLN', color: 'text-indigo-500', activeColor: 'bg-indigo-100 text-indigo-700' },
+]
 
 interface SidebarProps {
   projects: ProjectMeta[]
@@ -19,6 +28,7 @@ interface SidebarProps {
 
 export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searchQuery, activeHeatmap, onSelectSession, onLoadAllSessions }: SidebarProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set<string>())
+  const [markerFilter, setMarkerFilter] = useState<MarkerFilterKey | null>(null)
 
   // Auto-expand the project containing the active session, or first project on initial load
   useEffect(() => {
@@ -35,20 +45,38 @@ export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searc
   }, [activeProjectEncoded, projects])
 
   const filteredProjects = useMemo(() => {
-    if (!searchQuery) return projects
-    const q = searchQuery.toLowerCase()
-    return projects
-      .map((p) => ({
-        ...p,
-        sessions: p.sessions.filter(
-          (s) =>
-            s.firstPromptPreview.toLowerCase().includes(q) ||
-            s.startDisplay.includes(q) ||
-            s.id.toLowerCase().includes(q)
-        ),
-      }))
-      .filter((p) => p.sessions.length > 0)
-  }, [projects, searchQuery])
+    let result = projects
+
+    // Text search filter
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase()
+      result = result
+        .map((p) => ({
+          ...p,
+          sessions: p.sessions.filter(
+            (s) =>
+              s.firstPromptPreview.toLowerCase().includes(q) ||
+              s.startDisplay.includes(q) ||
+              s.id.toLowerCase().includes(q)
+          ),
+        }))
+        .filter((p) => p.sessions.length > 0)
+    }
+
+    // Marker filter
+    if (markerFilter) {
+      result = result
+        .map((p) => ({
+          ...p,
+          sessions: p.sessions.filter(
+            (s) => s.markers && s.markers[markerFilter] > 0
+          ),
+        }))
+        .filter((p) => p.sessions.length > 0)
+    }
+
+    return result
+  }, [projects, searchQuery, markerFilter])
 
   const toggleProject = (encodedName: string) => {
     setExpanded((prev) => {
@@ -59,10 +87,40 @@ export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searc
     })
   }
 
+  const toggleMarkerFilter = (key: MarkerFilterKey) => {
+    setMarkerFilter(prev => prev === key ? null : key)
+  }
+
   return (
     <div className="flex flex-col">
+      {/* Marker filter chips */}
+      <div className="flex items-center gap-1 px-3 py-1.5 border-b border-slate-100">
+        <span className="text-[10px] text-slate-400 mr-0.5 shrink-0">Filter:</span>
+        {MARKER_FILTERS.map(({ key, label, activeColor }) => (
+          <button
+            key={key}
+            onClick={() => toggleMarkerFilter(key)}
+            className={`px-1.5 py-0.5 rounded text-[9px] font-bold cursor-pointer transition-colors ${
+              markerFilter === key
+                ? activeColor
+                : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+        {markerFilter && (
+          <button
+            onClick={() => setMarkerFilter(null)}
+            className="ml-auto text-[9px] text-slate-400 hover:text-slate-600 cursor-pointer"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
       {filteredProjects.map((project) => {
-        const isExpanded = expanded.has(project.encodedName) || Boolean(searchQuery)
+        const isExpanded = expanded.has(project.encodedName) || Boolean(searchQuery) || Boolean(markerFilter)
         const isActiveProject = project.encodedName === activeProjectEncoded
         const sessionCount = project.sessions.length
         const totalCount = project.totalSessionCount
@@ -73,7 +131,7 @@ export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searc
             {/* Project header */}
             <div
               className={`px-3 py-2.5 text-xs font-semibold cursor-pointer flex items-center gap-2 transition-colors group ${
-                isActiveProject ? 'bg-violet-50/80' : 'bg-slate-50/80 hover:bg-slate-100'
+                isActiveProject ? 'bg-amber-50/80' : 'bg-slate-50/80 hover:bg-slate-100'
               }`}
               onClick={() => toggleProject(project.encodedName)}
               title={`${project.decodedName}\n${sessionCount}/${totalCount} sessions loaded`}
@@ -86,7 +144,7 @@ export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searc
               </svg>
               <span className="truncate text-slate-700 flex-1 min-w-0">{project.shortName}</span>
               <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold shrink-0 tabular-nums ${
-                isActiveProject ? 'bg-violet-200 text-violet-700' : 'bg-slate-200 text-slate-500'
+                isActiveProject ? 'bg-amber-200 text-amber-700' : 'bg-slate-200 text-slate-500'
               }`}>
                 {isTruncated ? `${sessionCount}/${totalCount}` : sessionCount}
               </span>
@@ -97,12 +155,13 @@ export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searc
               <div className="pb-1">
                 {project.sessions.map((session) => {
                   const isActive = session.id === activeSessionId
+                  const m = session.markers
                   return (
                     <div
                       key={session.id}
                       className={`mx-1.5 mb-0.5 px-2.5 py-2 cursor-pointer rounded-lg border-l-[3px] transition-all duration-100 ${
                         isActive
-                          ? 'bg-violet-50 border-l-violet-600 shadow-sm shadow-violet-100'
+                          ? 'bg-amber-50 border-l-amber-600 shadow-sm shadow-amber-100'
                           : 'border-l-transparent hover:bg-slate-50'
                       }`}
                       onClick={() => onSelectSession(project.encodedName, session.id)}
@@ -129,6 +188,31 @@ export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searc
                         )}
                         <span className="ml-auto text-slate-300">{session.id.slice(0, 8)}</span>
                       </div>
+                      {/* Marker badges */}
+                      {m && (m.compacts > 0 || m.plans > 0 || m.clears > 0 || m.forks > 0) && (
+                        <div className="flex items-center gap-1.5 mt-1">
+                          {m.forks > 0 && (
+                            <span className="text-[9px] font-bold px-1 py-px rounded bg-amber-50 text-amber-600">
+                              {m.forks} FRK
+                            </span>
+                          )}
+                          {m.compacts > 0 && (
+                            <span className="text-[9px] font-bold px-1 py-px rounded bg-teal-50 text-teal-600">
+                              {m.compacts} CMP
+                            </span>
+                          )}
+                          {m.clears > 0 && (
+                            <span className="text-[9px] font-bold px-1 py-px rounded bg-gray-100 text-gray-500">
+                              {m.clears} CLR
+                            </span>
+                          )}
+                          {m.plans > 0 && (
+                            <span className="text-[9px] font-bold px-1 py-px rounded bg-indigo-50 text-indigo-500">
+                              {m.plans} PLN
+                            </span>
+                          )}
+                        </div>
+                      )}
                       {isActive && activeHeatmap && activeHeatmap.length > 0 && (
                         <HeatmapBar values={activeHeatmap} />
                       )}
@@ -138,7 +222,7 @@ export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searc
                 {isTruncated && (
                   <button
                     onClick={(e) => { e.stopPropagation(); onLoadAllSessions(project.encodedName) }}
-                    className="mx-1.5 mb-0.5 px-2.5 py-2 w-[calc(100%-12px)] text-center text-[11px] text-violet-600 hover:bg-violet-50 rounded-lg cursor-pointer transition-colors font-medium"
+                    className="mx-1.5 mb-0.5 px-2.5 py-2 w-[calc(100%-12px)] text-center text-[11px] text-amber-600 hover:bg-amber-50 rounded-lg cursor-pointer transition-colors font-medium"
                   >
                     Load all {totalCount} sessions (+{totalCount - sessionCount} more)
                   </button>

@@ -5,15 +5,15 @@ import { Sidebar } from '../sidebar/Sidebar'
 import { SessionView } from '../session/SessionView'
 import type { FilterState } from '../../types/session'
 
-const FILTER_LABELS: { key: keyof FilterState; label: string; color: string }[] = [
-  { key: 'thinking', label: 'Thinking', color: 'text-amber-700' },
-  { key: 'toolCalls', label: 'Tool Calls', color: 'text-violet-700' },
-  { key: 'toolResults', label: 'Results', color: 'text-emerald-700' },
-  { key: 'aiText', label: 'AI Text', color: 'text-slate-600' },
-  { key: 'team', label: 'Team', color: 'text-blue-700' },
-  { key: 'branches', label: 'Branches', color: 'text-amber-700' },
-  { key: 'markers', label: 'Markers', color: 'text-indigo-700' },
-  { key: 'timeline', label: 'Timeline', color: 'text-teal-700' },
+const FILTER_LABELS: { key: keyof FilterState; label: string }[] = [
+  { key: 'thinking', label: 'Thinking' },
+  { key: 'toolCalls', label: 'Tool Calls' },
+  { key: 'toolResults', label: 'Results' },
+  { key: 'aiText', label: 'AI Text' },
+  { key: 'team', label: 'Team' },
+  { key: 'branches', label: 'Branches' },
+  { key: 'markers', label: 'Markers' },
+  { key: 'timeline', label: 'Timeline' },
 ]
 
 const SIDEBAR_MIN = 200
@@ -97,7 +97,7 @@ export function AppShell() {
         {/* Sidebar Header */}
         <div className="px-3 py-3 border-b border-slate-100 shrink-0">
           <div className="flex items-center gap-2 mb-2.5">
-            <div className="w-6 h-6 rounded-md bg-gradient-to-br from-violet-500 to-violet-600 flex items-center justify-center shadow-sm shadow-violet-200">
+            <div className="w-6 h-6 rounded-md bg-gradient-to-br from-amber-600 to-amber-700 flex items-center justify-center shadow-sm shadow-amber-200/60">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
               </svg>
@@ -105,7 +105,7 @@ export function AppShell() {
             <h1 className="text-[13px] font-bold text-slate-900 tracking-tight font-sans">Decision Flow</h1>
             <button
               onClick={switchDirectory}
-              className="ml-auto text-[10px] text-slate-400 hover:text-violet-600 cursor-pointer whitespace-nowrap font-medium transition-colors"
+              className="ml-auto text-[10px] text-slate-400 hover:text-amber-700 cursor-pointer whitespace-nowrap font-medium transition-colors"
             >
               Switch
             </button>
@@ -122,7 +122,7 @@ export function AppShell() {
               placeholder="Search... (Cmd+K)"
               value={state.searchQuery}
               onChange={(e) => dispatch({ type: 'SET_SEARCH', query: e.target.value })}
-              className="w-full py-1.5 pl-7 pr-2 border border-slate-200 rounded-md text-xs font-sans outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/10 bg-slate-50 placeholder:text-slate-400 transition-all"
+              className="w-full py-1.5 pl-7 pr-2 border border-slate-200 rounded-md text-xs font-sans outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-500/10 bg-slate-50 placeholder:text-slate-400 transition-all"
             />
           </div>
 
@@ -155,7 +155,7 @@ export function AppShell() {
         {/* Drag handle */}
         <div
           onMouseDown={onDragStart}
-          className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-violet-400/30 active:bg-violet-400/50 transition-colors z-10"
+          className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-amber-400/30 active:bg-amber-400/50 transition-colors z-10"
         />
       </div>
 
@@ -183,16 +183,18 @@ export function AppShell() {
           )}
 
           {/* Filter toggles */}
-          <div className="flex items-center gap-2.5 ml-auto text-[11px] text-slate-500">
-            {FILTER_LABELS.map(({ key, label, color }) => (
-              <label key={key} className="cursor-pointer flex items-center gap-1 hover:text-slate-700 transition-colors select-none">
+          <div className="flex items-center gap-1 ml-auto text-[11px]">
+            {FILTER_LABELS.map(({ key, label }) => (
+              <label key={key} className={`cursor-pointer flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors select-none ${
+                state.filter[key] ? 'bg-stone-100 text-stone-700' : 'text-stone-400 hover:text-stone-500 hover:bg-stone-50'
+              }`}>
                 <input
                   type="checkbox"
                   checked={state.filter[key]}
                   onChange={() => dispatch({ type: 'TOGGLE_FILTER', key })}
-                  className="accent-violet-600 m-0"
+                  className="accent-stone-600 w-3 h-3"
                 />
-                <span className={state.filter[key] ? color : ''}>{label}</span>
+                <span>{label}</span>
               </label>
             ))}
           </div>
@@ -202,7 +204,7 @@ export function AppShell() {
         {state.loading ? (
           <div className="flex-1 flex items-center justify-center text-slate-400 text-sm">
             <div className="flex flex-col items-center gap-2">
-              <div className="w-6 h-6 border-2 border-violet-300 border-t-violet-600 rounded-full animate-spin" />
+              <div className="w-6 h-6 border-2 border-amber-200 border-t-amber-600 rounded-full animate-spin" />
               <span>Loading session...</span>
             </div>
           </div>

@@ -52,18 +52,18 @@ export function WelcomeScreen() {
 
   return (
     <div
-      className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-violet-50/40 flex items-center justify-center p-4"
+      className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-amber-50/40 flex items-center justify-center p-4"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
       <div
         className={`max-w-lg w-full bg-white rounded-2xl shadow-xl shadow-slate-200/60 border border-slate-100 p-10 text-center transition-all duration-300 ${
-          dragging ? 'ring-2 ring-violet-400 ring-offset-4 scale-[1.02] shadow-violet-100' : ''
+          dragging ? 'ring-2 ring-amber-400 ring-offset-4 scale-[1.02] shadow-amber-100' : ''
         }`}
       >
         {/* Logo mark */}
-        <div className="mx-auto w-14 h-14 rounded-2xl bg-gradient-to-br from-violet-500 to-violet-600 flex items-center justify-center mb-5 shadow-lg shadow-violet-200">
+        <div className="mx-auto w-14 h-14 rounded-2xl bg-gradient-to-br from-amber-500 to-amber-600 flex items-center justify-center mb-5 shadow-lg shadow-amber-200">
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
           </svg>
@@ -75,7 +75,7 @@ export function WelcomeScreen() {
         </p>
 
         {state.loading && (
-          <div className="text-violet-600 text-sm mb-4 animate-pulse font-medium">Loading sessions...</div>
+          <div className="text-amber-600 text-sm mb-4 animate-pulse font-medium">Loading sessions...</div>
         )}
 
         {state.error && (
@@ -83,7 +83,7 @@ export function WelcomeScreen() {
         )}
 
         {dragging ? (
-          <div className="py-10 text-violet-600 font-semibold text-lg border-2 border-dashed border-violet-300 rounded-xl bg-violet-50/50">
+          <div className="py-10 text-amber-600 font-semibold text-lg border-2 border-dashed border-amber-300 rounded-xl bg-amber-50/50">
             Drop folder here
           </div>
         ) : (
@@ -91,7 +91,7 @@ export function WelcomeScreen() {
             <button
               onClick={switchDirectory}
               disabled={state.loading}
-              className="w-full py-3.5 px-5 bg-violet-600 text-white rounded-xl font-semibold hover:bg-violet-700 active:bg-violet-800 disabled:opacity-50 transition-all duration-150 mb-3 cursor-pointer shadow-md shadow-violet-200 hover:shadow-lg hover:shadow-violet-200"
+              className="w-full py-3.5 px-5 bg-amber-600 text-white rounded-xl font-semibold hover:bg-amber-700 active:bg-amber-800 disabled:opacity-50 transition-all duration-150 mb-3 cursor-pointer shadow-md shadow-amber-200 hover:shadow-lg hover:shadow-amber-200"
             >
               Load Sessions
             </button>
@@ -115,7 +115,7 @@ export function WelcomeScreen() {
 
             <div className="mt-8 pt-5 border-t border-slate-100">
               <p className="text-slate-400 text-xs leading-relaxed">
-                Select your home directory or <code className="text-violet-500 bg-violet-50 px-1.5 py-0.5 rounded text-[11px] font-mono">.claude</code> folder.
+                Select your home directory or <code className="text-amber-500 bg-amber-50 px-1.5 py-0.5 rounded text-[11px] font-mono">.claude</code> folder.
                 Sessions are discovered automatically.
               </p>
               <p className="text-slate-300 text-xs mt-2">

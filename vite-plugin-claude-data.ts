@@ -118,6 +118,7 @@ interface QuickMeta {
   firstPromptPreview: string
   fileSize: number
   recordCount: number
+  markers?: { compacts: number; plans: number; clears: number; forks: number }
 }
 
 async function scanAllProjects(projectsDir: string) {
@@ -177,59 +178,64 @@ async function scanAllProjects(projectsDir: string) {
 }
 
 async function quickScanFile(filePath: string, sessionId: string, mtime: Date, fileSize: number): Promise<QuickMeta | null> {
-  // Read only the first PREVIEW_BYTES bytes
-  const fd = await fs.promises.open(filePath, 'r')
-  try {
-    const buf = Buffer.alloc(PREVIEW_BYTES)
-    const { bytesRead } = await fd.read(buf, 0, PREVIEW_BYTES, 0)
-    const head = buf.toString('utf-8', 0, bytesRead)
+  // Read full file for both metadata extraction and marker counting
+  const content = await fs.promises.readFile(filePath, 'utf-8')
+  const head = content.slice(0, PREVIEW_BYTES)
 
-    let firstPromptPreview = ''
-    let startTime: string | null = null
+  let firstPromptPreview = ''
+  let startTime: string | null = null
 
-    for (const line of head.split('\n')) {
-      if (!line.trim()) continue
-      let data: Record<string, unknown>
-      try { data = JSON.parse(line) } catch { continue }
+  for (const line of head.split('\n')) {
+    if (!line.trim()) continue
+    let data: Record<string, unknown>
+    try { data = JSON.parse(line) } catch { continue }
 
-      // Extract timestamp from first parseable line
-      if (!startTime) {
-        const ts = data.timestamp
-          || (data.snapshot as Record<string, unknown> | undefined)?.timestamp
-          || (data.message as Record<string, unknown> | undefined)?.timestamp
-        if (ts) startTime = typeof ts === 'string' ? ts : new Date(ts as number).toISOString()
-      }
-
-      // Find first real user prompt
-      if (!firstPromptPreview && data.type === 'user' && !data.isMeta) {
-        const preview = extractUserPreview(data)
-        if (preview) {
-          firstPromptPreview = preview
-          break // Got what we need
-        }
-      }
+    // Extract timestamp from first parseable line
+    if (!startTime) {
+      const ts = data.timestamp
+        || (data.snapshot as Record<string, unknown> | undefined)?.timestamp
+        || (data.message as Record<string, unknown> | undefined)?.timestamp
+      if (ts) startTime = typeof ts === 'string' ? ts : new Date(ts as number).toISOString()
     }
 
-    // Use mtime as fallback for startTime
-    if (!startTime) startTime = mtime.toISOString()
-    if (!firstPromptPreview) return null
-
-    const d = new Date(startTime)
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const startDisplay = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-
-    return {
-      id: sessionId,
-      startTime,
-      startDisplay,
-      promptCount: 0, // computed on full load
-      toolCount: 0,
-      firstPromptPreview,
-      fileSize,
-      recordCount: 0, // computed on full load
+    // Find first real user prompt
+    if (!firstPromptPreview && data.type === 'user' && !data.isMeta) {
+      const preview = extractUserPreview(data)
+      if (preview) {
+        firstPromptPreview = preview
+        break // Got what we need
+      }
     }
-  } finally {
-    await fd.close()
+  }
+
+  // Use mtime as fallback for startTime
+  if (!startTime) startTime = mtime.toISOString()
+  if (!firstPromptPreview) return null
+
+  const d = new Date(startTime)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const startDisplay = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+
+  // Fast regex marker counting on full content
+  const compactMatches = content.match(/"subtype"\s*:\s*"compact_boundary"/g)
+  const planMatches = content.match(/"EnterPlanMode"/g)
+  const clearMatches = content.match(/<command-name>\/clear<\/command-name>/g)
+
+  return {
+    id: sessionId,
+    startTime,
+    startDisplay,
+    promptCount: 0, // computed on full load
+    toolCount: 0,
+    firstPromptPreview,
+    fileSize,
+    recordCount: 0, // computed on full load
+    markers: {
+      compacts: compactMatches?.length ?? 0,
+      plans: planMatches?.length ?? 0,
+      clears: clearMatches?.length ?? 0,
+      forks: 0, // requires tree analysis
+    },
   }
 }
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Claude Flow Viewer — a browser-based viewer for Claude Code session JSONL files (`~/.claude/projects/**/*.jsonl`). Renders conversation trees with forks, compactions, /clear boundaries, plan mode transitions, team messages, and timeline visualization.
+Decision Flow Viewer — a browser-based viewer for Claude Code session JSONL files (`~/.claude/projects/**/*.jsonl`). Renders conversation trees with forks, compactions, /clear boundaries, plan mode transitions, team messages, and timeline visualization.
 
 ## Commands
 
@@ -26,38 +26,47 @@ npx vitest run src/lib/__tests__/parser.test.ts  # Run single test file
     ↓
 FileStore (3 implementations)
     ↓
-parser.ts: parseSessionContent() → SessionData { messages, prompts, heatmap }
+parser.ts: parseSessionContent() → SessionData { messages, prompts, heatmap, markers }
     ↓
 useSessionStore (useReducer) → AppContext
     ↓
-AppShell → Sidebar + SessionView + Timeline
+AppShell → Sidebar (with marker filter) + SessionView + Timeline
 ```
 
 ### FileStore Abstraction (`src/lib/fs-access.ts`)
 
 Three implementations behind one `FileStore` interface, tried in order:
-1. **APIFileStore** — Dev mode: Vite server plugin (`vite-plugin-claude-data.ts`) serves `/api/scan`, `/api/session/:project/:session`, `/api/tool-result/...` endpoints reading `~/.claude` directly via Node fs
+1. **APIFileStore** — Dev mode: Vite server plugin (`vite-plugin-claude-data.ts`) serves endpoints reading `~/.claude` directly via Node fs
 2. **FSAccessStore** — Production: File System Access API (`showDirectoryPicker`), user picks `.claude` directory
 3. **InputFallbackStore** — Drag-and-drop file input fallback
 
-**Security**: The API endpoints validate paths to prevent directory traversal attacks. All paths are normalized with `path.resolve()` and validated with `path.relative()` before file access.
+**API Endpoints** (dev mode only, served by `vite-plugin-claude-data.ts`):
+- `/api/scan` — Scan all projects, return `ProjectMeta[]` with session markers
+- `/api/scan-project/:projectEncoded` — Scan all sessions for one project (used by "Load all" button)
+- `/api/session/:project/:session` — Read full JSONL content for parsing
+- `/api/tool-result/:project/:session/:path` — Read tool result overflow files
+
+**Scanning strategy differs by store**:
+- **APIFileStore (dev)**: Vite plugin reads **full file** per session — extracts metadata from first 4KB, counts markers via regex on full content. Trade-off: slower initial scan (~5-10s for 200 sessions), but all marker badges visible immediately.
+- **FSAccessStore / InputFallbackStore (production)**: Reads only **first 4KB** per session via `quickScanMetadata()` in parser.ts. Markers are only populated when a session is fully loaded (via `parseSessionContent()`).
 
 ### JSONL Parsing Pipeline (`src/lib/parser.ts`)
 
 `parseSessionContent(content)` is the core entry point:
 
-1. **Parse all lines into records** - Each line is a JSON object representing a message, tool call, or system event
+1. **Parse all lines into records**
 2. **Pre-scan for compact boundaries** - Index `compact_boundary` and `isCompactSummary` records by uuid
-3. **Analyze conversation tree** (`analyzeConversationTree()` in tree-parser.ts):
-   - Build parent/child graph from uuid/parentUuid fields
-   - Trace active path from tip of each disconnected tree (multiple trees arise from `/clear` commands)
-   - Include leaf tool_result siblings in active path (fixes false fork detection for parallel tool calls)
-   - Collect abandoned fork branches via BFS subtree traversal
-   - Detect plan mode transitions (EnterPlanMode/ExitPlanMode tool calls)
-4. **Reorder records for display** - Pair each tool_use with its tool_result immediately following (matches CLI behavior)
+3. **Analyze conversation tree** (`analyzeConversationTree()` in tree-parser.ts)
+4. **Reorder records for display** - Pair each tool_use with its tool_result (matches CLI behavior)
 5. **Iterate records and build messages** - Emit `SessionMessage[]` for active path only, inject fork-indicators, plan markers, clear dividers, compact boundaries
+6. **Count markers** - Tally compacts, plans, clears, forks from the final message list
 
-**Critical**: The reordering step (Step 4) ensures tool calls display with their results in chronological order, not JSONL file order. This matches the CLI's user experience.
+**Exports from `parser.ts`**:
+- `parseSessionContent(content)` → `SessionData` (full parse with tree analysis)
+- `quickScanMetadata(head, sessionId, fileSize)` → `SessionMeta | null` (4KB lightweight scan, used by FSAccessStore)
+- `decodeProjectName()`, `extractShortName()`, `disambiguateShortNames()` — project name utilities (used by fs-access.ts)
+
+**Note**: The Vite plugin (`vite-plugin-claude-data.ts`) has its own `quickScanFile()` and helper functions that duplicate some logic from parser.ts. This is intentional — the plugin runs server-side and is self-contained. The SSOT for parsing logic is `parser.ts`; the plugin only does lightweight metadata extraction.
 
 ### Conversation Tree (`src/lib/tree-parser.ts`)
 
@@ -70,112 +79,108 @@ Handles Claude Code's tree-structured conversations:
 
 **Fork Reason Classification**:
 - `'user-decision'`: User actively rewound the conversation or interrupted Claude
-- `'tool-error'`: Automatic retry after tool failure or internal strategy change (hidden from display to match CLI behavior)
+- `'tool-error'`: Automatic retry after tool failure (hidden from display to match CLI behavior)
+
+### Session Markers (`SessionMarkers` in `src/types/session.ts`)
+
+Counts of special events in a session: `{ compacts, plans, clears, forks }`.
+
+**Two-tier collection**:
+1. **Scan-time** (API mode): Vite plugin counts `compacts`, `plans`, `clears` via regex on raw file content. `forks` is always 0 (requires tree analysis).
+2. **Parse-time**: `parseSessionContent()` computes exact counts from parsed messages, including `forks`. The `LOAD_SESSION` reducer writes these back to `SessionMeta` in the project list.
+
+### Shared UI Components (`src/components/shared/`)
+
+**HoverCard** (`HoverCard.tsx`): Reusable hover popover used by PromptIndex and Timeline.
+- `useHoverCard<T>()` hook — debounced show (300ms) / hide (150ms), tracks `hoveredId` + `anchorRect`
+- `HoverCard` component — rendered via `createPortal(document.body)` with `position: fixed` to escape `overflow` clipping
+- `placement: 'below' | 'left'` — PromptIndex uses `below`, Timeline uses `left`
+- Dynamic width: `<80 chars → 240px`, `<200 chars → 360px`, `else → 480px`, `max-height: 400px` with scroll
+- Renders markdown via `react-markdown` + `remark-gfm`
+
+### Supporting Modules
+
+- `src/lib/decision-detector.ts` — Classifies user prompt decisions: `'interrupt'` (contains `[Request interrupted by user]`), `'correction'` (promptNum > 1 + keywords like "no", "wrong", "stop", "instead"), or `'none'`
+- `src/lib/heatmap.ts` — Per-prompt intensity scoring (0–1) for sidebar heatmap. Weights: tool calls +1, errors +3, forks +5, thinking +length/1000, compact +2
+- `src/lib/timeline.ts` — Extracts `TimelineEvent[]` from messages, computes time gaps, formats tokens/durations
+
+### Timeline Minimap (`src/components/session/Timeline.tsx`)
+
+The timeline is a **fixed-height minimap** that fills the viewport height and never scrolls itself. All events are absolutely positioned by their actual DOM location in the content area.
+
+**Data flow**: `SessionView` measures, `Timeline` renders.
+
+| Prop | Source | Description |
+|------|--------|-------------|
+| `scrollFraction` | `scrollTop / scrollHeight` | Where the viewport top is (0–1) |
+| `viewportFraction` | `clientHeight / scrollHeight` | How much content is visible (0–1) |
+| `promptPositions` | `getBoundingClientRect()` per `[data-prompt]` | Each prompt's position ratio (0–1) |
+| `onScrollTo(fraction)` | Sets `el.scrollTop = fraction * scrollHeight` | Direct scroll control |
+| `onJump(promptNum)` | `scrollIntoView({ behavior: 'smooth' })` | Smooth scroll to specific prompt |
+
+**SessionView responsibilities** (scroll tracking):
+1. RAF-throttled scroll listener → `scrollFraction` + `viewportFraction`
+2. `ResizeObserver` on scroll container → re-measure on resize
+3. Prompt position measurement after render (`[data-prompt]` elements via `getBoundingClientRect`)
+4. `IntersectionObserver` → `activePromptNums` (which prompts are currently visible)
+
+**Timeline rendering**:
+- **Coordinate mapping**: `toPercent(fraction)` applies 1.2% edge padding to prevent dot clipping at extremes
+- **Viewport indicator**: Semi-transparent amber band showing currently visible portion. Draggable (mousedown → mousemove) to scroll main content. Click anywhere on track to jump.
+- **Prompt dots**: `position: absolute; top: X%` based on measured DOM position. Active dots show time labels.
+- **Smart time labels**: Active dots + evenly spaced interval (`ceil(promptCount / 12)`) + start/end time anchors
+- **Event marker shapes**: Each non-prompt event type has a distinct shape + 3-letter label:
+  - Compact → diamond + `CMP`
+  - Clear → horizontal line + `CLR`
+  - Fork → hollow circle + `FRK`
+  - Plan start → filled square + `PLN`
+  - Plan end → hollow square + `END`
+- **Position interpolation**: Non-prompt events positioned by linear interpolation between surrounding prompt positions
 
 ### State Management (`src/hooks/useSessionStore.ts`)
 
-Single `useReducer` with `AppContext`. No external state library. Key actions:
-- `LOAD_START` - Begin loading
-- `LOAD_PROJECTS` - Store projects and fileStore
-- `LOAD_SESSION` - Store session data
-- `TOGGLE_FILTER` - Toggle message type visibility
-- `SET_SEARCH` - Update search query
-- `SET_ERROR` - Display error message
-- `RESET` - Clear all state
-
-**Error Handling**: All async operations include proper error handling with user-friendly messages. Errors are logged to console for debugging.
+Single `useReducer` with `AppContext`. Key actions:
+- `LOAD_PROJECTS` — Store projects and fileStore
+- `LOAD_SESSION` — Store session data + **enrich session markers** in project list
+- `LOAD_SESSION_START` — Set loading state
+- `TOGGLE_FILTER` — Toggle message type visibility
+- `SET_SEARCH` — Update search query
+- `EXPAND_PROJECT_SESSIONS` — Replace truncated session list with full list
+- `SET_ERROR` / `RESET` — Error handling and state reset
 
 ### URL Routing
 
-Hash-based: `#/{projectEncoded}/{sessionId}`. No react-router — just `encodeHash`/`decodeHash` helpers in `useFileLoader.ts`.
-
-On initial load, the app tries to load the session from the URL hash. If not found, it falls back to the most recent session.
+Hash-based: `#/{projectEncoded}/{sessionId}`. No react-router — just `encodeHash`/`decodeHash` helpers in `useFileLoader.ts`. On initial load, tries URL hash first, falls back to most recent session.
 
 ### Message Types (`src/types/session.ts`)
 
 Discriminated union `SessionMessage` with `kind`:
-- `user-prompt` - User input with decision marker (none/interrupt/correction)
-- `ai-text` - Claude's text response
-- `ai-thinking` - Claude's thinking process (extended thinking mode)
-- `ai-tool-use` - Tool call with name and input
-- `tool-result` - Tool execution result (success or error)
-- `team-message` - Message from teammate agent
-- `task-event` - Task status update
-- `fork-indicator` - Conversation branch point with reason ('user-decision' or 'tool-error')
-- `clear-divider` - `/clear` command boundary
-- `compact-boundary` - Context compaction point
-- `plan-start` / `plan-end` - Plan mode boundaries
+`user-prompt` | `ai-text` | `ai-thinking` | `ai-tool-use` | `tool-result` | `team-message` | `task-event` | `fork-indicator` | `clear-divider` | `compact-boundary` | `plan-start` | `plan-end`
+
+### Key Data Types
+
+```
+SessionMeta    — Sidebar metadata (id, startTime, preview, counts, markers?)
+SessionData    — Full parsed session (messages, prompts, heatmap, markers)
+SessionMarkers — { compacts, plans, clears, forks }
+FilterState    — Toggle visibility of message types + timeline
+```
 
 ## Design Constraints
 
 - **Light theme only** — background `#FAFAF8`, no dark mode
-- Color coding:
-  - Blue (#2563eb) - User prompts
-  - Teal - Compact boundaries
-  - Amber - User decision forks
-  - Gray - Auto-retry forks (hidden by default)
-  - Indigo - Plan mode
-  - Rose - Interrupts/corrections
-- **CSS Requirements**:
-  - `min-h-0` required on flex column children for `overflow-y-auto` to work
-  - `<summary>` elements with `flex items-center` need `whitespace-nowrap`
-- **Accessibility**: All interactive elements have proper ARIA labels and keyboard navigation
+- **Typography**: IBM Plex Sans (body) + JetBrains Mono (code/timestamps), loaded via Google Fonts in `index.html`, configured in `@theme` block in `index.css`
+- **Accent color**: Amber (logo gradient, focus rings, active states, loading spinners, sidebar highlights). No violet/purple in UI chrome.
+- **Neutral color**: Stone (filter toggles, inactive text, timeline track, event marker labels)
+- **Functional colors**: Blue=prompts, Teal=compact, Amber=forks, Gray=clear/auto-retry, Indigo=plan, Rose=interrupts
+- **Team messages**: Emerald/Sky/Purple assigned per team member (data-driven, in `TEAM_COLORS` in MessageRenderers.tsx)
+- **User prompts**: Rendered as right-aligned chat bubbles (not left-border cards)
+- **CSS Requirements**: `min-h-0` on flex column children for scroll; `whitespace-nowrap` on `<summary>` with flex
+- **Animations**: `promptSlideIn` (slide-in for prompt bubbles), `detailsReveal` (expand for `<details>`), `branchReveal` (fork branch expand)
 
 ## Tech Stack
 
-- React 19 (with hooks, no class components)
-- Tailwind CSS v4 (via `@tailwindcss/vite`)
-- Vite 7 (dev server + build tool)
-- TypeScript 5.9 (strict mode with `noUnusedLocals`, `noUnusedParameters`)
-- react-markdown + remark-gfm (for rendering markdown in AI responses)
-
-## Development Workflow
-
-### Starting Development
-
-```bash
-npm run dev
-```
-
-This starts the Vite dev server on `http://localhost:5173` (or next available port). The server automatically loads sessions from `~/.claude/projects/` via the `claudeDataPlugin`.
-
-### Running Tests
-
-```bash
-npx vitest                    # Watch mode
-npx vitest run                # Run once
-npx vitest run <file>         # Run specific test file
-```
-
-Tests are located in `src/lib/__tests__/`. Currently covers:
-- JSONL parsing (compact boundaries, /clear detection, fork detection)
-- Tree analysis (active path tracing, fork classification)
-- Tool result pairing logic
-
-### Type Checking
-
-```bash
-npx tsc -b
-```
-
-Runs TypeScript compiler in build mode. Must pass before committing.
-
-### Linting
-
-```bash
-npm run lint
-```
-
-Runs ESLint with TypeScript support. Fix issues before committing.
-
-### Building for Production
-
-```bash
-npm run build
-npm run preview  # Test the production build locally
-```
-
-Output goes to `dist/`. The production build uses File System Access API or drag-and-drop fallback (no dev server plugin).
+React 19, Tailwind CSS v4 (`@tailwindcss/vite`), Vite 7, TypeScript 5.9 (strict), react-markdown + remark-gfm
 
 ## Common Tasks
 
@@ -185,18 +190,13 @@ Output goes to `dist/`. The production build uses File System Access API or drag
 2. Add classification logic in `classifyRecord()` in `src/lib/parser.ts`
 3. Add rendering component in `src/components/session/MessageRenderers.tsx`
 4. Add case in `MessageBlock` switch in `src/components/session/SessionView.tsx`
-5. (Optional) Add timeline event in `src/lib/timeline.ts` if it should appear in timeline
-6. Add tests in `src/lib/__tests__/parser.test.ts`
+5. (Optional) Add timeline event in `src/lib/timeline.ts`
+6. (Optional) If it's a marker type, add counting in `parseSessionContent()` marker tally and update vite plugin regex
+7. Add tests in `src/lib/__tests__/parser.test.ts`
 
 ### Modifying the Tree Analysis
 
-**CRITICAL**: The tree analysis logic in `src/lib/tree-parser.ts` is complex and fragile. Changes here affect fork detection, active path tracing, and message ordering.
-
-Before modifying:
-1. Read the existing comments carefully
-2. Understand the `logicalParentUuid` pattern for compact boundaries
-3. Test with sessions containing: forks, /clear commands, compact boundaries, parallel tool calls
-4. Add regression tests
+**CRITICAL**: `src/lib/tree-parser.ts` is complex and fragile. Changes affect fork detection, active path tracing, and message ordering.
 
 Key invariants:
 - Active path must include all user prompts and their responses
@@ -204,114 +204,43 @@ Key invariants:
 - Disconnected trees (from /clear) must each have their own tip trace
 - Fork detection must distinguish user decisions from auto-retries
 
-### Debugging JSONL Parsing Issues
+### Modifying the Timeline
 
-1. Check the raw JSONL file structure:
-   ```bash
-   cat ~/.claude/projects/{project}/{session}.jsonl | head -20
-   ```
+The Timeline is a minimap with two coupled components:
+1. **SessionView** (data source) — scroll tracking + DOM measurement
+2. **Timeline** (renderer) — positioned dots + viewport indicator
 
-2. Enable debug logging in `parser.ts` (add console.log statements)
+When modifying:
+- **Adding a new event type to timeline**: Add extraction in `timeline.ts` → add shape in `getEventMarkerStyle()` → add label in `getEventLabel()`
+- **Changing position logic**: Edit `computeEventPositions()`. Known positions come from DOM measurement; unknown positions are interpolated. Never use time-based positioning (breaks minimap-to-scroll correspondence).
+- **Changing scroll tracking**: Edit the `useEffect` with scroll listener in SessionView. Must use RAF throttling. The `scrollFraction`/`viewportFraction` math must stay consistent with `toPercent()`/`fromPercent()` in Timeline.
+- **Testing**: No unit tests for Timeline (DOM-dependent). Test visually with sessions containing: many prompts (density), few prompts (spacing), /clear (disconnected trees), compact boundaries.
 
-3. Use the browser DevTools to inspect the parsed `SessionData` object
+### Modifying the Scan Pipeline
 
-4. Common issues:
-   - Missing `uuid` or `parentUuid` fields → tree analysis fails
-   - Malformed JSON → parsing throws error
-   - Unexpected record types → classification returns empty messages
-   - Tool results without matching tool_use → orphaned results
+The scan pipeline has **two separate implementations** that must stay in sync:
 
-### Security Considerations
+| | **Vite plugin** (`vite-plugin-claude-data.ts`) | **FSAccessStore** (`src/lib/fs-access.ts`) |
+|---|---|---|
+| Runs in | Node.js (server-side) | Browser |
+| Reads | Full file | First 4KB |
+| Metadata | Own `quickScanFile()` | `quickScanMetadata()` from parser.ts |
+| Markers | Inline regex on full content | None (enriched on session load) |
+| Helpers | Own `decodeProjectName()`, `extractShortName()` etc. | Imports from parser.ts |
 
-**Path Traversal Prevention**: The dev server plugin validates all file paths to prevent directory traversal attacks:
-- Rejects paths containing `..`
-- Rejects absolute paths
-- Normalizes paths with `path.resolve()`
-- Validates final path is within session directory using `path.relative()`
+**When adding a new scan field**: Update both `QuickMeta` in the plugin AND `SessionMeta` in types. If it needs full file content, only the plugin can do it at scan time; the FSAccessStore version will be enriched via `LOAD_SESSION`.
 
-**XSS Prevention**: All user content is rendered through React (auto-escaped) or react-markdown (sanitized). Never use `dangerouslySetInnerHTML`.
+## Known Issues
 
-**Data Privacy**: All data stays local. No analytics, no external requests. The app only reads from `~/.claude/` and never writes or modifies session files.
-
-## Troubleshooting
-
-### "No sessions found"
-
-- Check that `~/.claude/projects/` exists and contains `.jsonl` files
-- In dev mode, the server plugin should auto-detect the directory
-- In production, use the directory picker to select `~/.claude` or your home directory
-
-### "Failed to load session"
-
-- Check browser console for detailed error
-- Verify the JSONL file is valid JSON (one object per line)
-- Check file permissions (must be readable)
-
-### Tool calls showing in wrong order
-
-- This was fixed in commit 5c76db6
-- Ensure you're on the latest version
-- The reordering logic in `parser.ts` Step 4 should pair tool_use with tool_result
-
-### False fork indicators appearing
-
-- This was fixed in commit 5c76db6
-- Ensure `tree-parser.ts` Step 3 includes leaf tool_result siblings
-- Check that `SessionView.tsx` filters out `tool-error` forks
-
-### Timeline showing hidden forks
-
-- This was fixed in commit 5c76db6
-- Ensure `timeline.ts` filters out `tool-error` forks in `extractTimelineEvents()`
-
-## Performance Considerations
-
-- **Large sessions** (1000+ messages): Rendering is optimized with `useMemo` but not virtualized. Consider adding react-window for very large sessions.
-- **Many projects** (100+): Project scanning is fast (only reads first 4KB of each file) but disambiguation is O(n²). Consider caching.
-- **Heatmap computation**: Computed eagerly on parse. For large sessions, consider lazy computation.
-
-## Code Style
-
-- Use functional components with hooks (no class components)
-- Prefer `const` over `let`
-- Use TypeScript strict mode (no `any` types without justification)
-- Use discriminated unions for message types
-- Add JSDoc comments for complex functions
-- Keep functions small and focused (< 50 lines)
-- Use early returns to reduce nesting
+- Vitest is not in package.json (installed globally) — causes tsc warning on test files
+- No dark mode (design constraint)
+- No virtualization for large sessions
+- Vite plugin duplicates some helper functions from parser.ts (intentional: plugin is self-contained server module)
 
 ## Git Workflow
 
 1. Make changes
-2. Run tests: `npx vitest run`
-3. Type check: `npx tsc -b`
-4. Lint: `npm run lint`
-5. Commit with descriptive message
-6. Push to remote
-
-**Commit Message Format**:
-```
-<type>: <short summary>
-
-<detailed description>
-
-<footer>
-```
-
-Types: `Fix`, `Feat`, `Refactor`, `Docs`, `Test`, `Chore`
-
-## Known Issues
-
-- Vitest is not in package.json (installed globally) - causes tsc warning
-- No dark mode support (design constraint)
-- No virtualization for large sessions (performance consideration)
-- Sidebar expanded state not persisted (UX consideration)
-
-## Future Improvements
-
-- Add virtualized list for large sessions (react-window)
-- Add localStorage for sidebar expanded state
-- Add export functionality (export session as markdown/PDF)
-- Add search within session content
-- Add keyboard shortcuts for navigation
-- Add session comparison view
+2. `npx vitest run` — all 34 tests must pass
+3. `npx tsc --noEmit` — type check must pass
+4. `npm run lint` — lint must pass
+5. Commit with format: `<Type>: <summary>` (Types: Fix, Feat, Refactor, Docs, Test, Chore)

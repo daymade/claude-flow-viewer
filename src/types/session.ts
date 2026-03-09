@@ -36,6 +36,13 @@ export interface PromptIndexEntry {
   decision: DecisionMarker
 }
 
+export interface SessionMarkers {
+  compacts: number
+  plans: number
+  clears: number
+  forks: number
+}
+
 export interface SessionMeta {
   id: string
   startTime: string
@@ -47,6 +54,8 @@ export interface SessionMeta {
   fileSize: number
   /** Total JSONL record count */
   recordCount: number
+  /** Special marker counts — available after scan (approximate) or full parse (exact) */
+  markers?: SessionMarkers
 }
 
 export interface ProjectMeta {
@@ -61,6 +70,7 @@ export interface SessionData {
   messages: SessionMessage[]
   prompts: PromptIndexEntry[]
   heatmap: number[]
+  markers: SessionMarkers
 }
 
 export interface FilterState {
