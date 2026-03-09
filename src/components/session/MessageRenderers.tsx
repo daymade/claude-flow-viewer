@@ -7,7 +7,7 @@ import { useAppState } from '../../hooks/useSessionStore'
 
 const REMARK_PLUGINS = [remarkGfm]
 
-// ━━━ L0: User Prompt ━━━ THE HERO ━━━
+// ━━━ L0: User Prompt ━━━ Chat Bubble ━━━
 
 export function PromptBlock({ msg, searchQuery }: {
   msg: Extract<SessionMessage, { kind: 'user-prompt' }>
@@ -15,33 +15,33 @@ export function PromptBlock({ msg, searchQuery }: {
 }) {
   const matches = !searchQuery || msg.text.toLowerCase().includes(searchQuery.toLowerCase())
 
-  let accent = 'border-l-blue-600'
-  let numColor = 'text-blue-600'
+  let bubbleBg = 'bg-blue-50/80'
+  let numColor = 'text-blue-400'
   let badge: React.ReactNode = null
 
   if (msg.decision === 'interrupt') {
-    accent = 'border-l-amber-500'
-    numColor = 'text-amber-600'
-    badge = <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 uppercase tracking-wide">Interrupt</span>
+    bubbleBg = 'bg-amber-50/80'
+    numColor = 'text-amber-500'
+    badge = <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 uppercase tracking-wide">Interrupt</span>
   } else if (msg.decision === 'correction') {
-    accent = 'border-l-rose-500'
-    numColor = 'text-rose-600'
-    badge = <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 uppercase tracking-wide">Decision</span>
+    bubbleBg = 'bg-rose-50/80'
+    numColor = 'text-rose-500'
+    badge = <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-700 uppercase tracking-wide">Decision</span>
   }
 
   return (
     <div
       data-prompt={msg.promptNum}
-      className={`mt-14 mb-5 border-l-4 ${accent} bg-white rounded-r-lg px-6 py-5 shadow-[0_2px_8px_rgba(0,0,0,0.06),0_0_0_1px_rgba(0,0,0,0.03)] scroll-mt-[30vh] transition-opacity ${
+      className={`mt-14 mb-5 ml-auto w-fit max-w-[85%] ${bubbleBg} rounded-2xl rounded-br-sm px-5 py-4 shadow-sm scroll-mt-[30vh] transition-opacity prompt-enter ${
         matches ? 'opacity-100' : 'opacity-20'
       }`}
     >
-      <div className="flex items-center gap-2 mb-2.5">
-        <span className={`text-lg font-bold ${numColor}`}>#{msg.promptNum}</span>
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <span className={`text-[11px] font-semibold ${numColor} tabular-nums`}>#{msg.promptNum}</span>
         {badge}
-        <span className="text-xs text-gray-400 font-mono ml-auto">{msg.time}</span>
+        <span className="text-[10px] text-gray-400 font-mono ml-auto tabular-nums">{msg.time}</span>
       </div>
-      <div className="text-base leading-[1.75] whitespace-pre-wrap break-words text-gray-900">{msg.text}</div>
+      <div className="text-[15px] leading-[1.75] whitespace-pre-wrap break-words text-gray-800">{msg.text}</div>
       {msg.images.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-3">
           {msg.images.map((img, i) => (
@@ -49,7 +49,7 @@ export function PromptBlock({ msg, searchQuery }: {
               <img
                 src={img.dataUrl}
                 alt={`Attached image ${i + 1}`}
-                className="max-w-full max-h-[400px] rounded-md border border-gray-200 shadow-sm cursor-zoom-in"
+                className="max-w-full max-h-[400px] rounded-xl border border-white/50 shadow-sm cursor-zoom-in"
               />
             </a>
           ))}
@@ -275,14 +275,18 @@ export function ForkIndicator({ msg, filter, searchQuery, MessageBlock }: {
               <path d="M4 4l7.07 17 2.51-7.39L21 11.07z" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           ) : (
+            /* Branching tree icon — decision tree metaphor */
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-500 shrink-0">
-              <path d="M6 3v6m0 0a3 3 0 103 3V9m-3 0a3 3 0 00-3 3m12-6v6m0 0a3 3 0 103 3v-3m-3 0a3 3 0 00-3 3" strokeLinecap="round" strokeLinejoin="round" />
+              <circle cx="12" cy="5" r="2.5" />
+              <circle cx="6" cy="19" r="2.5" />
+              <circle cx="18" cy="19" r="2.5" />
+              <path d="M12 7.5V12M12 12L6 16.5M12 12L18 16.5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           )}
           <span className={`text-sm font-semibold shrink-0 ${
             isToolError ? 'text-gray-500' : 'text-amber-700'
           }`}>{isToolError ? 'Retried' : 'Decision Point'}</span>
-          <span className={`text-xs font-mono shrink-0 ${
+          <span className={`text-xs font-mono shrink-0 tabular-nums ${
             isToolError ? 'text-gray-400' : 'text-amber-600/70'
           }`}>{msg.timestamp}</span>
           <span className={`ml-auto text-xs shrink-0 ${
@@ -305,12 +309,18 @@ export function ForkIndicator({ msg, filter, searchQuery, MessageBlock }: {
               Preview: "{msg.abandonedPreview}..."
             </div>
           )}
-          <div className={`pl-4 border-l-2 opacity-60 ${
-            isToolError ? 'border-gray-300/60' : 'border-amber-300/60'
-          }`}>
-            {msg.abandonedMessages.map((m, i) => (
-              <MessageBlock key={i} msg={m} filter={filter} searchQuery={searchQuery} />
-            ))}
+          {/* Branching visual: dashed connector + abandoned branch */}
+          <div className="relative">
+            {!isToolError && (
+              <div className="absolute left-[7px] top-0 bottom-0 w-px border-l-2 border-dashed border-amber-300/40" />
+            )}
+            <div className={`pl-5 opacity-60 ${
+              isToolError ? 'border-l-2 border-gray-300/60 pl-4' : ''
+            }`}>
+              {msg.abandonedMessages.map((m, i) => (
+                <MessageBlock key={i} msg={m} filter={filter} searchQuery={searchQuery} />
+              ))}
+            </div>
           </div>
         </div>
       </details>

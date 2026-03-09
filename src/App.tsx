@@ -36,13 +36,15 @@ async function loadInitialSession(
   if (!target || cancelled.current) return
   try {
     const content = await store.readSessionContent(target.projectEncoded, target.sessionId)
+    if (cancelled.current) return
     const data = parseSessionContent(content)
     if (cancelled.current) return
     dispatch({ type: 'LOAD_SESSION', sessionId: target.sessionId, projectEncoded: target.projectEncoded, data })
     // Sync URL hash
     history.replaceState(null, '', encodeHash(target.projectEncoded, target.sessionId))
-  } catch {
+  } catch (err) {
     // Non-critical: user can still manually select a session
+    console.warn('Failed to load initial session:', err)
   }
 }
 
@@ -58,13 +60,17 @@ export default function App() {
       if (cancelled.current) return
       if (store) {
         const projects = await store.scanProjects()
+        if (cancelled.current) return // Check cancellation after async operation
         dispatch({ type: 'LOAD_PROJECTS', projects, fileStore: store })
         await loadInitialSession(store, projects, dispatch, cancelled)
       } else {
         dispatch({ type: 'SET_ERROR', error: '' })
       }
-    }).catch(() => {
-      if (!cancelled.current) dispatch({ type: 'SET_ERROR', error: '' })
+    }).catch((err) => {
+      if (!cancelled.current) {
+        console.error('Failed to auto-load sessions:', err)
+        dispatch({ type: 'SET_ERROR', error: 'Failed to load sessions. Please try selecting a directory manually.' })
+      }
     })
 
     return () => { cancelled.current = true }

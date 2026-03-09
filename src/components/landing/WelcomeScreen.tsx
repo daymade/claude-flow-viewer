@@ -69,8 +69,8 @@ export function WelcomeScreen() {
           </svg>
         </div>
 
-        <h1 className="text-2xl font-bold text-slate-900 mb-1.5 tracking-tight">Decision Flow Viewer</h1>
-        <p className="text-slate-500 text-sm mb-8 leading-relaxed max-w-xs mx-auto">
+        <h1 className="text-2xl font-bold text-slate-900 mb-1.5 tracking-tight font-sans">Decision Flow Viewer</h1>
+        <p className="text-slate-500 text-sm mb-8 leading-relaxed max-w-xs mx-auto font-sans">
           Visualize Claude Code sessions. User prompts and decisions take center stage.
         </p>
 

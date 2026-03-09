@@ -1,15 +1,22 @@
 import { useMemo } from 'react'
-import type { TimelineEvent } from '../../types/session'
+import type { TimelineEvent, PromptIndexEntry } from '../../types/session'
 import { computeTimeGap, formatGap } from '../../lib/timeline'
+import { useHoverCard, HoverCard } from '../shared/HoverCard'
 
 interface TimelineProps {
   events: TimelineEvent[]
   onJump: (promptNum: number) => void
   activeNums: Set<number>
+  prompts: PromptIndexEntry[]
 }
 
-export function Timeline({ events, onJump, activeNums }: TimelineProps) {
+export function Timeline({ events, onJump, activeNums, prompts }: TimelineProps) {
   const items = useMemo(() => buildTimelineItems(events), [events])
+  const promptMap = useMemo(
+    () => new Map(prompts.map(p => [p.num, p])),
+    [prompts],
+  )
+  const hover = useHoverCard<number>()
 
   return (
     <div className="w-[72px] shrink-0 bg-white border-l border-gray-200 overflow-y-auto py-4 flex flex-col items-center relative">
@@ -39,11 +46,12 @@ export function Timeline({ events, onJump, activeNums }: TimelineProps) {
                 isActive ? 'scale-110' : ''
               }`}
               onClick={() => ev.promptNum !== undefined && onJump(ev.promptNum)}
-              title={ev.preview}
+              onMouseEnter={(e) => ev.promptNum !== undefined && hover.show(ev.promptNum, e.currentTarget)}
+              onMouseLeave={hover.hide}
             >
-              <div className={`w-3 h-3 rounded-full border-2 transition-colors ${
+              <div className={`w-3 h-3 rounded-full border-2 transition-all duration-200 ${
                 isActive
-                  ? `${dotColor.activeBg} ${dotColor.activeBorder} shadow-sm`
+                  ? `${dotColor.activeBg} ${dotColor.activeBorder} shadow-sm timeline-dot-active`
                   : `bg-white ${dotColor.border} group-hover:${dotColor.hoverBg}`
               }`} />
               <span className={`text-[9px] font-mono mt-0.5 transition-colors ${
@@ -53,7 +61,7 @@ export function Timeline({ events, onJump, activeNums }: TimelineProps) {
           )
         }
 
-        // Non-prompt event markers (compact, clear, fork, plan)
+        // Non-prompt event markers (compact, clear, fork, plan) — keep native tooltip
         return (
           <div
             key={`ev-${i}`}
@@ -65,6 +73,25 @@ export function Timeline({ events, onJump, activeNums }: TimelineProps) {
           </div>
         )
       })}
+
+      {/* Hover card for prompt dots */}
+      {hover.hoveredId !== null && hover.anchorRect && (() => {
+        const prompt = promptMap.get(hover.hoveredId)
+        if (!prompt) return null
+        return (
+          <HoverCard
+            header={<>
+              <span className="font-bold text-blue-600 text-xs">#{prompt.num}</span>
+              <span className="text-[10px] text-gray-400 font-mono">{prompt.time}</span>
+            </>}
+            content={prompt.fullText}
+            anchorRect={hover.anchorRect}
+            placement="left"
+            onMouseEnter={hover.keep}
+            onMouseLeave={hover.hide}
+          />
+        )
+      })()}
     </div>
   )
 }

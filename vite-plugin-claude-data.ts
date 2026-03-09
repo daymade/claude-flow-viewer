@@ -50,12 +50,24 @@ export function claudeDataPlugin(): Plugin {
           const projectEncoded = decodeURIComponent(parts[0])
           const sessionId = decodeURIComponent(parts[1])
           const relativePath = decodeURIComponent(parts.slice(2).join('/'))
-          // Validate path to prevent directory traversal
-          const filePath = path.join(projectsDir, projectEncoded, sessionId, relativePath)
-          const sessionDir = path.join(projectsDir, projectEncoded, sessionId)
-          if (!filePath.startsWith(sessionDir + path.sep)) {
+
+          // Validate path to prevent directory traversal attacks
+          // Reject paths containing .. or absolute paths
+          if (relativePath.includes('..') || path.isAbsolute(relativePath)) {
             res.statusCode = 400
-            res.end('Invalid path')
+            res.end('Invalid path: directory traversal not allowed')
+            return
+          }
+
+          // Normalize and validate the final path
+          const sessionDir = path.resolve(projectsDir, projectEncoded, sessionId)
+          const filePath = path.resolve(sessionDir, relativePath)
+
+          // Ensure resolved path is still within session directory
+          const relativeToSession = path.relative(sessionDir, filePath)
+          if (relativeToSession.startsWith('..') || path.isAbsolute(relativeToSession)) {
+            res.statusCode = 400
+            res.end('Invalid path: outside session directory')
             return
           }
           fs.promises.readFile(filePath, 'utf-8').then((content) => {

@@ -102,7 +102,7 @@ export function AppShell() {
                 <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
               </svg>
             </div>
-            <h1 className="text-[13px] font-bold text-slate-900 tracking-tight">Decision Flow</h1>
+            <h1 className="text-[13px] font-bold text-slate-900 tracking-tight font-sans">Decision Flow</h1>
             <button
               onClick={switchDirectory}
               className="ml-auto text-[10px] text-slate-400 hover:text-violet-600 cursor-pointer whitespace-nowrap font-medium transition-colors"
@@ -122,7 +122,7 @@ export function AppShell() {
               placeholder="Search... (Cmd+K)"
               value={state.searchQuery}
               onChange={(e) => dispatch({ type: 'SET_SEARCH', query: e.target.value })}
-              className="w-full py-1.5 pl-7 pr-2 border border-slate-200 rounded-md text-xs outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/10 bg-slate-50 placeholder:text-slate-400 transition-all"
+              className="w-full py-1.5 pl-7 pr-2 border border-slate-200 rounded-md text-xs font-sans outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/10 bg-slate-50 placeholder:text-slate-400 transition-all"
             />
           </div>
 

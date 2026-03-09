@@ -117,7 +117,7 @@ export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searc
                         )}
                       </div>
                       <div className="text-[11px] text-slate-500 truncate mt-0.5 leading-snug">{session.firstPromptPreview}</div>
-                      <div className="flex items-center gap-2 mt-1 text-[10px] text-slate-400 tabular-nums">
+                      <div className="flex items-center gap-2 mt-1 text-[10px] text-slate-400 tabular-nums font-mono">
                         {session.promptCount > 0 && (
                           <span>{session.promptCount}p</span>
                         )}
@@ -127,7 +127,7 @@ export function Sidebar({ projects, activeSessionId, activeProjectEncoded, searc
                         {session.recordCount > 0 && (
                           <span>{session.recordCount}r</span>
                         )}
-                        <span className="ml-auto font-mono text-slate-300">{session.id.slice(0, 8)}</span>
+                        <span className="ml-auto text-slate-300">{session.id.slice(0, 8)}</span>
                       </div>
                       {isActive && activeHeatmap && activeHeatmap.length > 0 && (
                         <HeatmapBar values={activeHeatmap} />

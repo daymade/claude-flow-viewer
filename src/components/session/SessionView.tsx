@@ -1,11 +1,8 @@
 import { useRef, useCallback, useMemo, useState, useEffect } from 'react'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-
-const REMARK_PLUGINS = [remarkGfm]
 import type { SessionData, SessionMessage, FilterState, PromptIndexEntry } from '../../types/session'
 import { extractTimelineEvents } from '../../lib/timeline'
 import { Timeline } from './Timeline'
+import { useHoverCard, HoverCard } from '../shared/HoverCard'
 import {
   PromptBlock,
   AiTextBlock,
@@ -88,6 +85,7 @@ export function SessionView({ data, filter, searchQuery }: SessionViewProps) {
           events={timelineEvents}
           onJump={scrollToPrompt}
           activeNums={activePromptNums}
+          prompts={data.prompts}
         />
       )}
     </div>
@@ -105,15 +103,7 @@ function PromptIndex({ prompts, onJump }: { prompts: PromptIndexEntry[]; onJump:
   const dragging = useRef(false)
   const startY = useRef(0)
   const startH = useRef(0)
-  const [hoveredNum, setHoveredNum] = useState<number | null>(null)
-  const [popoverPos, setPopoverPos] = useState<{ left: number; top: number }>({ left: 0, top: 0 })
-  const hoverTimer = useRef<ReturnType<typeof setTimeout>>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  // Cleanup hover timer on unmount
-  useEffect(() => {
-    return () => { if (hoverTimer.current) clearTimeout(hoverTimer.current) }
-  }, [])
+  const hover = useHoverCard<number>()
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -137,37 +127,14 @@ function PromptIndex({ prompts, onJump }: { prompts: PromptIndexEntry[]; onJump:
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
-  }, []) // startH.current captures height at drag start, no need for height dep
-
-  const showPopover = useCallback((num: number, btnEl: HTMLElement) => {
-    if (hoverTimer.current) clearTimeout(hoverTimer.current)
-    hoverTimer.current = setTimeout(() => {
-      const rect = btnEl.getBoundingClientRect()
-      const containerRect = containerRef.current?.getBoundingClientRect()
-      if (!containerRect) return
-      setPopoverPos({
-        left: Math.max(8, Math.min(rect.left - containerRect.left, containerRect.width - 420)),
-        top: rect.bottom - containerRect.top + 4,
-      })
-      setHoveredNum(num)
-    }, 300)
-  }, [])
-
-  const hidePopover = useCallback(() => {
-    if (hoverTimer.current) clearTimeout(hoverTimer.current)
-    hoverTimer.current = setTimeout(() => setHoveredNum(null), 150)
-  }, [])
-
-  const keepPopover = useCallback(() => {
-    if (hoverTimer.current) clearTimeout(hoverTimer.current)
-  }, [])
+  }, [height])
 
   if (prompts.length === 0) return null
 
-  const hoveredPrompt = hoveredNum !== null ? prompts.find(p => p.num === hoveredNum) : null
+  const hoveredPrompt = hover.hoveredId !== null ? prompts.find(p => p.num === hover.hoveredId) : null
 
   return (
-    <div ref={containerRef} className="sticky top-0 z-10 bg-white/95 backdrop-blur-sm border-b border-gray-200" style={{ height }}>
+    <div className="sticky top-0 z-10 bg-white/95 backdrop-blur-sm border-b border-gray-200" style={{ height }}>
       <div className="overflow-y-auto py-1.5 overscroll-y-contain" style={{ height: height - 8 }}>
         <div className="max-w-4xl mx-auto px-8 flex flex-wrap gap-0.5">
         {prompts.map((p) => {
@@ -176,11 +143,11 @@ function PromptIndex({ prompts, onJump }: { prompts: PromptIndexEntry[]; onJump:
             <button
               key={p.num}
               onClick={() => onJump(p.num)}
-              onMouseEnter={(e) => showPopover(p.num, e.currentTarget)}
-              onMouseLeave={hidePopover}
+              onMouseEnter={(e) => hover.show(p.num, e.currentTarget)}
+              onMouseLeave={hover.hide}
               className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] cursor-pointer transition-colors whitespace-nowrap ${
                 isSpecial ? 'text-amber-700 hover:bg-amber-50' : 'text-gray-500 hover:bg-gray-100'
-              } ${hoveredNum === p.num ? (isSpecial ? 'bg-amber-50' : 'bg-gray-100') : ''}`}
+              } ${hover.hoveredId === p.num ? (isSpecial ? 'bg-amber-50' : 'bg-gray-100') : ''}`}
             >
               <span className={`font-bold ${isSpecial ? 'text-amber-600' : 'text-blue-600'}`}>#{p.num}</span>
               <span className="max-w-[100px] truncate text-gray-600">{p.preview.slice(0, 30)}</span>
@@ -191,22 +158,19 @@ function PromptIndex({ prompts, onJump }: { prompts: PromptIndexEntry[]; onJump:
         </div>
       </div>
 
-      {/* Hover popover */}
-      {hoveredPrompt && (
-        <div
-          onMouseEnter={keepPopover}
-          onMouseLeave={hidePopover}
-          className="absolute z-20 w-[400px] max-h-[320px] overflow-y-auto bg-white rounded-lg shadow-lg shadow-gray-200/80 border border-gray-200 p-4"
-          style={{ left: popoverPos.left, top: popoverPos.top }}
-        >
-          <div className="flex items-center gap-2 mb-2 pb-2 border-b border-gray-100">
+      {/* Shared hover card */}
+      {hoveredPrompt && hover.anchorRect && (
+        <HoverCard
+          header={<>
             <span className="font-bold text-blue-600 text-xs">#{hoveredPrompt.num}</span>
             <span className="text-[10px] text-gray-400 font-mono">{hoveredPrompt.time}</span>
-          </div>
-          <div className="text-sm text-gray-700 prose prose-sm prose-gray max-w-none [&_pre]:bg-gray-50 [&_pre]:p-2 [&_pre]:rounded [&_pre]:text-xs [&_code]:text-xs [&_code]:bg-gray-100 [&_code]:px-1 [&_code]:rounded">
-            <Markdown remarkPlugins={REMARK_PLUGINS}>{hoveredPrompt.fullText}</Markdown>
-          </div>
-        </div>
+          </>}
+          content={hoveredPrompt.fullText}
+          anchorRect={hover.anchorRect}
+          placement="below"
+          onMouseEnter={hover.keep}
+          onMouseLeave={hover.hide}
+        />
       )}
 
       {/* Drag handle */}
