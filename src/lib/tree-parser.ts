@@ -9,20 +9,6 @@ export interface TreeAnalysis {
   hasTreeData: boolean
 }
 
-function extractTextFromContent(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    for (const c of content) {
-      if (typeof c !== 'object' || c === null) continue
-      const item = c as Record<string, unknown>
-      if ((item.type === 'text' || item.type === 'input_text') && typeof item.text === 'string') {
-        return item.text
-      }
-    }
-  }
-  return ''
-}
-
 function detectPlanTransition(record: Record<string, unknown>, uuid: string): { uuid: string; type: 'enter' | 'exit'; planPreview?: string } | null {
   if (record.type !== 'assistant') return null
   const message = record.message as Record<string, unknown> | undefined
@@ -184,6 +170,38 @@ export function analyzeConversationTree(records: Record<string, unknown>[]): Tre
 
   if (activeUuids.size === 0) {
     return empty
+  }
+
+  // Step 3: Include tool_result siblings of active-path nodes.
+  // Claude Code chains content blocks within a single assistant turn linearly
+  // (e.g. Bash_tool_use → ToolSearch_tool_use). Each tool_use's result arrives
+  // as a separate user child. The active-path trace follows only the chain,
+  // leaving sibling tool_results off the path — creating false "forks".
+  // Fix: for every active node, add its user children that are tool_result-only
+  // leaf records (no further conversation branching from them).
+  for (const uuid of [...activeUuids]) {
+    const children = childrenOf.get(uuid)
+    if (!children) continue
+
+    for (const childUuid of children) {
+      if (activeUuids.has(childUuid)) continue
+      if (childrenOf.has(childUuid)) continue // Must be leaf
+
+      const rec = byUuid.get(childUuid)
+      if (!rec || rec.type !== 'user') continue
+
+      // Must contain only tool_result content
+      const msg = rec.message as Record<string, unknown> | undefined
+      const content = msg?.content
+      if (!Array.isArray(content)) continue
+
+      const allToolResults = content.every(
+        (c: unknown) => typeof c === 'object' && c !== null && (c as Record<string, unknown>).type === 'tool_result'
+      )
+      if (allToolResults) {
+        activeUuids.add(childUuid)
+      }
+    }
   }
 
   // Step 4: Detect fork points

@@ -3,7 +3,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
 const REMARK_PLUGINS = [remarkGfm]
-import type { SessionData, SessionMessage, FilterState, PromptIndexEntry, TimelineEvent } from '../../types/session'
+import type { SessionData, SessionMessage, FilterState, PromptIndexEntry } from '../../types/session'
 import { extractTimelineEvents } from '../../lib/timeline'
 import { Timeline } from './Timeline'
 import {
@@ -297,7 +297,11 @@ function MessageBlock({ msg, filter, searchQuery }: { msg: SessionMessage; filte
     case 'ai-text': return filter.aiText ? <AiTextBlock msg={msg} /> : null
     case 'team-message': return filter.team ? <TeamMessageBlock msg={msg} /> : null
     case 'task-event': return filter.team ? <TaskEventBlock msg={msg} /> : null
-    case 'fork-indicator': return filter.branches ? <ForkIndicator msg={msg} filter={filter} searchQuery={searchQuery} MessageBlock={MessageBlock} /> : null
+    case 'fork-indicator': {
+      // Only show user-decision forks; hide tool-error auto-retries (CLI doesn't show them)
+      if (msg.reason === 'tool-error') return null
+      return filter.branches ? <ForkIndicator msg={msg} filter={filter} searchQuery={searchQuery} MessageBlock={MessageBlock} /> : null
+    }
     case 'clear-divider': return filter.markers ? <ClearDivider msg={msg} /> : null
     case 'compact-boundary': return filter.markers ? <CompactBoundaryDivider msg={msg} /> : null
     case 'plan-start': return filter.markers ? <PlanStartMarker msg={msg} /> : null

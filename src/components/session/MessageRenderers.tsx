@@ -250,7 +250,7 @@ export function TaskEventBlock({ msg }: { msg: Extract<SessionMessage, { kind: '
   )
 }
 
-// ─── Fork Indicator (Decision Point) ───
+// ─── Fork Indicator ───
 
 export function ForkIndicator({ msg, filter, searchQuery, MessageBlock }: {
   msg: Extract<SessionMessage, { kind: 'fork-indicator' }>
@@ -258,30 +258,56 @@ export function ForkIndicator({ msg, filter, searchQuery, MessageBlock }: {
   searchQuery: string
   MessageBlock: React.ComponentType<{ msg: SessionMessage; filter: FilterState; searchQuery: string }>
 }) {
+  const isToolError = msg.reason === 'tool-error'
+
   return (
-    <div className="my-8 rounded-lg border border-amber-200 bg-amber-50/30 overflow-hidden">
+    <div className={`my-8 rounded-lg border overflow-hidden ${
+      isToolError
+        ? 'border-gray-200 bg-gray-50/30'
+        : 'border-amber-200 bg-amber-50/30'
+    }`}>
       <details>
-        <summary className="cursor-pointer px-5 py-3 flex items-center gap-3 select-none group hover:bg-amber-50/60 transition-colors whitespace-nowrap">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-500 shrink-0">
-            <path d="M6 3v6m0 0a3 3 0 103 3V9m-3 0a3 3 0 00-3 3m12-6v6m0 0a3 3 0 103 3v-3m-3 0a3 3 0 00-3 3" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-          <span className="text-sm font-semibold text-amber-700 shrink-0">Decision Point</span>
-          <span className="text-xs text-amber-600/70 font-mono shrink-0">{msg.timestamp}</span>
-          <span className="ml-auto text-xs text-amber-600/60 shrink-0">
+        <summary className={`cursor-pointer px-5 py-3 flex items-center gap-3 select-none group transition-colors whitespace-nowrap ${
+          isToolError ? 'hover:bg-gray-50/60' : 'hover:bg-amber-50/60'
+        }`}>
+          {isToolError ? (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-gray-400 shrink-0">
+              <path d="M4 4l7.07 17 2.51-7.39L21 11.07z" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-500 shrink-0">
+              <path d="M6 3v6m0 0a3 3 0 103 3V9m-3 0a3 3 0 00-3 3m12-6v6m0 0a3 3 0 103 3v-3m-3 0a3 3 0 00-3 3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          )}
+          <span className={`text-sm font-semibold shrink-0 ${
+            isToolError ? 'text-gray-500' : 'text-amber-700'
+          }`}>{isToolError ? 'Retried' : 'Decision Point'}</span>
+          <span className={`text-xs font-mono shrink-0 ${
+            isToolError ? 'text-gray-400' : 'text-amber-600/70'
+          }`}>{msg.timestamp}</span>
+          <span className={`ml-auto text-xs shrink-0 ${
+            isToolError ? 'text-gray-400' : 'text-amber-600/60'
+          }`}>
             {msg.abandonedMessages.length} rejected message{msg.abandonedMessages.length !== 1 ? 's' : ''}
           </span>
         </summary>
 
         <div className="px-5 pb-3">
-          <div className="text-xs text-amber-600/70 mb-2 italic">
-            The expert interrupted and chose a different approach below.
+          <div className={`text-xs mb-2 italic ${
+            isToolError ? 'text-gray-400' : 'text-amber-600/70'
+          }`}>
+            {isToolError
+              ? 'Tool call failed; retried with a different approach.'
+              : 'The expert interrupted and chose a different approach below.'}
           </div>
           {msg.abandonedPreview && (
             <div className="text-xs text-gray-500 mb-2 truncate">
               Preview: "{msg.abandonedPreview}..."
             </div>
           )}
-          <div className="pl-4 border-l-2 border-amber-300/60 opacity-60">
+          <div className={`pl-4 border-l-2 opacity-60 ${
+            isToolError ? 'border-gray-300/60' : 'border-amber-300/60'
+          }`}>
             {msg.abandonedMessages.map((m, i) => (
               <MessageBlock key={i} msg={m} filter={filter} searchQuery={searchQuery} />
             ))}

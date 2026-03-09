@@ -13,7 +13,7 @@ export type SessionMessage =
   | { kind: 'ai-tool-use'; summary: string; name: string; input: Record<string, unknown> }
   | { kind: 'team-message'; from: string; color: string; summary: string; content: string; isProtocol: boolean }
   | { kind: 'task-event'; taskId: string; status: string; summary: string }
-  | { kind: 'fork-indicator'; abandonedMessages: SessionMessage[]; abandonedPreview: string; timestamp: string }
+  | { kind: 'fork-indicator'; abandonedMessages: SessionMessage[]; abandonedPreview: string; timestamp: string; reason: 'user-decision' | 'tool-error' }
   | { kind: 'clear-divider'; timestamp: string }
   | { kind: 'compact-boundary'; timestamp: string; trigger: 'auto' | 'manual'; preTokens: number; summaryText: string }
   | { kind: 'plan-start'; timestamp: string }

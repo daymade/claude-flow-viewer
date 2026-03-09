@@ -509,12 +509,66 @@ export function parseSessionContent(content: string): SessionData {
     }
   }
 
+  // Step 4: Reorder records to pair tool_use with their tool_result.
+  // CLI displays tool calls with their results immediately following, even when
+  // multiple tools are called in parallel. We need to match this UX by reordering:
+  // instead of [tool_use_A, tool_use_B, result_A, result_B], show
+  // [tool_use_A, result_A, tool_use_B, result_B].
+  const reorderedRecords: Record<string, unknown>[] = []
+  const toolResultMap = new Map<string, Record<string, unknown>>() // tool_use_id -> tool_result record
+
+  // First pass: index all tool_result records by their tool_use_id
+  for (const rec of records) {
+    if (rec.type === 'user') {
+      const msg = rec.message as Record<string, unknown> | undefined
+      const content = msg?.content
+      if (Array.isArray(content)) {
+        for (const c of content) {
+          if (typeof c === 'object' && c !== null) {
+            const item = c as Record<string, unknown>
+            if (item.type === 'tool_result' && typeof item.tool_use_id === 'string') {
+              toolResultMap.set(item.tool_use_id as string, rec)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Second pass: emit records, inserting tool_result immediately after tool_use
+  const emitted = new Set<Record<string, unknown>>()
+  for (const rec of records) {
+    if (emitted.has(rec)) continue
+    reorderedRecords.push(rec)
+    emitted.add(rec)
+
+    // If this is an assistant message with tool_use, emit its tool_result next
+    if (rec.type === 'assistant') {
+      const msg = rec.message as Record<string, unknown> | undefined
+      const content = msg?.content
+      if (Array.isArray(content)) {
+        for (const c of content) {
+          if (typeof c === 'object' && c !== null) {
+            const item = c as Record<string, unknown>
+            if (item.type === 'tool_use' && typeof item.id === 'string') {
+              const resultRec = toolResultMap.get(item.id as string)
+              if (resultRec && !emitted.has(resultRec)) {
+                reorderedRecords.push(resultRec)
+                emitted.add(resultRec)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Step 5: Iterate records and build messages
   const messages: SessionMessage[] = []
   const prompts: PromptIndexEntry[] = []
   const promptCounter = { value: 0 }
 
-  for (const data of records) {
+  for (const data of reorderedRecords) {
     const uuid = data.uuid as string | undefined
 
     // 5a: Detect compact_boundary records and emit compact-boundary message
@@ -606,11 +660,16 @@ export function parseSessionContent(content: string): SessionData {
         }
 
         if (abandonedMessages.length > 0) {
+          // Determine fork reason: if abandoned branch contains ANY tool_result,
+          // it's an auto-retry (tool succeeded/failed and Claude tried a different approach).
+          // Only mark as user-decision if the abandoned branch has no tool results at all.
+          const hasToolResult = abandonedMessages.some(m => m.kind === 'tool-result')
           messages.push({
             kind: 'fork-indicator',
             abandonedMessages,
             abandonedPreview,
             timestamp,
+            reason: hasToolResult ? 'tool-error' : 'user-decision',
           })
         }
       }

@@ -174,6 +174,7 @@ describe('parseSessionContent', () => {
       expect(fork).toBeDefined()
       if (fork?.kind === 'fork-indicator') {
         expect(fork.abandonedMessages.length).toBeGreaterThan(0)
+        expect(fork.reason).toBe('user-decision')
         // Abandoned branch contains "The answer is 5"
         const abandonedTexts = fork.abandonedMessages.filter(m => m.kind === 'ai-text')
         expect(abandonedTexts.some(m => m.kind === 'ai-text' && m.text === 'The answer is 5')).toBe(true)
@@ -205,6 +206,76 @@ describe('parseSessionContent', () => {
       expect(mainPrompts).toHaveLength(2)
       expect(mainPrompts[0]).toMatchObject({ promptNum: 1, text: 'Prompt 1' })
       expect(mainPrompts[1]).toMatchObject({ promptNum: 2, text: 'Prompt 2 after rewind' })
+    })
+
+    it('does not create fork for parallel tool_result siblings of chained tool_use blocks', () => {
+      // Simulates: assistant turn with Bash + ToolSearch chained as separate records.
+      // Tree: user -> assistant(text) -> assistant(Bash tool_use) -> assistant(ToolSearch tool_use)
+      //                                       |                            |
+      //                                       └─ user(Bash result)         └─ user(ToolSearch result) -> assistant(next)
+      // The Bash result is a sibling of ToolSearch (both children of Bash tool_use).
+      // It should NOT be treated as a fork — it's a parallel tool result.
+      const content = jsonl(
+        userMsg('u1', null, 'Do two things'),
+        assistantMsg('a-text', 'u1', [{ type: 'text', text: 'Sure, I will do two things.' }]),
+        assistantMsg('a-bash', 'a-text', [{ type: 'tool_use', id: 't-bash', name: 'Bash', input: { command: 'mkdir foo' } }]),
+        assistantMsg('a-toolsearch', 'a-bash', [{ type: 'tool_use', id: 't-ts', name: 'ToolSearch', input: { query: 'WebFetch' } }]),
+        // Bash result (child of a-bash, sibling of a-toolsearch)
+        {
+          type: 'user', uuid: 'u-bash-result', parentUuid: 'a-bash',
+          sessionId: 'test-session', timestamp: '2026-03-07T10:00:02.000Z',
+          message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't-bash', content: 'Done' }] },
+        },
+        // ToolSearch result (child of a-toolsearch)
+        {
+          type: 'user', uuid: 'u-ts-result', parentUuid: 'a-toolsearch',
+          sessionId: 'test-session', timestamp: '2026-03-07T10:00:03.000Z',
+          message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't-ts', content: 'Found WebFetch' }] },
+        },
+        assistantMsg('a-next', 'u-ts-result', [{ type: 'text', text: 'All done' }]),
+      )
+
+      const result = parseSessionContent(content)
+
+      // No fork indicators should exist
+      const forks = result.messages.filter(m => m.kind === 'fork-indicator')
+      expect(forks).toHaveLength(0)
+
+      // The Bash tool result SHOULD appear in the main flow
+      const toolResults = result.messages.filter(m => m.kind === 'tool-result')
+      expect(toolResults.length).toBeGreaterThanOrEqual(2)
+      expect(toolResults.some(m => m.kind === 'tool-result' && m.content.includes('Done'))).toBe(true)
+      expect(toolResults.some(m => m.kind === 'tool-result' && m.content.includes('Found WebFetch'))).toBe(true)
+    })
+
+    it('classifies fork as tool-error when abandoned branch has error tool results', () => {
+      // Tree: user -> assistant (tool_use) -> user (tool_result error, abandoned)
+      //                                    -> user (tool_result ok, active - retry)
+      const content = jsonl(
+        userMsg('u1', null, 'Fetch this page'),
+        assistantMsg('a1', 'u1', [{ type: 'tool_use', id: 't1', name: 'WebFetch', input: { url: 'https://example.com' } }]),
+        // Abandoned: tool result with error
+        {
+          type: 'user', uuid: 'u2-err', parentUuid: 'a1',
+          sessionId: 'test-session', timestamp: '2026-03-07T10:00:02.000Z',
+          message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Error: 403 Forbidden', is_error: true }] },
+        },
+        assistantMsg('a2-err', 'u2-err', [{ type: 'text', text: 'Failed attempt' }]),
+        // Active: retry that worked
+        {
+          type: 'user', uuid: 'u2-ok', parentUuid: 'a1',
+          sessionId: 'test-session', timestamp: '2026-03-07T10:00:03.000Z',
+          message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Success', is_error: false }] },
+        },
+        assistantMsg('a2-ok', 'u2-ok', [{ type: 'text', text: 'Got it' }]),
+      )
+
+      const result = parseSessionContent(content)
+      const fork = result.messages.find(m => m.kind === 'fork-indicator')
+      expect(fork).toBeDefined()
+      if (fork?.kind === 'fork-indicator') {
+        expect(fork.reason).toBe('tool-error')
+      }
     })
   })
 

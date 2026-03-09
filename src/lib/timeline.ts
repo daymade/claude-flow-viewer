@@ -35,6 +35,8 @@ export function extractTimelineEvents(messages: SessionMessage[]): TimelineEvent
         break
 
       case 'fork-indicator':
+        // Only show user-decision forks in timeline; hide tool-error auto-retries
+        if (msg.reason === 'tool-error') break
         events.push({
           kind: 'fork',
           time: msg.timestamp,
