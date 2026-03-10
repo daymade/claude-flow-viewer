@@ -1,7 +1,11 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import { useAppState } from '../../hooks/useSessionStore'
 import { useFileLoader } from '../../hooks/useFileLoader'
+import { useSearchController } from '../../hooks/useSearchController'
+import { buildCodexThreadForest, findCodexSelectionContext } from '../../lib/codex-navigation'
 import { Sidebar } from '../sidebar/Sidebar'
+import { CodexWorkspaceView } from '../codex/CodexWorkspaceView'
+import { SearchResultsPanel } from '../search/SearchResultsPanel'
 import { SessionView } from '../session/SessionView'
 import type { FilterState } from '../../types/session'
 
@@ -23,8 +27,14 @@ const SIDEBAR_DEFAULT = 280
 export function AppShell() {
   const { state, dispatch } = useAppState()
   const { loadSession, switchDirectory, loadAllProjectSessions } = useFileLoader()
+  const { search, selectResult } = useSearchController({
+    query: state.searchQuery,
+    fileStore: state.fileStore,
+    loadSession,
+  })
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT)
   const dragging = useRef(false)
+  const hydratedCodexProjects = useRef(new Set<string>())
 
   // Drag handle for resizable sidebar
   const onDragStart = useCallback((e: React.MouseEvent) => {
@@ -54,7 +64,7 @@ export function AppShell() {
     let prompts = 0
     let tools = 0
     for (const p of state.projects) {
-      sessions += p.sessions.length
+      sessions += p.totalSessionCount || p.sessions.length
       for (const s of p.sessions) {
         prompts += s.promptCount
         tools += s.toolCount
@@ -74,6 +84,13 @@ export function AppShell() {
     return activeProject.sessions.find(s => s.id === state.activeSessionId) || null
   }, [activeProject, state.activeSessionId])
 
+  const activeCodexContext = useMemo(() => {
+    if (!activeProject || activeProject.source !== 'codex' || !activeSession) return null
+    const forest = buildCodexThreadForest(activeProject.sessions)
+    return findCodexSelectionContext(forest, activeSession.id)
+  }, [activeProject, activeSession])
+  const showMessageFilters = activeProject?.source !== 'codex'
+
   // Keyboard shortcut: Cmd+K for search focus
   const searchRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -86,6 +103,23 @@ export function AppShell() {
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [])
+
+  useEffect(() => {
+    if (!activeProject || activeProject.source !== 'codex') return
+    if (activeProject.totalSessionCount <= activeProject.sessions.length) return
+    if (hydratedCodexProjects.current.has(activeProject.encodedName)) return
+
+    hydratedCodexProjects.current.add(activeProject.encodedName)
+    void loadAllProjectSessions(activeProject.encodedName)
+  }, [activeProject, loadAllProjectSessions])
+
+  const sidebarSearchQuery = state.searchQuery.trim() ? '' : state.searchQuery
+
+  const activeSearchTarget = search.activeTarget
+    && search.activeTarget.projectEncoded === state.activeProjectEncoded
+    && search.activeTarget.sessionId === state.activeSessionId
+    ? search.activeTarget
+    : null
 
   return (
     <div className="h-screen flex bg-[#FAFAF8]">
@@ -125,6 +159,17 @@ export function AppShell() {
               className="w-full py-1.5 pl-7 pr-2 border border-slate-200 rounded-md text-xs font-sans outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-500/10 bg-slate-50 placeholder:text-slate-400 transition-all"
             />
           </div>
+          {search.backend && !search.backend.available && (
+            <div className="mt-1.5 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] text-slate-500">
+              {search.backend.message}
+            </div>
+          )}
+
+          <SearchResultsPanel
+            query={state.searchQuery}
+            search={search}
+            onSelectResult={selectResult}
+          />
 
           {/* Stats */}
           <div className="flex gap-3 mt-2 text-[10px] text-slate-400">
@@ -145,7 +190,7 @@ export function AppShell() {
             projects={state.projects}
             activeSessionId={state.activeSessionId}
             activeProjectEncoded={state.activeProjectEncoded}
-            searchQuery={state.searchQuery}
+            searchQuery={sidebarSearchQuery}
             activeHeatmap={state.activeSessionData?.heatmap ?? null}
             onSelectSession={loadSession}
             onLoadAllSessions={loadAllProjectSessions}
@@ -161,21 +206,87 @@ export function AppShell() {
 
       {/* ── Content Panel ── */}
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
-        {/* Content Header (breadcrumb + filters, one compact row) */}
-        <div className="bg-white border-b border-slate-100 px-4 py-1.5 flex items-center gap-4 shrink-0">
-          {/* Breadcrumb */}
+        {/* Content Header (selection context + filters) */}
+        <div className="bg-white border-b border-slate-100 px-4 py-2.5 flex items-start gap-4 shrink-0">
           {activeProject ? (
-            <div className="flex items-center gap-1.5 text-xs text-slate-400 min-w-0 shrink-0">
-              <span className="font-medium text-slate-500 truncate max-w-40" title={activeProject.decodedName}>
-                {activeProject.shortName}
-              </span>
-              {activeSession && (
-                <>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${
+                  activeProject.source === 'codex'
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : 'bg-sky-100 text-sky-800'
+                }`}>
+                  {activeProject.source === 'codex' ? 'Codex' : 'Claude'}
+                </span>
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${
+                  activeProject.source === 'codex'
+                    ? 'bg-emerald-50 text-emerald-700'
+                    : 'bg-slate-100 text-slate-600'
+                }`}>
+                  {activeProject.source === 'codex' ? 'Learning map' : 'Conversation view'}
+                </span>
+                <span className="text-xs font-medium text-slate-500 truncate" title={activeProject.decodedName}>
+                  {activeProject.shortName}
+                </span>
+              </div>
+
+              {activeProject.source === 'codex' && activeSession && activeCodexContext ? (
+                <div className="mt-1.5 min-w-0">
+                  <div className="text-sm font-semibold text-slate-800 truncate">
+                    {activeCodexContext.root.session.firstPromptPreview}
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+                    <span className={`rounded-full px-2 py-0.5 font-semibold ${
+                      activeCodexContext.root.hasMissingParent
+                        ? 'bg-slate-100 text-slate-600'
+                        : 'bg-emerald-50 text-emerald-700'
+                    }`}>
+                      {activeCodexContext.root.hasMissingParent ? 'Unlinked delegated work' : 'Main task'}
+                    </span>
+                    <span>
+                      {activeCodexContext.lineage.length > 1 ? 'Viewing delegated work' : 'Viewing main task'}
+                    </span>
+                    {activeSession.id !== activeCodexContext.root.session.id && (
+                      <span className="truncate text-slate-600">
+                        {activeSession.firstPromptPreview}
+                      </span>
+                    )}
+                    {(activeSession.agentName || activeSession.agentRole) && (
+                      <span className="text-slate-400">
+                        {[activeSession.agentName, activeSession.agentRole].filter(Boolean).join(' · ')}
+                      </span>
+                    )}
+                  </div>
+                  {activeCodexContext.lineage.length > 1 && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-slate-400">
+                      {activeCodexContext.lineage.map((node, index) => (
+                        <div key={node.session.id} className="flex items-center gap-1">
+                          {index > 0 && <span className="text-slate-300">/</span>}
+                          <span className={`rounded-full px-1.5 py-0.5 ${
+                            index === 0
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-white border border-emerald-100 text-slate-500'
+                          }`}>
+                            {index === 0 ? 'Main task' : 'Delegated work'}
+                          </span>
+                          <span className="truncate max-w-44">{node.session.firstPromptPreview}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : activeSession ? (
+                <div className="mt-1.5 flex items-center gap-1.5 text-xs text-slate-400 min-w-0">
+                  <span className="font-medium text-slate-600 truncate max-w-48" title={activeProject.decodedName}>
+                    {activeProject.shortName}
+                  </span>
                   <span className="text-slate-300">/</span>
                   <span className="text-slate-400 truncate max-w-48 font-mono text-[11px]" title={`Session: ${activeSession.id}`}>
                     {activeSession.id.slice(0, 8)}
                   </span>
-                </>
+                </div>
+              ) : (
+                <div className="mt-1.5 text-xs text-slate-400">No session selected</div>
               )}
             </div>
           ) : (
@@ -183,21 +294,27 @@ export function AppShell() {
           )}
 
           {/* Filter toggles */}
-          <div className="flex items-center gap-1 ml-auto text-[11px]">
-            {FILTER_LABELS.map(({ key, label }) => (
-              <label key={key} className={`cursor-pointer flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors select-none ${
-                state.filter[key] ? 'bg-stone-100 text-stone-700' : 'text-stone-400 hover:text-stone-500 hover:bg-stone-50'
-              }`}>
-                <input
-                  type="checkbox"
-                  checked={state.filter[key]}
-                  onChange={() => dispatch({ type: 'TOGGLE_FILTER', key })}
-                  className="accent-stone-600 w-3 h-3"
-                />
-                <span>{label}</span>
-              </label>
-            ))}
-          </div>
+          {showMessageFilters ? (
+            <div className="flex items-center gap-1 ml-auto text-[11px] flex-wrap justify-end">
+              {FILTER_LABELS.map(({ key, label }) => (
+                <label key={key} className={`cursor-pointer flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors select-none ${
+                  state.filter[key] ? 'bg-stone-100 text-stone-700' : 'text-stone-400 hover:text-stone-500 hover:bg-stone-50'
+                }`}>
+                  <input
+                    type="checkbox"
+                    checked={state.filter[key]}
+                    onChange={() => dispatch({ type: 'TOGGLE_FILTER', key })}
+                    className="accent-stone-600 w-3 h-3"
+                  />
+                  <span>{label}</span>
+                </label>
+              ))}
+            </div>
+          ) : (
+            <div className="ml-auto text-[11px] text-slate-400">
+              Overview first. Structure and raw transcript live below.
+            </div>
+          )}
         </div>
 
         {/* Session content */}
@@ -209,11 +326,24 @@ export function AppShell() {
             </div>
           </div>
         ) : state.activeSessionData ? (
-          <SessionView
-            data={state.activeSessionData}
-            filter={state.filter}
-            searchQuery={state.searchQuery}
-          />
+          state.activeSessionData.source === 'codex' && activeProject && activeSession ? (
+            <CodexWorkspaceView
+              project={activeProject}
+              activeSession={activeSession}
+              activeSessionData={state.activeSessionData}
+              filter={state.filter}
+              searchQuery={state.searchQuery}
+              fileStore={state.fileStore}
+              onSelectSession={loadSession}
+            />
+          ) : (
+            <SessionView
+              data={state.activeSessionData}
+              filter={state.filter}
+              searchQuery={state.searchQuery}
+              activeSearchTarget={activeSearchTarget}
+            />
+          )
         ) : (
           <div className="flex-1 flex items-center justify-center text-slate-400 text-sm">
             <div className="flex flex-col items-center gap-2">

@@ -53,8 +53,9 @@ export function useFileLoader() {
     if (!state.fileStore) return
     dispatch({ type: 'LOAD_SESSION_START' })
     try {
+      const project = state.projects.find((item) => item.encodedName === projectEncoded)
       const content = await state.fileStore.readSessionContent(projectEncoded, sessionId)
-      const data = parseSessionContent(content)
+      const data = parseSessionContent(content, project?.source || 'claude')
       dispatch({ type: 'LOAD_SESSION', sessionId, projectEncoded, data })
       // Sync URL hash
       const newHash = encodeHash(projectEncoded, sessionId)
@@ -64,7 +65,7 @@ export function useFileLoader() {
     } catch (err) {
       dispatch({ type: 'SET_ERROR', error: (err as Error).message })
     }
-  }, [state.fileStore, dispatch])
+  }, [state.fileStore, state.projects, dispatch])
 
   const loadFromHandle = useCallback(async (handle: FileSystemDirectoryHandle) => {
     dispatch({ type: 'LOAD_START' })

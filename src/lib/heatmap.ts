@@ -29,6 +29,7 @@ export function computeHeatmap(messages: SessionMessage[]): number[] {
         case 'ai-tool-use': score += 1; break
         case 'tool-result': score += m.isError ? 3 : 0.5; break
         case 'fork-indicator': score += 5; break
+        case 'rollback-marker': score += 5; break
         case 'ai-thinking': score += m.full.length / 1000; break
         case 'compact-boundary': score += 2; break
       }

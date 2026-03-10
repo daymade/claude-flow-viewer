@@ -45,6 +45,15 @@ export function extractTimelineEvents(messages: SessionMessage[]): TimelineEvent
         })
         break
 
+      case 'rollback-marker':
+        events.push({
+          kind: 'fork',
+          time: msg.timestamp,
+          timestampMs: parseTimeToMs(msg.timestamp),
+          preview: `Rolled back ${msg.numTurns} turn${msg.numTurns === 1 ? '' : 's'}`,
+        })
+        break
+
       case 'plan-start':
         events.push({
           kind: 'plan-start',

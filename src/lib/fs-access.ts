@@ -1,8 +1,33 @@
-import type { ProjectMeta, SessionMeta } from '../types/session'
+import type { ProjectMeta, SessionMeta, SessionSource } from '../types/session'
+import type { SearchQueryOptions, SearchResult, SearchStats } from './search'
 import { quickScanMetadata, decodeProjectName, extractShortName, disambiguateShortNames } from './parser'
+import {
+  CODEX_PROJECT_PREFIX,
+  CODEX_PREVIEW_BYTES,
+  extractCodexSessionId,
+  extractCodexShortName,
+  isCodexProjectId,
+  quickScanCodexMetadata,
+} from './providers/codex'
+import { selectCodexRootSessions } from './codex-navigation'
 
-const MAX_SESSIONS_PER_PROJECT = 50
-const PREVIEW_BYTES = 4096
+const MAX_CLAUDE_SESSIONS_PER_PROJECT = 50
+const MAX_CODEX_GROUPS_PER_PROJECT = 50
+const CLAUDE_PREVIEW_BYTES = 4096
+const CODEX_SCAN_CONCURRENCY = 24
+
+type ScanSummary = {
+  decodedName: string
+  shortName: string
+  sessions: SessionMeta[]
+  totalSessionCount: number
+  source: SessionSource
+}
+
+type CodexThreadIndexEntry = {
+  threadName: string
+  updatedAt: string
+}
 
 export interface FileStore {
   scanProjects(): Promise<ProjectMeta[]>
@@ -10,254 +35,632 @@ export interface FileStore {
   scanAllProjectSessions(projectEncoded: string): Promise<SessionMeta[]>
   /** Read a tool-result overflow file. relativePath is like "tool-results/xxx.txt" */
   readToolResult(projectEncoded: string, sessionId: string, relativePath: string): Promise<string>
+  searchSessions(query: string, options?: SearchQueryOptions): Promise<SearchResult[]>
+  getSearchBackendStatus(): Promise<SearchBackendStatus>
+}
+
+export interface SearchBackendReadyStatus {
+  available: true
+  backend: 'sqlite'
+  message?: string
+  dbPath: string
+  indexedAt: string | null
+  stats: SearchStats
+}
+
+export interface SearchBackendUnavailableStatus {
+  available: false
+  backend: 'sqlite'
+  reason: 'server-required'
+  message: string
+}
+
+export type SearchBackendStatus = SearchBackendReadyStatus | SearchBackendUnavailableStatus
+
+export function getUnavailableSearchStatus(): SearchBackendUnavailableStatus {
+  return {
+    available: false,
+    backend: 'sqlite',
+    reason: 'server-required',
+    message: 'Search requires the local Node/Vite server API and is unavailable in browser-only file access mode.',
+  }
+}
+
+function sortProjects(projects: ProjectMeta[]): ProjectMeta[] {
+  return projects.sort((a, b) => {
+    const aTime = a.sessions[0]?.startTime || ''
+    const bTime = b.sessions[0]?.startTime || ''
+    return bTime.localeCompare(aTime)
+  })
+}
+
+function toProjects(projectMap: Map<string, ScanSummary>): ProjectMeta[] {
+  const projects = Array.from(projectMap.entries()).map(([encodedName, summary]) => ({
+    source: summary.source,
+    encodedName,
+    decodedName: summary.decodedName,
+    shortName: summary.shortName,
+    sessions: summary.sessions,
+    totalSessionCount: summary.totalSessionCount,
+  }))
+  disambiguateProjectNames(projects)
+  return sortProjects(projects)
+}
+
+function disambiguateProjectNames(projects: ProjectMeta[]) {
+  disambiguateShortNames(projects.filter((project) => project.source === 'claude'))
+
+  const codexGroups = new Map<string, ProjectMeta[]>()
+  for (const project of projects) {
+    if (project.source !== 'codex') continue
+    const list = codexGroups.get(project.shortName)
+    if (list) list.push(project)
+    else codexGroups.set(project.shortName, [project])
+  }
+
+  for (const [, dupes] of codexGroups) {
+    if (dupes.length <= 1) continue
+
+    const used = new Set<string>()
+    for (const project of dupes) {
+      const parts = project.decodedName.replace(/\\/g, '/').split('/').filter(Boolean)
+      const parent = parts[parts.length - 2]
+      const candidate = parent ? `${project.shortName} (${parent})` : project.shortName
+      if (!used.has(candidate)) {
+        project.shortName = candidate
+        used.add(candidate)
+        continue
+      }
+
+      let suffix = 2
+      let indexed = `${candidate} #${suffix}`
+      while (used.has(indexed)) {
+        suffix++
+        indexed = `${candidate} #${suffix}`
+      }
+      project.shortName = indexed
+      used.add(indexed)
+    }
+  }
+}
+
+function sortSessions(sessions: SessionMeta[]): SessionMeta[] {
+  return sessions.sort((a, b) => b.startTime.localeCompare(a.startTime))
+}
+
+type ClaudFileEntry = { handle: FileSystemFileHandle; file: File }
+type CodexFileEntry = { handle: FileSystemFileHandle; file: File }
+
+async function *walkJsonlFiles(dirHandle: FileSystemDirectoryHandle): AsyncGenerator<CodexFileEntry> {
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind === 'directory') {
+      yield * walkJsonlFiles(entry as FileSystemDirectoryHandle)
+      continue
+    }
+
+    if (entry.kind !== 'file' || !entry.name.endsWith('.jsonl')) continue
+    const handle = entry as FileSystemFileHandle
+    yield { handle, file: await handle.getFile() }
+  }
+}
+
+async function readFileHead(file: File, bytes: number): Promise<string> {
+  return file.slice(0, bytes).text()
+}
+
+async function mapInBatches<T, R>(
+  items: T[],
+  batchSize: number,
+  fn: (item: T) => Promise<R | null>,
+): Promise<R[]> {
+  const results: R[] = []
+  for (let index = 0; index < items.length; index += batchSize) {
+    const chunk = items.slice(index, index + batchSize)
+    const chunkResults = await Promise.all(chunk.map(fn))
+    for (const result of chunkResults) {
+      if (result !== null) results.push(result)
+    }
+  }
+  return results
 }
 
 // --- File System Access API implementation ---
 
 class FSAccessStore implements FileStore {
   private rootHandle: FileSystemDirectoryHandle
+  private sessionFiles = new Map<string, FileSystemFileHandle>()
+
   constructor(rootHandle: FileSystemDirectoryHandle) {
     this.rootHandle = rootHandle
   }
 
   async scanProjects(): Promise<ProjectMeta[]> {
-    const projectsDir = await this.findProjectsDir()
-    const projects: ProjectMeta[] = []
+    this.sessionFiles.clear()
+    const projectMap = new Map<string, ScanSummary>()
 
-    for await (const projectHandle of projectsDir.values()) {
-      if (projectHandle.kind !== 'directory') continue
-      const dirHandle = projectHandle as FileSystemDirectoryHandle
+    await Promise.all([
+      this.scanClaudeProjects(projectMap),
+      this.scanCodexProjects(projectMap),
+    ])
 
-      // Collect all jsonl file handles with basic File metadata (no content read)
-      const fileEntries: { handle: FileSystemFileHandle; file: File }[] = []
-      for await (const fh of dirHandle.values()) {
-        if (fh.kind !== 'file' || !fh.name.endsWith('.jsonl')) continue
-        const file = await (fh as FileSystemFileHandle).getFile()
-        fileEntries.push({ handle: fh as FileSystemFileHandle, file })
-      }
-
-      if (fileEntries.length === 0) continue
-
-      // Sort by lastModified descending, take most recent N
-      fileEntries.sort((a, b) => b.file.lastModified - a.file.lastModified)
-      const wasTruncated = fileEntries.length > MAX_SESSIONS_PER_PROJECT
-      const recent = fileEntries.slice(0, MAX_SESSIONS_PER_PROJECT)
-
-      // Read only first PREVIEW_BYTES of each file for metadata
-      const sessions: import('../types/session').SessionMeta[] = []
-      for (const { file } of recent) {
-        const sessionId = file.name.replace('.jsonl', '')
-        const headBlob = file.slice(0, PREVIEW_BYTES)
-        const head = await headBlob.text()
-        const meta = quickScanMetadata(head, sessionId, file.size)
-        if (meta) sessions.push(meta)
-      }
-
-      if (sessions.length > 0) {
-        sessions.sort((a, b) => b.startTime.localeCompare(a.startTime))
-        const decoded = decodeProjectName(dirHandle.name)
-        projects.push({
-          encodedName: dirHandle.name,
-          decodedName: decoded,
-          shortName: extractShortName(dirHandle.name),
-          sessions,
-          totalSessionCount: wasTruncated ? fileEntries.length : sessions.length,
-        })
-      }
-    }
-
-    disambiguateShortNames(projects)
-
-    return projects.sort((a, b) => {
-      const aTime = a.sessions[0]?.startTime || ''
-      const bTime = b.sessions[0]?.startTime || ''
-      return bTime.localeCompare(aTime)
-    })
+    return toProjects(projectMap)
   }
 
   async scanAllProjectSessions(projectEncoded: string): Promise<SessionMeta[]> {
-    const projectsDir = await this.findProjectsDir()
-    const dirHandle = await projectsDir.getDirectoryHandle(projectEncoded)
-    const sessions: import('../types/session').SessionMeta[] = []
-
-    for await (const fh of dirHandle.values()) {
-      if (fh.kind !== 'file' || !fh.name.endsWith('.jsonl')) continue
-      const file = await (fh as FileSystemFileHandle).getFile()
-      const sessionId = file.name.replace('.jsonl', '')
-      const headBlob = file.slice(0, PREVIEW_BYTES)
-      const head = await headBlob.text()
-      const meta = quickScanMetadata(head, sessionId, file.size)
-      if (meta) sessions.push(meta)
+    if (isCodexProjectId(projectEncoded)) {
+      const projectMap = new Map<string, ScanSummary>()
+      await this.scanCodexProjects(projectMap, projectEncoded)
+      return projectMap.get(projectEncoded)?.sessions ?? []
     }
 
-    sessions.sort((a, b) => b.startTime.localeCompare(a.startTime))
-    return sessions
+    const projectMap = new Map<string, ScanSummary>()
+    await this.scanClaudeProjects(projectMap, projectEncoded)
+    return projectMap.get(projectEncoded)?.sessions ?? []
   }
 
   async readSessionContent(projectEncoded: string, sessionId: string): Promise<string> {
-    const projectsDir = await this.findProjectsDir()
+    const cached = this.sessionFiles.get(`${projectEncoded}/${sessionId}`)
+    if (cached) return (await cached.getFile()).text()
+
+    if (isCodexProjectId(projectEncoded)) {
+      await this.scanAllProjectSessions(projectEncoded)
+      const fallback = this.sessionFiles.get(`${projectEncoded}/${sessionId}`)
+      if (!fallback) throw new Error(`Session file not found: ${projectEncoded}/${sessionId}`)
+      return (await fallback.getFile()).text()
+    }
+
+    const projectsDir = await this.findClaudeProjectsDir()
     const projectDir = await projectsDir.getDirectoryHandle(projectEncoded)
     const fileHandle = await projectDir.getFileHandle(`${sessionId}.jsonl`)
-    const file = await fileHandle.getFile()
-    return file.text()
+    return (await fileHandle.getFile()).text()
   }
 
   async readToolResult(projectEncoded: string, sessionId: string, relativePath: string): Promise<string> {
-    const projectsDir = await this.findProjectsDir()
+    if (isCodexProjectId(projectEncoded)) {
+      throw new Error('Tool result files are not available for Codex sessions')
+    }
+
+    const projectsDir = await this.findClaudeProjectsDir()
     const projectDir = await projectsDir.getDirectoryHandle(projectEncoded)
     const sessionDir = await projectDir.getDirectoryHandle(sessionId)
-    // relativePath is "tool-results/filename.txt"
     const parts = relativePath.split('/')
     let dir: FileSystemDirectoryHandle = sessionDir
     for (const part of parts.slice(0, -1)) {
       dir = await dir.getDirectoryHandle(part)
     }
     const fileHandle = await dir.getFileHandle(parts[parts.length - 1])
-    const file = await fileHandle.getFile()
-    return file.text()
+    return (await fileHandle.getFile()).text()
   }
 
-  private async findProjectsDir(): Promise<FileSystemDirectoryHandle> {
+  async searchSessions(): Promise<SearchResult[]> {
+    throw new Error(getUnavailableSearchStatus().message)
+  }
+
+  async getSearchBackendStatus(): Promise<SearchBackendStatus> {
+    return getUnavailableSearchStatus()
+  }
+
+  private async scanClaudeProjects(projectMap: Map<string, ScanSummary>, onlyProject?: string): Promise<void> {
+    const projectsDir = await this.findClaudeProjectsDir().catch(() => null)
+    if (!projectsDir) return
+
+    for await (const projectHandle of projectsDir.values()) {
+      if (projectHandle.kind !== 'directory') continue
+      const dirHandle = projectHandle as FileSystemDirectoryHandle
+      if (onlyProject && dirHandle.name !== onlyProject) continue
+
+      const fileEntries: ClaudFileEntry[] = []
+      for await (const entry of dirHandle.values()) {
+        if (entry.kind !== 'file' || !entry.name.endsWith('.jsonl')) continue
+        const handle = entry as FileSystemFileHandle
+        const file = await handle.getFile()
+        fileEntries.push({ handle, file })
+        const sessionId = file.name.replace(/\.jsonl$/i, '')
+        this.sessionFiles.set(`${dirHandle.name}/${sessionId}`, handle)
+      }
+
+      if (fileEntries.length === 0) continue
+
+      fileEntries.sort((a, b) => b.file.lastModified - a.file.lastModified)
+      const recent = onlyProject ? fileEntries : fileEntries.slice(0, MAX_CLAUDE_SESSIONS_PER_PROJECT)
+      const sessions: SessionMeta[] = []
+
+      for (const { file } of recent) {
+        const sessionId = file.name.replace(/\.jsonl$/i, '')
+        const head = await readFileHead(file, CLAUDE_PREVIEW_BYTES)
+        const meta = quickScanMetadata(head, sessionId, file.size)
+        if (meta) sessions.push(meta)
+      }
+
+      if (sessions.length === 0) continue
+
+      projectMap.set(dirHandle.name, {
+        source: 'claude',
+        decodedName: decodeProjectName(dirHandle.name),
+        shortName: extractShortName(dirHandle.name),
+        sessions: sortSessions(sessions),
+        totalSessionCount: fileEntries.length > MAX_CLAUDE_SESSIONS_PER_PROJECT ? fileEntries.length : sessions.length,
+      })
+    }
+  }
+
+  private async scanCodexProjects(projectMap: Map<string, ScanSummary>, onlyProject?: string): Promise<void> {
+    const sessionsDir = await this.findCodexSessionsDir().catch(() => null)
+    if (!sessionsDir) return
+
+    const threadIndex = await this.readCodexSessionIndex()
+    const entries: CodexFileEntry[] = []
+    for await (const entry of walkJsonlFiles(sessionsDir)) {
+      entries.push(entry)
+    }
+
+    entries.sort((a, b) => {
+      const aSessionId = extractCodexSessionId(a.file.name)
+      const bSessionId = extractCodexSessionId(b.file.name)
+      const aTime = threadIndex.get(aSessionId)?.updatedAt || new Date(a.file.lastModified).toISOString()
+      const bTime = threadIndex.get(bSessionId)?.updatedAt || new Date(b.file.lastModified).toISOString()
+      return bTime.localeCompare(aTime)
+    })
+
+    const grouped = new Map<string, SessionMeta[]>()
+    const names = new Map<string, string>()
+
+    const scannedEntries = await mapInBatches(entries, CODEX_SCAN_CONCURRENCY, async ({ handle, file }) => {
+      const sessionId = extractCodexSessionId(file.name)
+      const indexEntry = threadIndex.get(sessionId)
+      const head = await readFileHead(file, CODEX_PREVIEW_BYTES)
+      const scanned = quickScanCodexMetadata(head, sessionId, file.size, indexEntry?.threadName)
+      if (!scanned) return null
+      if (onlyProject && scanned.projectEncoded !== onlyProject) return null
+      return { handle, sessionId, scanned }
+    })
+
+    for (const { handle, sessionId, scanned } of scannedEntries) {
+      const key = `${scanned.projectEncoded}/${sessionId}`
+      this.sessionFiles.set(key, handle)
+
+      if (!grouped.has(scanned.projectEncoded)) {
+        grouped.set(scanned.projectEncoded, [])
+        names.set(scanned.projectEncoded, scanned.cwd)
+      }
+      grouped.get(scanned.projectEncoded)!.push(scanned.meta)
+    }
+
+    for (const [encodedName, sessions] of grouped) {
+      const decodedName = names.get(encodedName) || encodedName.slice(CODEX_PROJECT_PREFIX.length)
+      const sorted = sortSessions(sessions)
+      projectMap.set(encodedName, {
+        source: 'codex',
+        decodedName,
+        shortName: extractCodexShortName(decodedName),
+        sessions: onlyProject ? sorted : selectCodexRootSessions(sorted, MAX_CODEX_GROUPS_PER_PROJECT),
+        totalSessionCount: sorted.length,
+      })
+    }
+  }
+
+  private async findClaudeProjectsDir(): Promise<FileSystemDirectoryHandle> {
     try {
       return await this.rootHandle.getDirectoryHandle('projects')
-    } catch { /* not direct */ }
+    } catch {
+      // continue
+    }
 
     try {
       const dotClaude = await this.rootHandle.getDirectoryHandle('.claude')
       return await dotClaude.getDirectoryHandle('projects')
-    } catch { /* not parent either */ }
+    } catch {
+      // continue
+    }
 
-    throw new Error('Cannot find "projects" directory. Please select the .claude directory.')
+    throw new Error('Cannot find ".claude/projects". Please select your home directory or the .claude directory.')
+  }
+
+  private async findCodexRootDir(): Promise<FileSystemDirectoryHandle> {
+    try {
+      await this.rootHandle.getDirectoryHandle('sessions')
+      return this.rootHandle
+    } catch {
+      // continue
+    }
+
+    try {
+      await this.rootHandle.getFileHandle('session_index.jsonl')
+      return this.rootHandle
+    } catch {
+      // continue
+    }
+
+    try {
+      return await this.rootHandle.getDirectoryHandle('.codex')
+    } catch {
+      // continue
+    }
+
+    throw new Error('Cannot find ".codex". Please select your home directory or the .codex directory.')
+  }
+
+  private async findCodexSessionsDir(): Promise<FileSystemDirectoryHandle> {
+    const codexRoot = await this.findCodexRootDir()
+    return codexRoot.getDirectoryHandle('sessions')
+  }
+
+  private async readCodexSessionIndex(): Promise<Map<string, CodexThreadIndexEntry>> {
+    const index = new Map<string, CodexThreadIndexEntry>()
+    try {
+      const codexRoot = await this.findCodexRootDir()
+      const fileHandle = await codexRoot.getFileHandle('session_index.jsonl')
+      const content = await (await fileHandle.getFile()).text()
+      for (const line of content.split('\n')) {
+        if (!line.trim()) continue
+        try {
+          const data = JSON.parse(line) as Record<string, unknown>
+          if (typeof data.id === 'string') {
+            index.set(data.id, {
+              threadName: typeof data.thread_name === 'string' ? data.thread_name : '',
+              updatedAt: typeof data.updated_at === 'string' ? data.updated_at : '',
+            })
+          }
+        } catch {
+          // Ignore malformed lines.
+        }
+      }
+    } catch {
+      // Index is optional and incomplete.
+    }
+    return index
   }
 }
 
 // --- Input fallback implementation ---
 
 class InputFallbackStore implements FileStore {
-  private fileMap = new Map<string, File>()
+  private claudeFiles = new Map<string, File>()
+  private codexFiles = new Map<string, File>()
+  private codexSessionIndexFile: File | null = null
 
   constructor(files: FileList) {
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
-      const path = file.webkitRelativePath
-      if (!path.includes('/projects/') || !path.endsWith('.jsonl')) continue
-      const parts = path.split('/')
-      const projIdx = parts.indexOf('projects')
-      if (projIdx < 0 || projIdx + 2 >= parts.length) continue
-      const projectEncoded = parts[projIdx + 1]
-      const sessionId = parts[projIdx + 2].replace('.jsonl', '')
-      this.fileMap.set(`${projectEncoded}/${sessionId}`, file)
+      const path = file.webkitRelativePath.replace(/\\/g, '/')
+      if (!path) continue
+
+      if ((path.includes('/.claude/projects/') || path.startsWith('projects/')) && path.endsWith('.jsonl')) {
+        const parts = path.split('/')
+        const projectIdx = parts.indexOf('projects')
+        if (projectIdx >= 0 && projectIdx + 2 < parts.length) {
+          const projectEncoded = parts[projectIdx + 1]
+          const sessionId = parts[projectIdx + 2].replace(/\.jsonl$/i, '')
+          this.claudeFiles.set(`${projectEncoded}/${sessionId}`, file)
+        }
+        continue
+      }
+
+      if ((path.includes('/.codex/sessions/') || path.startsWith('sessions/')) && path.endsWith('.jsonl')) {
+        const sessionId = extractCodexSessionId(file.name)
+        this.codexFiles.set(sessionId, file)
+        continue
+      }
+
+      if ((path.endsWith('/session_index.jsonl') || path === 'session_index.jsonl')
+        && (path.includes('.codex/') || path === 'session_index.jsonl')) {
+        this.codexSessionIndexFile = file
+      }
     }
   }
 
   async scanProjects(): Promise<ProjectMeta[]> {
-    // Group files by project
-    const projectFiles = new Map<string, { sessionId: string; file: File }[]>()
-    for (const [key, file] of this.fileMap) {
-      const [projectEncoded, sessionId] = key.split('/')
-      if (!projectFiles.has(projectEncoded)) projectFiles.set(projectEncoded, [])
-      projectFiles.get(projectEncoded)!.push({ sessionId, file })
-    }
-
-    const projects: ProjectMeta[] = []
-    for (const [encoded, files] of projectFiles) {
-      // Sort by lastModified descending, take most recent N
-      files.sort((a, b) => b.file.lastModified - a.file.lastModified)
-      const wasTruncated = files.length > MAX_SESSIONS_PER_PROJECT
-      const recent = files.slice(0, MAX_SESSIONS_PER_PROJECT)
-
-      const sessions: import('../types/session').SessionMeta[] = []
-      for (const { sessionId, file } of recent) {
-        const headBlob = file.slice(0, PREVIEW_BYTES)
-        const head = await headBlob.text()
-        const meta = quickScanMetadata(head, sessionId, file.size)
-        if (meta) sessions.push(meta)
-      }
-
-      if (sessions.length > 0) {
-        sessions.sort((a, b) => b.startTime.localeCompare(a.startTime))
-        const decoded = decodeProjectName(encoded)
-        projects.push({
-          encodedName: encoded,
-          decodedName: decoded,
-          shortName: extractShortName(encoded),
-          sessions,
-          totalSessionCount: wasTruncated ? files.length : sessions.length,
-        })
-      }
-    }
-
-    disambiguateShortNames(projects)
-
-    return projects.sort((a, b) => {
-      const aTime = a.sessions[0]?.startTime || ''
-      const bTime = b.sessions[0]?.startTime || ''
-      return bTime.localeCompare(aTime)
-    })
+    const projectMap = new Map<string, ScanSummary>()
+    await Promise.all([
+      this.scanClaudeProjects(projectMap),
+      this.scanCodexProjects(projectMap),
+    ])
+    return toProjects(projectMap)
   }
 
   async scanAllProjectSessions(projectEncoded: string): Promise<SessionMeta[]> {
-    const sessions: import('../types/session').SessionMeta[] = []
-    for (const [key, file] of this.fileMap) {
-      const [proj, sessionId] = key.split('/')
-      if (proj !== projectEncoded) continue
-      const headBlob = file.slice(0, PREVIEW_BYTES)
-      const head = await headBlob.text()
-      const meta = quickScanMetadata(head, sessionId, file.size)
-      if (meta) sessions.push(meta)
+    const projectMap = new Map<string, ScanSummary>()
+    if (isCodexProjectId(projectEncoded)) {
+      await this.scanCodexProjects(projectMap, projectEncoded)
+    } else {
+      await this.scanClaudeProjects(projectMap, projectEncoded)
     }
-    sessions.sort((a, b) => b.startTime.localeCompare(a.startTime))
-    return sessions
+    return projectMap.get(projectEncoded)?.sessions ?? []
   }
 
   async readSessionContent(projectEncoded: string, sessionId: string): Promise<string> {
-    const file = this.fileMap.get(`${projectEncoded}/${sessionId}`)
+    const file = isCodexProjectId(projectEncoded)
+      ? this.codexFiles.get(sessionId)
+      : this.claudeFiles.get(`${projectEncoded}/${sessionId}`)
     if (!file) throw new Error(`Session file not found: ${projectEncoded}/${sessionId}`)
     return file.text()
   }
 
-  async readToolResult(_projectEncoded: string, _sessionId: string, _relativePath: string): Promise<string> {
+  async readToolResult(projectEncoded: string, sessionId: string, relativePath: string): Promise<string> {
+    void projectEncoded
+    void sessionId
+    void relativePath
     throw new Error('Tool result files are not available in input fallback mode')
+  }
+
+  async searchSessions(): Promise<SearchResult[]> {
+    throw new Error(getUnavailableSearchStatus().message)
+  }
+
+  async getSearchBackendStatus(): Promise<SearchBackendStatus> {
+    return getUnavailableSearchStatus()
+  }
+
+  private async scanClaudeProjects(projectMap: Map<string, ScanSummary>, onlyProject?: string): Promise<void> {
+    const grouped = new Map<string, Array<{ sessionId: string; file: File }>>()
+    for (const [key, file] of this.claudeFiles) {
+      const [projectEncoded, sessionId] = key.split('/')
+      if (onlyProject && projectEncoded !== onlyProject) continue
+      if (!grouped.has(projectEncoded)) grouped.set(projectEncoded, [])
+      grouped.get(projectEncoded)!.push({ sessionId, file })
+    }
+
+    for (const [encodedName, files] of grouped) {
+      files.sort((a, b) => b.file.lastModified - a.file.lastModified)
+      const sessions: SessionMeta[] = []
+      for (const { sessionId, file } of (onlyProject ? files : files.slice(0, MAX_CLAUDE_SESSIONS_PER_PROJECT))) {
+        const head = file.slice(0, CLAUDE_PREVIEW_BYTES)
+        const meta = quickScanMetadata(await head.text(), sessionId, file.size)
+        if (meta) sessions.push(meta)
+      }
+
+      if (sessions.length === 0) continue
+
+      projectMap.set(encodedName, {
+        source: 'claude',
+        decodedName: decodeProjectName(encodedName),
+        shortName: extractShortName(encodedName),
+        sessions: sortSessions(sessions),
+        totalSessionCount: files.length,
+      })
+    }
+  }
+
+  private async scanCodexProjects(projectMap: Map<string, ScanSummary>, onlyProject?: string): Promise<void> {
+    const threadIndex = await this.readCodexSessionIndex()
+    const entries = Array.from(this.codexFiles.entries())
+
+    entries.sort((a, b) => {
+      const aTime = threadIndex.get(a[0])?.updatedAt || new Date(a[1].lastModified).toISOString()
+      const bTime = threadIndex.get(b[0])?.updatedAt || new Date(b[1].lastModified).toISOString()
+      return bTime.localeCompare(aTime)
+    })
+
+    const grouped = new Map<string, SessionMeta[]>()
+    const names = new Map<string, string>()
+
+    const scannedEntries = await mapInBatches(entries, CODEX_SCAN_CONCURRENCY, async ([sessionId, file]) => {
+      const indexEntry = threadIndex.get(sessionId)
+      const head = await readFileHead(file, CODEX_PREVIEW_BYTES)
+      const scanned = quickScanCodexMetadata(head, sessionId, file.size, indexEntry?.threadName)
+      if (!scanned) return null
+      if (onlyProject && scanned.projectEncoded !== onlyProject) return null
+      return scanned
+    })
+
+    for (const scanned of scannedEntries) {
+      if (!grouped.has(scanned.projectEncoded)) {
+        grouped.set(scanned.projectEncoded, [])
+        names.set(scanned.projectEncoded, scanned.cwd)
+      }
+      grouped.get(scanned.projectEncoded)!.push(scanned.meta)
+    }
+
+    for (const [encodedName, sessions] of grouped) {
+      const decodedName = names.get(encodedName) || encodedName.slice(CODEX_PROJECT_PREFIX.length)
+      const sorted = sortSessions(sessions)
+      projectMap.set(encodedName, {
+        source: 'codex',
+        decodedName,
+        shortName: extractCodexShortName(decodedName),
+        sessions: onlyProject ? sorted : selectCodexRootSessions(sorted, MAX_CODEX_GROUPS_PER_PROJECT),
+        totalSessionCount: sorted.length,
+      })
+    }
+  }
+
+  private async readCodexSessionIndex(): Promise<Map<string, CodexThreadIndexEntry>> {
+    const index = new Map<string, CodexThreadIndexEntry>()
+    if (!this.codexSessionIndexFile) return index
+
+    const content = await this.codexSessionIndexFile.text()
+    for (const line of content.split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const data = JSON.parse(line) as Record<string, unknown>
+        if (typeof data.id === 'string') {
+          index.set(data.id, {
+            threadName: typeof data.thread_name === 'string' ? data.thread_name : '',
+            updatedAt: typeof data.updated_at === 'string' ? data.updated_at : '',
+          })
+        }
+      } catch {
+        // Ignore malformed lines.
+      }
+    }
+    return index
   }
 }
 
 // --- API-based implementation (auto-load from Vite dev server) ---
 
 class APIFileStore implements FileStore {
+  private projectSources = new Map<string, SessionSource>()
+  private initialProjects: ProjectMeta[] | null
+
+  constructor(initialProjects: ProjectMeta[] | null = null) {
+    this.initialProjects = initialProjects
+  }
+
   async scanProjects(): Promise<ProjectMeta[]> {
-    const res = await fetch('/api/scan')
-    if (!res.ok) throw new Error(`API scan failed: ${res.status}`)
-    return res.json()
+    const projects = this.initialProjects ?? await (async () => {
+      const res = await fetch('/api/scan')
+      if (!res.ok) throw new Error(`API scan failed: ${res.status}`)
+      return res.json() as Promise<ProjectMeta[]>
+    })()
+    this.initialProjects = null
+    this.rememberProjectSources(projects)
+    return projects
   }
 
   async scanAllProjectSessions(projectEncoded: string): Promise<SessionMeta[]> {
-    const res = await fetch(`/api/scan-project/${encodeURIComponent(projectEncoded)}`)
+    const source = this.resolveProjectSource(projectEncoded)
+    const res = await fetch(`/api/scan-project/${source}/${encodeURIComponent(projectEncoded)}`)
     if (!res.ok) throw new Error(`Project scan failed: ${res.status}`)
     return res.json()
   }
 
   async readSessionContent(projectEncoded: string, sessionId: string): Promise<string> {
-    const res = await fetch(`/api/session/${encodeURIComponent(projectEncoded)}/${encodeURIComponent(sessionId)}`)
+    const source = this.resolveProjectSource(projectEncoded)
+    const res = await fetch(`/api/session/${source}/${encodeURIComponent(projectEncoded)}/${encodeURIComponent(sessionId)}`)
     if (!res.ok) throw new Error(`Session fetch failed: ${res.status}`)
     return res.text()
   }
 
   async readToolResult(projectEncoded: string, sessionId: string, relativePath: string): Promise<string> {
-    const res = await fetch(`/api/tool-result/${encodeURIComponent(projectEncoded)}/${encodeURIComponent(sessionId)}/${encodeURIComponent(relativePath)}`)
+    const source = this.resolveProjectSource(projectEncoded)
+    if (source === 'codex') throw new Error('Tool result files are not available for Codex sessions')
+    const res = await fetch(`/api/tool-result/${source}/${encodeURIComponent(projectEncoded)}/${encodeURIComponent(sessionId)}/${encodeURIComponent(relativePath)}`)
     if (!res.ok) throw new Error(`Tool result fetch failed: ${res.status}`)
     return res.text()
+  }
+
+  async searchSessions(query: string, options: SearchQueryOptions = {}): Promise<SearchResult[]> {
+    const res = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, options }),
+    })
+    if (!res.ok) throw new Error(`Search request failed: ${res.status}`)
+    const data = await res.json() as { results: SearchResult[] }
+    return data.results
+  }
+
+  async getSearchBackendStatus(): Promise<SearchBackendStatus> {
+    const res = await fetch('/api/search/status')
+    if (!res.ok) throw new Error(`Search status request failed: ${res.status}`)
+    return res.json()
+  }
+
+  private rememberProjectSources(projects: ProjectMeta[]) {
+    for (const project of projects) {
+      this.projectSources.set(project.encodedName, project.source)
+    }
+  }
+
+  private resolveProjectSource(projectEncoded: string): SessionSource {
+    const source = this.projectSources.get(projectEncoded)
+    if (source) return source
+    return isCodexProjectId(projectEncoded) ? 'codex' : 'claude'
   }
 }
 
 // --- Factory functions ---
-
-export async function tryAutoLoad(): Promise<FileStore | null> {
-  try {
-    const res = await fetch('/api/scan')
-    if (res.ok) return new APIFileStore()
-  } catch { /* API not available */ }
-  return null
-}
 
 export function supportsDirectoryPicker(): boolean {
   return 'showDirectoryPicker' in window
@@ -274,4 +677,17 @@ export function createStoreFromFiles(files: FileList): FileStore {
 
 export function createStoreFromHandle(handle: FileSystemDirectoryHandle): FileStore {
   return new FSAccessStore(handle)
+}
+
+export async function tryAutoLoad(): Promise<FileStore | null> {
+  try {
+    const res = await fetch('/api/scan')
+    if (res.ok) {
+      const projects = await res.json() as ProjectMeta[]
+      return new APIFileStore(projects)
+    }
+  } catch {
+    // API not available.
+  }
+  return null
 }

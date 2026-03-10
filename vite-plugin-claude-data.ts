@@ -1,174 +1,512 @@
 import type { Plugin } from 'vite'
-import fs from 'fs'
-import path from 'path'
-import os from 'os'
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+import type { IncomingMessage } from 'node:http'
 
-const MAX_SESSIONS_PER_PROJECT = 50
-const PREVIEW_BYTES = 4096
+import type { ProjectMeta, SessionMeta, SessionSource } from './src/types/session'
+import { quickScanMetadata, decodeProjectName, extractShortName, disambiguateShortNames } from './src/lib/parser'
+import {
+  CODEX_PREVIEW_BYTES,
+  extractCodexSessionId,
+  extractCodexShortName,
+  isCodexProjectId,
+  quickScanCodexMetadata,
+} from './src/lib/providers/codex'
+import { selectCodexRootSessions } from './src/lib/codex-navigation'
+import { createSQLiteSearchService } from './server/search/sqlite-search-service'
+import { SessionScanCache, getSessionScanCachePath } from './server/scan/session-scan-cache'
+import type { SearchQueryOptions } from './src/lib/search'
+
+const MAX_CLAUDE_SESSIONS_PER_PROJECT = 50
+const MAX_CODEX_GROUPS_PER_PROJECT = 50
+const CLAUDE_PREVIEW_BYTES = 4096
+const CODEX_SCAN_CONCURRENCY = 24
+
+type ScanSummary = {
+  source: SessionSource
+  decodedName: string
+  shortName: string
+  sessions: SessionMeta[]
+  totalSessionCount: number
+}
+
+type CodexThreadIndexEntry = {
+  threadName: string
+  updatedAt: string
+}
+
+const codexSessionFileIndex = new Map<string, string>()
+const codexProjectSessionCatalog = new Map<string, SessionMeta[]>()
+
+type SearchRequestBody = {
+  query?: string
+  options?: SearchQueryOptions
+}
+
+type MiddlewareRegistrar = (fn: (req: IncomingMessage & { url?: string; method?: string }, res: {
+  setHeader(name: string, value: string): void
+  end(body?: string): void
+  statusCode: number
+}, next: () => void) => void) => void
+
+async function mapInBatches<T, R>(
+  items: T[],
+  batchSize: number,
+  fn: (item: T) => Promise<R | null>,
+): Promise<R[]> {
+  const results: R[] = []
+  for (let index = 0; index < items.length; index += batchSize) {
+    const chunk = items.slice(index, index + batchSize)
+    const chunkResults = await Promise.all(chunk.map(fn))
+    for (const result of chunkResults) {
+      if (result !== null) results.push(result)
+    }
+  }
+  return results
+}
 
 export function claudeDataPlugin(): Plugin {
-  const claudeDir = path.join(os.homedir(), '.claude')
-  const projectsDir = path.join(claudeDir, 'projects')
+  const homeDir = os.homedir()
+  const claudeProjectsDir = path.join(homeDir, '.claude', 'projects')
+  const codexRootDir = path.join(homeDir, '.codex')
+  const codexSessionsDir = path.join(codexRootDir, 'sessions')
+  const sessionScanCache = new SessionScanCache(getSessionScanCachePath(homeDir))
+  const searchService = createSQLiteSearchService({
+    claudeProjectsDir,
+    codexRootDir,
+    codexSessionsDir,
+  })
+
+  const installMiddleware = (registerMiddleware: MiddlewareRegistrar) => {
+    registerMiddleware((req, res, next) => {
+      const url = req.url || ''
+      const pathname = getPathname(url)
+
+      if (pathname === '/api/search/status') {
+        searchService.getStatus().then((status) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({
+            available: true,
+            ...status,
+          }))
+        }).catch((err) => {
+          res.statusCode = 500
+          res.end(JSON.stringify({ error: String(err) }))
+        })
+        return
+      }
+
+      if (pathname === '/api/search') {
+        if ((req.method ?? 'GET').toUpperCase() !== 'POST') {
+          res.statusCode = 405
+          res.end('Use POST /api/search')
+          return
+        }
+
+        readJsonBody(req).then((body) => {
+          const payload = body as SearchRequestBody
+          return searchService.search(payload.query ?? '', payload.options ?? {})
+        }).then((payload) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(payload))
+        }).catch((err) => {
+          res.statusCode = 500
+          res.end(JSON.stringify({ error: String(err) }))
+        })
+        return
+      }
+
+      if (pathname === '/api/scan') {
+        scanAllProjects(claudeProjectsDir, codexRootDir, codexSessionsDir, sessionScanCache).then((projects) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(projects))
+        }).catch((err) => {
+          res.statusCode = 500
+          res.end(JSON.stringify({ error: String(err) }))
+        })
+        return
+      }
+
+      if (pathname.startsWith('/api/scan-project/')) {
+        const rest = pathname.slice('/api/scan-project/'.length)
+        const slashIdx = rest.indexOf('/')
+        if (slashIdx < 0) {
+          res.statusCode = 400
+          res.end('Need /api/scan-project/:source/:project')
+          return
+        }
+
+        const source = rest.slice(0, slashIdx) as SessionSource
+        const projectEncoded = decodeURIComponent(rest.slice(slashIdx + 1))
+
+        scanProjectSessions(source, projectEncoded, claudeProjectsDir, codexRootDir, codexSessionsDir, sessionScanCache).then((sessions) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(sessions))
+        }).catch((err) => {
+          res.statusCode = 500
+          res.end(JSON.stringify({ error: String(err) }))
+        })
+        return
+      }
+
+      if (pathname.startsWith('/api/session/')) {
+        const rest = pathname.slice('/api/session/'.length)
+        const parts = rest.split('/')
+        if (parts.length < 3) {
+          res.statusCode = 400
+          res.end('Need /api/session/:source/:project/:session')
+          return
+        }
+
+        const source = parts[0] as SessionSource
+        const projectEncoded = decodeURIComponent(parts[1])
+        const sessionId = decodeURIComponent(parts.slice(2).join('/'))
+
+        readSessionContent(source, projectEncoded, sessionId, claudeProjectsDir, codexSessionsDir).then((content) => {
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+          res.end(content)
+        }).catch((err) => {
+          res.statusCode = err instanceof NotFoundError ? 404 : 500
+          res.end(String(err.message || err))
+        })
+        return
+      }
+
+      if (pathname.startsWith('/api/tool-result/')) {
+        const rest = pathname.slice('/api/tool-result/'.length)
+        const parts = rest.split('/')
+        if (parts.length < 4) {
+          res.statusCode = 400
+          res.end('Need /api/tool-result/:source/:project/:session/:relativePath')
+          return
+        }
+
+        const source = parts[0] as SessionSource
+        const projectEncoded = decodeURIComponent(parts[1])
+        const sessionId = decodeURIComponent(parts[2])
+        const relativePath = decodeURIComponent(parts.slice(3).join('/'))
+
+        if (source !== 'claude') {
+          res.statusCode = 400
+          res.end('Tool result files are only available for Claude sessions')
+          return
+        }
+
+        if (relativePath.includes('..') || path.isAbsolute(relativePath)) {
+          res.statusCode = 400
+          res.end('Invalid path: directory traversal not allowed')
+          return
+        }
+
+        const sessionDir = path.resolve(claudeProjectsDir, projectEncoded, sessionId)
+        const filePath = path.resolve(sessionDir, relativePath)
+        const relativeToSession = path.relative(sessionDir, filePath)
+        if (relativeToSession.startsWith('..') || path.isAbsolute(relativeToSession)) {
+          res.statusCode = 400
+          res.end('Invalid path: outside session directory')
+          return
+        }
+
+        fs.promises.readFile(filePath, 'utf-8').then((content) => {
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+          res.end(content)
+        }).catch(() => {
+          res.statusCode = 404
+          res.end('Tool result not found')
+        })
+        return
+      }
+
+        next()
+      })
+  }
 
   return {
     name: 'claude-data',
     configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        const url = req.url || ''
-
-        if (url === '/api/scan') {
-          scanAllProjects(projectsDir).then((projects) => {
-            res.setHeader('Content-Type', 'application/json')
-            res.end(JSON.stringify(projects))
-          }).catch((err) => {
-            res.statusCode = 500
-            res.end(JSON.stringify({ error: String(err) }))
-          })
-          return
-        }
-
-        if (url.startsWith('/api/scan-project/')) {
-          const projectEncoded = decodeURIComponent(url.slice('/api/scan-project/'.length))
-          scanAllProjectSessions(projectsDir, projectEncoded).then((sessions) => {
-            res.setHeader('Content-Type', 'application/json')
-            res.end(JSON.stringify(sessions))
-          }).catch((err) => {
-            res.statusCode = 500
-            res.end(JSON.stringify({ error: String(err) }))
-          })
-          return
-        }
-
-        if (url.startsWith('/api/tool-result/')) {
-          const rest = url.slice('/api/tool-result/'.length)
-          const parts = rest.split('/')
-          if (parts.length < 3) {
-            res.statusCode = 400
-            res.end('Need /api/tool-result/:project/:session/:relativePath')
-            return
-          }
-          const projectEncoded = decodeURIComponent(parts[0])
-          const sessionId = decodeURIComponent(parts[1])
-          const relativePath = decodeURIComponent(parts.slice(2).join('/'))
-
-          // Validate path to prevent directory traversal attacks
-          // Reject paths containing .. or absolute paths
-          if (relativePath.includes('..') || path.isAbsolute(relativePath)) {
-            res.statusCode = 400
-            res.end('Invalid path: directory traversal not allowed')
-            return
-          }
-
-          // Normalize and validate the final path
-          const sessionDir = path.resolve(projectsDir, projectEncoded, sessionId)
-          const filePath = path.resolve(sessionDir, relativePath)
-
-          // Ensure resolved path is still within session directory
-          const relativeToSession = path.relative(sessionDir, filePath)
-          if (relativeToSession.startsWith('..') || path.isAbsolute(relativeToSession)) {
-            res.statusCode = 400
-            res.end('Invalid path: outside session directory')
-            return
-          }
-          fs.promises.readFile(filePath, 'utf-8').then((content) => {
-            res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-            res.end(content)
-          }).catch(() => {
-            res.statusCode = 404
-            res.end('Tool result not found')
-          })
-          return
-        }
-
-        if (url.startsWith('/api/session/')) {
-          const rest = url.slice('/api/session/'.length)
-          const slashIdx = rest.indexOf('/')
-          if (slashIdx < 0) {
-            res.statusCode = 400
-            res.end('Need /api/session/:project/:session')
-            return
-          }
-          const projectEncoded = decodeURIComponent(rest.slice(0, slashIdx))
-          const sessionId = decodeURIComponent(rest.slice(slashIdx + 1))
-          const filePath = path.join(projectsDir, projectEncoded, `${sessionId}.jsonl`)
-          fs.promises.readFile(filePath, 'utf-8').then((content) => {
-            res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-            res.end(content)
-          }).catch(() => {
-            res.statusCode = 404
-            res.end('Session not found')
-          })
-          return
-        }
-
-        next()
-      })
+      installMiddleware(server.middlewares.use.bind(server.middlewares))
+    },
+    configurePreviewServer(server) {
+      installMiddleware(server.middlewares.use.bind(server.middlewares))
     },
   }
 }
 
-// --- Fast scan: use fs metadata + first 4KB for preview ---
-
-interface QuickMeta {
-  id: string
-  startTime: string
-  startDisplay: string
-  promptCount: number
-  toolCount: number
-  firstPromptPreview: string
-  fileSize: number
-  recordCount: number
-  markers?: { compacts: number; plans: number; clears: number; forks: number }
+function getPathname(url: string): string {
+  try {
+    return new URL(url, 'http://localhost').pathname
+  } catch {
+    return url
+  }
 }
 
-async function scanAllProjects(projectsDir: string) {
-  if (!fs.existsSync(projectsDir)) return []
+function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let body = ''
+    req.setEncoding('utf-8')
+    req.on('data', (chunk) => {
+      body += chunk
+    })
+    req.on('end', () => {
+      if (!body.trim()) {
+        resolve({})
+        return
+      }
+      try {
+        resolve(JSON.parse(body))
+      } catch (error) {
+        reject(error)
+      }
+    })
+    req.on('error', reject)
+  })
+}
 
-  const projects = []
-  const projectDirs = await fs.promises.readdir(projectsDir, { withFileTypes: true })
+async function scanAllProjects(
+  claudeProjectsDir: string,
+  codexRootDir: string,
+  codexSessionsDir: string,
+  sessionScanCache: SessionScanCache,
+): Promise<ProjectMeta[]> {
+  const projectMap = new Map<string, ScanSummary>()
+  codexProjectSessionCatalog.clear()
 
+  await sessionScanCache.load()
+  await Promise.all([
+    scanClaudeProjects(projectMap, claudeProjectsDir, sessionScanCache),
+    scanCodexProjects(projectMap, codexRootDir, codexSessionsDir, sessionScanCache),
+  ])
+  await sessionScanCache.persist()
+
+  return finalizeProjects(projectMap)
+}
+
+async function scanProjectSessions(
+  source: SessionSource,
+  projectEncoded: string,
+  claudeProjectsDir: string,
+  codexRootDir: string,
+  codexSessionsDir: string,
+  sessionScanCache: SessionScanCache,
+): Promise<SessionMeta[]> {
+  await sessionScanCache.load()
+  if (source === 'codex') {
+    const cached = codexProjectSessionCatalog.get(projectEncoded)
+    if (cached) return cached
+
+    const projectMap = new Map<string, ScanSummary>()
+    await scanCodexProjects(projectMap, codexRootDir, codexSessionsDir, sessionScanCache, projectEncoded)
+    await sessionScanCache.persist()
+    return projectMap.get(projectEncoded)?.sessions ?? []
+  }
+
+  const projectMap = new Map<string, ScanSummary>()
+  await scanClaudeProjects(projectMap, claudeProjectsDir, sessionScanCache, projectEncoded)
+  await sessionScanCache.persist()
+  return projectMap.get(projectEncoded)?.sessions ?? []
+}
+
+async function readSessionContent(
+  source: SessionSource,
+  projectEncoded: string,
+  sessionId: string,
+  claudeProjectsDir: string,
+  codexSessionsDir: string,
+): Promise<string> {
+  if (source === 'codex' || isCodexProjectId(projectEncoded)) {
+    const filePath = await resolveCodexSessionFile(codexSessionsDir, sessionId)
+    return fs.promises.readFile(filePath, 'utf-8')
+  }
+
+  const filePath = path.join(claudeProjectsDir, projectEncoded, `${sessionId}.jsonl`)
+  return fs.promises.readFile(filePath, 'utf-8')
+}
+
+async function scanClaudeProjects(
+  projectMap: Map<string, ScanSummary>,
+  claudeProjectsDir: string,
+  sessionScanCache: SessionScanCache,
+  onlyProject?: string,
+): Promise<void> {
+  if (!fs.existsSync(claudeProjectsDir)) return
+
+  const projectDirs = await fs.promises.readdir(claudeProjectsDir, { withFileTypes: true })
   for (const dir of projectDirs) {
     if (!dir.isDirectory()) continue
+    if (onlyProject && dir.name !== onlyProject) continue
 
-    const dirPath = path.join(projectsDir, dir.name)
+    const dirPath = path.join(claudeProjectsDir, dir.name)
     const files = await fs.promises.readdir(dirPath)
-    const jsonlFiles = files.filter(f => f.endsWith('.jsonl'))
+    const jsonlFiles = files.filter((fileName) => fileName.endsWith('.jsonl'))
+    if (jsonlFiles.length === 0) continue
 
-    // Get stats for all files to sort by mtime
-    const fileStats = await Promise.all(
-      jsonlFiles.map(async (f) => {
-        const stat = await fs.promises.stat(path.join(dirPath, f))
-        return { name: f, mtime: stat.mtime, size: stat.size }
-      })
-    )
+    const fileStats = await Promise.all(jsonlFiles.map(async (fileName) => {
+      const filePath = path.join(dirPath, fileName)
+      const stat = await fs.promises.stat(filePath)
+      return { fileName, filePath, mtimeMs: stat.mtimeMs, size: stat.size }
+    }))
 
-    // Sort by mtime descending, take most recent N
-    fileStats.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
-    const recent = fileStats.slice(0, MAX_SESSIONS_PER_PROJECT)
+    fileStats.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    const recent = fileStats.slice(0, MAX_CLAUDE_SESSIONS_PER_PROJECT)
+    const sessions: SessionMeta[] = []
 
-    const sessions: QuickMeta[] = []
-    for (const { name, mtime, size } of recent) {
-      const filePath = path.join(dirPath, name)
-      const meta = await quickScanFile(filePath, name.replace('.jsonl', ''), mtime, size)
-      if (meta) sessions.push(meta)
+    for (const file of recent) {
+      const cached = sessionScanCache.get(file.filePath, { mtimeMs: file.mtimeMs, size: file.size })
+      if (cached?.source === 'claude') {
+        sessions.push(cached.meta)
+        continue
+      }
+
+      const content = await fs.promises.readFile(file.filePath, 'utf-8')
+      const meta = quickScanMetadata(content.slice(0, CLAUDE_PREVIEW_BYTES), file.fileName.replace(/\.jsonl$/i, ''), file.size)
+      if (!meta) continue
+      meta.markers = countClaudeMarkers(content)
+      sessionScanCache.set(file.filePath, { mtimeMs: file.mtimeMs, size: file.size }, { source: 'claude', meta })
+      sessions.push(meta)
     }
 
-    if (sessions.length > 0) {
-      sessions.sort((a, b) => b.startTime.localeCompare(a.startTime))
-      const decoded = decodeProjectName(dir.name)
-      // Only report totalSessionCount > sessions.length when MAX limit actually truncated files
-      const wasTruncated = fileStats.length > MAX_SESSIONS_PER_PROJECT
-      projects.push({
-        encodedName: dir.name,
-        decodedName: decoded,
-        shortName: extractShortName(dir.name),
-        sessions,
-        totalSessionCount: wasTruncated ? fileStats.length : sessions.length,
+    if (sessions.length === 0) continue
+
+    projectMap.set(dir.name, {
+      source: 'claude',
+      decodedName: decodeProjectName(dir.name),
+      shortName: extractShortName(dir.name),
+      sessions: sortSessions(sessions),
+      totalSessionCount: fileStats.length > MAX_CLAUDE_SESSIONS_PER_PROJECT ? fileStats.length : sessions.length,
+    })
+  }
+}
+
+async function scanCodexProjects(
+  projectMap: Map<string, ScanSummary>,
+  codexRootDir: string,
+  codexSessionsDir: string,
+  sessionScanCache: SessionScanCache,
+  onlyProject?: string,
+): Promise<void> {
+  if (!fs.existsSync(codexSessionsDir)) return
+
+  codexSessionFileIndex.clear()
+  const threadIndex = await readCodexThreadIndex(codexRootDir)
+  const filePaths: string[] = []
+  for await (const filePath of walkJsonlFiles(codexSessionsDir)) {
+    filePaths.push(filePath)
+  }
+
+  const statCache = new Map<string, { mtimeMs: number; size: number }>()
+  await Promise.all(filePaths.map(async (filePath) => {
+    const stat = await fs.promises.stat(filePath)
+    statCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size })
+  }))
+
+  filePaths.sort((a, b) => {
+    const aSessionId = extractCodexSessionId(path.basename(a))
+    const bSessionId = extractCodexSessionId(path.basename(b))
+    const aTime = threadIndex.get(aSessionId)?.updatedAt || new Date(statCache.get(a)?.mtimeMs || 0).toISOString()
+    const bTime = threadIndex.get(bSessionId)?.updatedAt || new Date(statCache.get(b)?.mtimeMs || 0).toISOString()
+    return bTime.localeCompare(aTime)
+  })
+
+  const grouped = new Map<string, SessionMeta[]>()
+  const names = new Map<string, string>()
+
+  const scannedEntries = await mapInBatches(filePaths, CODEX_SCAN_CONCURRENCY, async (filePath) => {
+    const stat = statCache.get(filePath)
+    if (!stat) return null
+    const sessionId = extractCodexSessionId(path.basename(filePath))
+    const indexEntry = threadIndex.get(sessionId)
+    const cached = sessionScanCache.get(filePath, stat)
+    const scanned = cached?.source === 'codex'
+      ? { cwd: cached.cwd, projectEncoded: cached.projectEncoded, meta: cached.meta }
+      : quickScanCodexMetadata(await readHead(filePath, CODEX_PREVIEW_BYTES), sessionId, stat.size, indexEntry?.threadName)
+    if (!scanned) return null
+    if (onlyProject && scanned.projectEncoded !== onlyProject) return null
+    if (!cached) {
+      sessionScanCache.set(filePath, stat, {
+        source: 'codex',
+        cwd: scanned.cwd,
+        projectEncoded: scanned.projectEncoded,
+        meta: scanned.meta,
+      })
+    }
+    return { filePath, sessionId, scanned }
+  })
+
+  for (const { filePath, sessionId, scanned } of scannedEntries) {
+    codexSessionFileIndex.set(sessionId, filePath)
+
+    if (!grouped.has(scanned.projectEncoded)) {
+      grouped.set(scanned.projectEncoded, [])
+      names.set(scanned.projectEncoded, scanned.cwd)
+    }
+    grouped.get(scanned.projectEncoded)!.push(scanned.meta)
+  }
+
+    for (const [encodedName, sessions] of grouped) {
+      const decodedName = names.get(encodedName) || encodedName
+      const sorted = sortSessions(sessions)
+      codexProjectSessionCatalog.set(encodedName, sorted)
+      projectMap.set(encodedName, {
+        source: 'codex',
+        decodedName,
+        shortName: extractCodexShortName(decodedName),
+        sessions: onlyProject ? sorted : selectCodexRootSessions(sorted, MAX_CODEX_GROUPS_PER_PROJECT),
+        totalSessionCount: sorted.length,
       })
     }
   }
 
-  disambiguateShortNames(projects)
+async function readCodexThreadIndex(codexRootDir: string): Promise<Map<string, CodexThreadIndexEntry>> {
+  const index = new Map<string, CodexThreadIndexEntry>()
+  const indexPath = path.join(codexRootDir, 'session_index.jsonl')
+  if (!fs.existsSync(indexPath)) return index
+
+  const content = await fs.promises.readFile(indexPath, 'utf-8')
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const data = JSON.parse(line) as Record<string, unknown>
+      if (typeof data.id === 'string') {
+        index.set(data.id, {
+          threadName: typeof data.thread_name === 'string' ? data.thread_name : '',
+          updatedAt: typeof data.updated_at === 'string' ? data.updated_at : '',
+        })
+      }
+    } catch {
+      // Ignore malformed lines.
+    }
+  }
+
+  return index
+}
+
+async function resolveCodexSessionFile(codexSessionsDir: string, sessionId: string): Promise<string> {
+  const cached = codexSessionFileIndex.get(sessionId)
+  if (cached) return cached
+
+  for await (const filePath of walkJsonlFiles(codexSessionsDir)) {
+    const candidateId = extractCodexSessionId(path.basename(filePath))
+    if (candidateId === sessionId) {
+      codexSessionFileIndex.set(sessionId, filePath)
+      return filePath
+    }
+  }
+
+  throw new NotFoundError(`Codex session not found: ${sessionId}`)
+}
+
+function finalizeProjects(projectMap: Map<string, ScanSummary>): ProjectMeta[] {
+  const projects = Array.from(projectMap.entries()).map(([encodedName, summary]) => ({
+    source: summary.source,
+    encodedName,
+    decodedName: summary.decodedName,
+    shortName: summary.shortName,
+    sessions: summary.sessions,
+    totalSessionCount: summary.totalSessionCount,
+  }))
+
+  disambiguateProjectNames(projects)
 
   return projects.sort((a, b) => {
     const aTime = a.sessions[0]?.startTime || ''
@@ -177,188 +515,68 @@ async function scanAllProjects(projectsDir: string) {
   })
 }
 
-async function quickScanFile(filePath: string, sessionId: string, mtime: Date, fileSize: number): Promise<QuickMeta | null> {
-  // Read full file for both metadata extraction and marker counting
-  const content = await fs.promises.readFile(filePath, 'utf-8')
-  const head = content.slice(0, PREVIEW_BYTES)
+function disambiguateProjectNames(projects: ProjectMeta[]) {
+  disambiguateShortNames(projects.filter((project) => project.source === 'claude'))
 
-  let firstPromptPreview = ''
-  let startTime: string | null = null
-
-  for (const line of head.split('\n')) {
-    if (!line.trim()) continue
-    let data: Record<string, unknown>
-    try { data = JSON.parse(line) } catch { continue }
-
-    // Extract timestamp from first parseable line
-    if (!startTime) {
-      const ts = data.timestamp
-        || (data.snapshot as Record<string, unknown> | undefined)?.timestamp
-        || (data.message as Record<string, unknown> | undefined)?.timestamp
-      if (ts) startTime = typeof ts === 'string' ? ts : new Date(ts as number).toISOString()
-    }
-
-    // Find first real user prompt
-    if (!firstPromptPreview && data.type === 'user' && !data.isMeta) {
-      const preview = extractUserPreview(data)
-      if (preview) {
-        firstPromptPreview = preview
-        break // Got what we need
-      }
-    }
+  const groups = new Map<string, ProjectMeta[]>()
+  for (const project of projects) {
+    if (project.source !== 'codex') continue
+    const list = groups.get(project.shortName)
+    if (list) list.push(project)
+    else groups.set(project.shortName, [project])
   }
 
-  // Use mtime as fallback for startTime
-  if (!startTime) startTime = mtime.toISOString()
-  if (!firstPromptPreview) return null
+  for (const [, dupes] of groups) {
+    if (dupes.length <= 1) continue
+    for (let index = 0; index < dupes.length; index++) {
+      const project = dupes[index]
+      const parts = project.decodedName.replace(/\\/g, '/').split('/').filter(Boolean)
+      const parent = parts[parts.length - 2]
+      project.shortName = parent ? `${project.shortName} (${parent})` : `${project.shortName} #${index + 1}`
+    }
+  }
+}
 
-  const d = new Date(startTime)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const startDisplay = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+function sortSessions(sessions: SessionMeta[]): SessionMeta[] {
+  return sessions.sort((a, b) => b.startTime.localeCompare(a.startTime))
+}
 
-  // Fast regex marker counting on full content
+function countClaudeMarkers(content: string) {
   const compactMatches = content.match(/"subtype"\s*:\s*"compact_boundary"/g)
   const planMatches = content.match(/"EnterPlanMode"/g)
   const clearMatches = content.match(/<command-name>\/clear<\/command-name>/g)
 
   return {
-    id: sessionId,
-    startTime,
-    startDisplay,
-    promptCount: 0, // computed on full load
-    toolCount: 0,
-    firstPromptPreview,
-    fileSize,
-    recordCount: 0, // computed on full load
-    markers: {
-      compacts: compactMatches?.length ?? 0,
-      plans: planMatches?.length ?? 0,
-      clears: clearMatches?.length ?? 0,
-      forks: 0, // requires tree analysis
-    },
+    compacts: compactMatches?.length ?? 0,
+    plans: planMatches?.length ?? 0,
+    clears: clearMatches?.length ?? 0,
+    forks: 0,
   }
 }
 
-function isProtocolTag(text: string): boolean {
-  return text.startsWith('<local-command') || text.startsWith('<command-')
-    || text.startsWith('<teammate-message') || text.startsWith('<task-notification')
-    || text.startsWith('<system-reminder>')
+async function readHead(filePath: string, bytes: number): Promise<string> {
+  const handle = await fs.promises.open(filePath, 'r')
+  try {
+    const buffer = Buffer.alloc(bytes)
+    const { bytesRead } = await handle.read(buffer, 0, bytes, 0)
+    return buffer.subarray(0, bytesRead).toString('utf-8')
+  } finally {
+    await handle.close()
+  }
 }
 
-function extractUserPreview(data: Record<string, unknown>): string | null {
-  const msg = data.message as Record<string, unknown> | undefined
-  const content = msg?.content
-  if (typeof content === 'string') {
-    const t = content.trim()
-    if (t && !isProtocolTag(t)) {
-      return t.slice(0, 100).replace(/\n/g, ' ')
+async function *walkJsonlFiles(dirPath: string): AsyncGenerator<string> {
+  const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
+  for (const entry of entries) {
+    const entryPath = path.join(dirPath, entry.name)
+    if (entry.isDirectory()) {
+      yield * walkJsonlFiles(entryPath)
+      continue
     }
-  }
-  if (Array.isArray(content)) {
-    if (content.every((c: unknown) => (c as Record<string, unknown>)?.type === 'tool_result')) return null
-    for (const c of content) {
-      const item = c as Record<string, unknown>
-      if ((item.type === 'text' || item.type === 'input_text') && item.text) {
-        const t = String(item.text).trim()
-        if (t && !isProtocolTag(t)) {
-          return t.slice(0, 100).replace(/\n/g, ' ')
-        }
-      }
-    }
-  }
-  return null
-}
-
-function decodeProjectName(encoded: string): string {
-  if (encoded.startsWith('-')) {
-    // The encoding replaces '/' and non-ASCII chars with '-'.
-    // We can only approximate: replace leading '-' with '/' then all '-' with '/'.
-    // This is lossy (dashes in real names are also replaced), but acceptable for display.
-    return '/' + encoded.slice(1).replaceAll('-', '/')
-  }
-  return encoded
-}
-
-function extractShortName(encoded: string): string {
-  // Split by '-' and filter out empty segments (from consecutive dashes, e.g. Chinese chars)
-  const segments = encoded.split('-').filter(Boolean)
-  if (segments.length === 0) return encoded
-
-  const last = segments[segments.length - 1]
-  // If the last segment is meaningful enough (>= 3 chars), use it directly
-  if (last.length >= 3) return last
-
-  // Find the last 2 meaningful (>= 3 chars) segments, using the trailing short ones as suffix
-  // e.g. [jeepay, plus, V3, 9, 2] → "jeepay/2" (last meaningful + last segment)
-  for (let i = segments.length - 2; i >= 0; i--) {
-    if (segments[i].length >= 3) {
-      return segments[i] + '/' + last
-    }
-  }
-  // All segments are short — just use the last one
-  return last
-}
-
-function disambiguateShortNames(projects: Array<{ encodedName: string; shortName: string }>) {
-  const countMap = new Map<string, number>()
-  for (const p of projects) {
-    countMap.set(p.shortName, (countMap.get(p.shortName) || 0) + 1)
-  }
-
-  for (const [name, count] of countMap) {
-    if (count <= 1) continue
-    const dupes = projects.filter(p => p.shortName === name)
-
-    let disambiguated = false
-    for (let depth = 1; depth <= 5; depth++) {
-      const labels = dupes.map(p => {
-        const segments = p.encodedName.split('-').filter(Boolean)
-        const shortSegCount = name.split('/').length
-        const parentIdx = segments.length - shortSegCount - depth
-        return parentIdx >= 0 ? segments[parentIdx] : ''
-      })
-      const unique = new Set(labels)
-      if (unique.size === dupes.length) {
-        for (let i = 0; i < dupes.length; i++) {
-          dupes[i].shortName = `${name} (${labels[i]})`
-        }
-        disambiguated = true
-        break
-      }
-    }
-
-    // If segments can't disambiguate (e.g. Chinese suffixes stripped), append index
-    if (!disambiguated) {
-      for (let i = 0; i < dupes.length; i++) {
-        dupes[i].shortName = `${name} #${i + 1}`
-      }
+    if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+      yield entryPath
     }
   }
 }
 
-async function scanAllProjectSessions(projectsDir: string, projectEncoded: string): Promise<QuickMeta[]> {
-  const dirPath = path.join(projectsDir, projectEncoded)
-  if (!fs.existsSync(dirPath)) throw new Error(`Project not found: ${projectEncoded}`)
-
-  const files = await fs.promises.readdir(dirPath)
-  const jsonlFiles = files.filter(f => f.endsWith('.jsonl'))
-
-  const fileStats = await Promise.all(
-    jsonlFiles.map(async (f) => {
-      const stat = await fs.promises.stat(path.join(dirPath, f))
-      return { name: f, mtime: stat.mtime, size: stat.size }
-    })
-  )
-
-  fileStats.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
-
-  const sessions: QuickMeta[] = []
-  for (const { name, mtime, size } of fileStats) {
-    const filePath = path.join(dirPath, name)
-    const meta = await quickScanFile(filePath, name.replace('.jsonl', ''), mtime, size)
-    if (meta) sessions.push(meta)
-  }
-
-  sessions.sort((a, b) => b.startTime.localeCompare(a.startTime))
-  return sessions
-}
+class NotFoundError extends Error {}

@@ -71,7 +71,7 @@ export function WelcomeScreen() {
 
         <h1 className="text-2xl font-bold text-slate-900 mb-1.5 tracking-tight font-sans">Decision Flow Viewer</h1>
         <p className="text-slate-500 text-sm mb-8 leading-relaxed max-w-xs mx-auto font-sans">
-          Visualize Claude Code sessions. User prompts and decisions take center stage.
+          Visualize Claude Code and Codex sessions. User prompts and decisions take center stage.
         </p>
 
         {state.loading && (
@@ -115,7 +115,7 @@ export function WelcomeScreen() {
 
             <div className="mt-8 pt-5 border-t border-slate-100">
               <p className="text-slate-400 text-xs leading-relaxed">
-                Select your home directory or <code className="text-amber-500 bg-amber-50 px-1.5 py-0.5 rounded text-[11px] font-mono">.claude</code> folder.
+                Select your home directory, <code className="text-amber-500 bg-amber-50 px-1.5 py-0.5 rounded text-[11px] font-mono">.claude</code>, or <code className="text-amber-500 bg-amber-50 px-1.5 py-0.5 rounded text-[11px] font-mono">.codex</code>.
                 Sessions are discovered automatically.
               </p>
               <p className="text-slate-300 text-xs mt-2">

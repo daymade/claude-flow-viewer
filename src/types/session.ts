@@ -1,4 +1,6 @@
 export type DecisionMarker = 'none' | 'interrupt' | 'correction'
+export type SessionSource = 'claude' | 'codex'
+export type SessionThreadKind = 'primary' | 'subagent'
 
 export interface EmbeddedImage {
   mediaType: string
@@ -7,13 +9,15 @@ export interface EmbeddedImage {
 
 export type SessionMessage =
   | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; decision: DecisionMarker }
-  | { kind: 'tool-result'; content: string; isError: boolean; externalFile?: string; totalSize?: string }
-  | { kind: 'ai-text'; text: string }
-  | { kind: 'ai-thinking'; preview: string; full: string }
-  | { kind: 'ai-tool-use'; summary: string; name: string; input: Record<string, unknown> }
+  | { kind: 'tool-result'; content: string; isError: boolean; externalFile?: string; totalSize?: string; timestamp?: string }
+  | { kind: 'ai-text'; text: string; timestamp?: string }
+  | { kind: 'ai-thinking'; preview: string; full: string; timestamp?: string }
+  | { kind: 'ai-tool-use'; summary: string; name: string; input: Record<string, unknown>; timestamp?: string }
+  | { kind: 'delegation-update'; timestamp: string; agentId: string; status: 'started' | 'running' | 'completed' | 'failed' | 'update'; summary: string }
   | { kind: 'team-message'; from: string; color: string; summary: string; content: string; isProtocol: boolean }
-  | { kind: 'task-event'; taskId: string; status: string; summary: string }
+  | { kind: 'task-event'; taskId: string; status: string; summary: string; timestamp?: string }
   | { kind: 'fork-indicator'; abandonedMessages: SessionMessage[]; abandonedPreview: string; timestamp: string; reason: 'user-decision' | 'tool-error' }
+  | { kind: 'rollback-marker'; timestamp: string; numTurns: number }
   | { kind: 'clear-divider'; timestamp: string }
   | { kind: 'compact-boundary'; timestamp: string; trigger: 'auto' | 'manual'; preTokens: number; summaryText: string }
   | { kind: 'plan-start'; timestamp: string }
@@ -44,6 +48,7 @@ export interface SessionMarkers {
 }
 
 export interface SessionMeta {
+  source: SessionSource
   id: string
   startTime: string
   startDisplay: string
@@ -54,11 +59,17 @@ export interface SessionMeta {
   fileSize: number
   /** Total JSONL record count */
   recordCount: number
+  /** Provider-specific thread hierarchy metadata */
+  threadKind?: SessionThreadKind
+  parentSessionId?: string
+  agentName?: string
+  agentRole?: string
   /** Special marker counts — available after scan (approximate) or full parse (exact) */
   markers?: SessionMarkers
 }
 
 export interface ProjectMeta {
+  source: SessionSource
   encodedName: string
   decodedName: string
   shortName: string
@@ -67,6 +78,7 @@ export interface ProjectMeta {
 }
 
 export interface SessionData {
+  source: SessionSource
   messages: SessionMessage[]
   prompts: PromptIndexEntry[]
   heatmap: number[]

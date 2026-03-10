@@ -88,7 +88,7 @@ export function ThinkingHint({ msg }: { msg: Extract<SessionMessage, { kind: 'ai
 // ━━━ L3: Tool Call ━━━
 
 export function ToolCallLine({ msg }: { msg: Extract<SessionMessage, { kind: 'ai-tool-use' }> }) {
-  const isAgent = msg.name === 'Agent' || msg.name === 'Task'
+  const isAgent = msg.name === 'Agent' || msg.name === 'Task' || msg.name === 'spawn_agent' || msg.name === 'send_input'
 
   if (isAgent) {
     const agentType = String(msg.input.subagent_type || msg.input.type || 'general')
@@ -235,6 +235,41 @@ export function TeamMessageBlock({ msg }: { msg: Extract<SessionMessage, { kind:
   )
 }
 
+// ─── Delegation Update ───
+
+export function DelegationUpdateBlock({ msg }: { msg: Extract<SessionMessage, { kind: 'delegation-update' }> }) {
+  const tone = msg.status === 'completed'
+    ? 'bg-emerald-50 text-emerald-700 border-emerald-100'
+    : msg.status === 'failed'
+      ? 'bg-rose-50 text-rose-700 border-rose-100'
+      : 'bg-slate-50 text-slate-600 border-slate-100'
+
+  const label = msg.status === 'completed'
+    ? 'Returned to main task'
+    : msg.status === 'failed'
+      ? 'Delegated work failed'
+      : msg.status === 'started'
+        ? 'Delegated work started'
+        : msg.status === 'running'
+          ? 'Delegated work updated'
+          : 'Delegated work event'
+
+  return (
+    <div className={`mt-2 ml-6 rounded-xl border px-3 py-2 text-xs ${tone}`}>
+      <div className="flex items-center gap-2">
+        <span className="rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold">
+          {label}
+        </span>
+        <span className="font-mono text-[10px]">{msg.agentId}</span>
+        <span className="ml-auto text-[10px] text-current/70">{msg.timestamp}</span>
+      </div>
+      <div className="mt-1 text-[12px] leading-relaxed text-current">
+        {msg.summary}
+      </div>
+    </div>
+  )
+}
+
 // ─── Task Event ───
 
 export function TaskEventBlock({ msg }: { msg: Extract<SessionMessage, { kind: 'task-event' }> }) {
@@ -243,6 +278,7 @@ export function TaskEventBlock({ msg }: { msg: Extract<SessionMessage, { kind: '
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
         <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
+      {msg.timestamp && <span className="font-mono text-[10px] text-gray-400 shrink-0">{msg.timestamp}</span>}
       <span className="font-mono text-gray-500 shrink-0">Task #{msg.taskId}</span>
       <span className="shrink-0">{msg.status}</span>
       {msg.summary && <span className="truncate min-w-0">{msg.summary}</span>}
@@ -324,6 +360,24 @@ export function ForkIndicator({ msg, filter, searchQuery, MessageBlock }: {
           </div>
         </div>
       </details>
+    </div>
+  )
+}
+
+// ─── Rollback Marker ───
+
+export function RollbackMarker({ msg }: { msg: Extract<SessionMessage, { kind: 'rollback-marker' }> }) {
+  return (
+    <div className="my-8 rounded-lg border border-amber-200 bg-amber-50/30 px-5 py-3 flex items-center gap-3">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-500 shrink-0">
+        <path d="M3 7v6h6" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M21 17a8 8 0 00-13.66-5.66L3 15" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <span className="text-sm font-semibold text-amber-700 shrink-0">Rolled Back</span>
+      <span className="text-xs font-mono text-amber-600/70 shrink-0 tabular-nums">{msg.timestamp}</span>
+      <span className="ml-auto text-xs text-amber-700/80">
+        {msg.numTurns} turn{msg.numTurns === 1 ? '' : 's'} removed from the active thread
+      </span>
     </div>
   )
 }

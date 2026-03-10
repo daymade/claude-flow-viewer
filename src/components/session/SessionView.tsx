@@ -1,5 +1,6 @@
 import { useRef, useCallback, useMemo, useState, useEffect } from 'react'
 import type { SessionData, SessionMessage, FilterState, PromptIndexEntry } from '../../types/session'
+import type { SearchJumpTarget } from '../../hooks/useSearchController'
 import { extractTimelineEvents } from '../../lib/timeline'
 import { Timeline } from './Timeline'
 import { useHoverCard, HoverCard } from '../shared/HoverCard'
@@ -10,8 +11,10 @@ import {
   ToolCallLine,
   ToolResultBlock,
   TeamMessageBlock,
+  DelegationUpdateBlock,
   TaskEventBlock,
   ForkIndicator,
+  RollbackMarker,
   ClearDivider,
   CompactBoundaryDivider,
   PlanStartMarker,
@@ -22,9 +25,10 @@ interface SessionViewProps {
   data: SessionData
   filter: FilterState
   searchQuery: string
+  activeSearchTarget?: SearchJumpTarget | null
 }
 
-export function SessionView({ data, filter, searchQuery }: SessionViewProps) {
+export function SessionView({ data, filter, searchQuery, activeSearchTarget = null }: SessionViewProps) {
   const contentRef = useRef<HTMLDivElement>(null)
   const [activePromptNums, setActivePromptNums] = useState<Set<number>>(new Set())
   const [scrollFraction, setScrollFraction] = useState(0)
@@ -44,8 +48,8 @@ export function SessionView({ data, filter, searchQuery }: SessionViewProps) {
   }, [])
 
   const rendered = useMemo(
-    () => renderMessages(data.messages, filter, searchQuery),
-    [data.messages, filter, searchQuery],
+    () => renderMessages(data.messages, filter, searchQuery, activeSearchTarget?.messageIndex ?? null),
+    [activeSearchTarget?.messageIndex, data.messages, filter, searchQuery],
   )
 
   const timelineEvents = useMemo(
@@ -113,6 +117,23 @@ export function SessionView({ data, filter, searchQuery }: SessionViewProps) {
       resizeObs.disconnect()
     }
   }, [rendered])
+
+  useEffect(() => {
+    if (!activeSearchTarget) return
+    const el = contentRef.current
+    if (!el) return
+
+    const raf = requestAnimationFrame(() => {
+      const target = activeSearchTarget.promptNum
+        ? el.querySelector(`[data-prompt="${activeSearchTarget.promptNum}"]`)
+        : el.querySelector(`[data-message-index="${activeSearchTarget.messageIndex}"]`)
+      if (target instanceof HTMLElement) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+    })
+
+    return () => cancelAnimationFrame(raf)
+  }, [activeSearchTarget, rendered])
 
   // IntersectionObserver to track which prompts are visible
   useEffect(() => {
@@ -261,15 +282,16 @@ function PromptIndex({ prompts, onJump }: { prompts: PromptIndexEntry[]; onJump:
 
 // ─── Message rendering with tool call grouping ───
 
-function renderMessages(messages: SessionMessage[], filter: FilterState, searchQuery: string): React.ReactNode[] {
+function renderMessages(messages: SessionMessage[], filter: FilterState, searchQuery: string, highlightedMessageIndex: number | null): React.ReactNode[] {
   const nodes: React.ReactNode[] = []
   let i = 0
+  const forceExpandedTools = Boolean(searchQuery) || highlightedMessageIndex !== null
 
   while (i < messages.length) {
     const msg = messages[i]
 
     // Detect consecutive tool calls + results and group them
-    if (msg.kind === 'ai-tool-use' || msg.kind === 'tool-result') {
+    if (!forceExpandedTools && (msg.kind === 'ai-tool-use' || msg.kind === 'tool-result')) {
       const group: SessionMessage[] = []
       while (i < messages.length && (messages[i].kind === 'ai-tool-use' || messages[i].kind === 'tool-result')) {
         group.push(messages[i])
@@ -281,15 +303,38 @@ function renderMessages(messages: SessionMessage[], filter: FilterState, searchQ
         nodes.push(<ToolGroup key={`tg-${i}`} messages={group} filter={filter} />)
       } else {
         for (let j = 0; j < group.length; j++) {
-          nodes.push(<MessageBlock key={`t-${i}-${j}`} msg={group[j]} filter={filter} searchQuery={searchQuery} />)
+          nodes.push(renderAnchoredMessage(group[j], i + j, filter, searchQuery, highlightedMessageIndex, `t-${i}-${j}`))
         }
       }
     } else {
-      nodes.push(<MessageBlock key={i} msg={msg} filter={filter} searchQuery={searchQuery} />)
+      nodes.push(renderAnchoredMessage(msg, i, filter, searchQuery, highlightedMessageIndex, i))
       i++
     }
   }
   return nodes
+}
+
+function renderAnchoredMessage(
+  msg: SessionMessage,
+  messageIndex: number,
+  filter: FilterState,
+  searchQuery: string,
+  highlightedMessageIndex: number | null,
+  key: React.Key,
+) {
+  const forceVisible = highlightedMessageIndex === messageIndex
+  const content = MessageBlock({ msg, filter, searchQuery, forceVisible })
+  if (!content) return null
+
+  return (
+    <div
+      key={key}
+      data-message-index={messageIndex}
+      className={forceVisible ? 'scroll-mt-28 rounded-2xl bg-amber-50/60 ring-1 ring-amber-200 px-2 py-1' : 'scroll-mt-28'}
+    >
+      {content}
+    </div>
+  )
 }
 
 // ─── Tool Group (collapsed consecutive tool calls) ───
@@ -327,23 +372,25 @@ function ToolGroup({ messages, filter }: { messages: SessionMessage[]; filter: F
 
 // ─── Message dispatcher ───
 
-function MessageBlock({ msg, filter, searchQuery }: { msg: SessionMessage; filter: FilterState; searchQuery: string }) {
+function MessageBlock({ msg, filter, searchQuery, forceVisible = false }: { msg: SessionMessage; filter: FilterState; searchQuery: string; forceVisible?: boolean }) {
   switch (msg.kind) {
     case 'user-prompt': return <PromptBlock msg={msg} searchQuery={searchQuery} />
-    case 'ai-thinking': return filter.thinking ? <ThinkingHint msg={msg} /> : null
-    case 'ai-tool-use': return filter.toolCalls ? <ToolCallLine msg={msg} /> : null
-    case 'tool-result': return filter.toolResults ? <ToolResultBlock msg={msg} /> : null
-    case 'ai-text': return filter.aiText ? <AiTextBlock msg={msg} /> : null
-    case 'team-message': return filter.team ? <TeamMessageBlock msg={msg} /> : null
-    case 'task-event': return filter.team ? <TaskEventBlock msg={msg} /> : null
+    case 'ai-thinking': return filter.thinking || forceVisible ? <ThinkingHint msg={msg} /> : null
+    case 'ai-tool-use': return filter.toolCalls || forceVisible ? <ToolCallLine msg={msg} /> : null
+    case 'tool-result': return filter.toolResults || forceVisible ? <ToolResultBlock msg={msg} /> : null
+    case 'ai-text': return filter.aiText || forceVisible ? <AiTextBlock msg={msg} /> : null
+    case 'team-message': return filter.team || forceVisible ? <TeamMessageBlock msg={msg} /> : null
+    case 'delegation-update': return filter.team || forceVisible ? <DelegationUpdateBlock msg={msg} /> : null
+    case 'task-event': return filter.team || forceVisible ? <TaskEventBlock msg={msg} /> : null
     case 'fork-indicator': {
       // Only show user-decision forks; hide tool-error auto-retries (CLI doesn't show them)
       if (msg.reason === 'tool-error') return null
-      return filter.branches ? <ForkIndicator msg={msg} filter={filter} searchQuery={searchQuery} MessageBlock={MessageBlock} /> : null
+      return filter.branches || forceVisible ? <ForkIndicator msg={msg} filter={filter} searchQuery={searchQuery} MessageBlock={MessageBlock} /> : null
     }
-    case 'clear-divider': return filter.markers ? <ClearDivider msg={msg} /> : null
-    case 'compact-boundary': return filter.markers ? <CompactBoundaryDivider msg={msg} /> : null
-    case 'plan-start': return filter.markers ? <PlanStartMarker msg={msg} /> : null
-    case 'plan-end': return filter.markers ? <PlanEndMarker msg={msg} /> : null
+    case 'rollback-marker': return filter.branches || forceVisible ? <RollbackMarker msg={msg} /> : null
+    case 'clear-divider': return filter.markers || forceVisible ? <ClearDivider msg={msg} /> : null
+    case 'compact-boundary': return filter.markers || forceVisible ? <CompactBoundaryDivider msg={msg} /> : null
+    case 'plan-start': return filter.markers || forceVisible ? <PlanStartMarker msg={msg} /> : null
+    case 'plan-end': return filter.markers || forceVisible ? <PlanEndMarker msg={msg} /> : null
   }
 }
