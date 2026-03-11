@@ -1,7 +1,20 @@
 {
   "name": "claude-flow-viewer",
-  "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Browser-based viewer for local Claude Code and Codex session history",
+  "author": "daymade",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/daymade/claude-flow-viewer.git"
+  },
+  "keywords": [
+    "claude",
+    "codex",
+    "session-viewer",
+    "conversation-flow",
+    "developer-tools"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",
