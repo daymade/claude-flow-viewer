@@ -10,6 +10,7 @@ const SEARCH_HOME_DIR = path.join(os.homedir(), '.claude-flow-viewer')
 const DEFAULT_MODEL_ID = process.env.SEARCH_EMBED_MODEL_ID || 'Xenova/multilingual-e5-small'
 const DEFAULT_CACHE_DIR = process.env.SEARCH_EMBED_CACHE_DIR || path.join(SEARCH_HOME_DIR, 'model-cache')
 const DEFAULT_LOCAL_MODEL_PATH = process.env.SEARCH_EMBED_LOCAL_MODEL_PATH || path.join(SEARCH_HOME_DIR, 'models')
+const DEFAULT_BATCH_SIZE = Math.max(1, Number(process.env.SEARCH_EMBED_BATCH_SIZE || 4))
 
 export interface SearchEmbeddingProvider {
   readonly name: string
@@ -25,6 +26,7 @@ export interface TransformersEmbeddingProviderOptions {
   cacheDir?: string
   localModelPath?: string
   allowRemoteModels?: boolean
+  batchSize?: number
 }
 
 function ensureDir(dirPath: string) {
@@ -50,6 +52,7 @@ export class TransformersEmbeddingProvider implements SearchEmbeddingProvider {
   readonly cacheDir: string
   readonly localModelPath: string
   private readonly allowRemoteModels: boolean
+  private readonly batchSize: number
   private extractorPromise: Promise<FeatureExtractionPipelineType> | null = null
 
   constructor(options: TransformersEmbeddingProviderOptions = {}) {
@@ -57,6 +60,7 @@ export class TransformersEmbeddingProvider implements SearchEmbeddingProvider {
     this.cacheDir = options.cacheDir || DEFAULT_CACHE_DIR
     this.localModelPath = options.localModelPath || DEFAULT_LOCAL_MODEL_PATH
     this.allowRemoteModels = options.allowRemoteModels ?? process.env.SEARCH_EMBED_ALLOW_REMOTE !== '0'
+    this.batchSize = Math.max(1, options.batchSize ?? DEFAULT_BATCH_SIZE)
 
     ensureDir(this.cacheDir)
     ensureDir(this.localModelPath)
@@ -95,13 +99,21 @@ export class TransformersEmbeddingProvider implements SearchEmbeddingProvider {
   }
 
   private async embedTexts(texts: string[]): Promise<Float32Array[]> {
+    if (texts.length === 0) return []
+
     const extractor = await this.getExtractor()
-    const tensor = await extractor(texts, {
-      pooling: 'mean',
-      normalize: true,
-    })
-    const rows = toEmbeddingRows(tensor.tolist())
-    return rows.map(toFloat32Array)
+    const rows: Float32Array[] = []
+
+    for (let index = 0; index < texts.length; index += this.batchSize) {
+      const batch = texts.slice(index, index + this.batchSize)
+      const tensor = await extractor(batch, {
+        pooling: 'mean',
+        normalize: true,
+      })
+      rows.push(...toEmbeddingRows(tensor.tolist()).map(toFloat32Array))
+    }
+
+    return rows
   }
 }
 

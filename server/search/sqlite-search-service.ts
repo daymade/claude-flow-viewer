@@ -20,11 +20,14 @@ import { listIndexedSessionFiles, type IndexedSessionFile, type SearchRoots } fr
 const SEARCH_HOME_DIR = path.join(os.homedir(), '.claude-flow-viewer')
 const SEARCH_DB_PATH = path.join(SEARCH_HOME_DIR, 'search.sqlite')
 const REFRESH_INTERVAL_MS = 5000
-const SCHEMA_VERSION = '3'
+const SCHEMA_VERSION = '4'
 const DEFAULT_LEXICAL_LIMIT = 80
 const DEFAULT_EMBEDDING_LIMIT = 80
 const BM25_SIGNAL_WEIGHT = 12
 const EMBEDDING_SIGNAL_WEIGHT = 12
+const MAX_QUERY_EMBEDDING_CACHE = 64
+const SEARCH_VEC_TABLE = 'search_embeddings_vec'
+const EMBEDDING_DIMS_META_KEY = 'embedding_dimensions'
 
 type IndexedSessionRow = {
   source: SearchChunkRecord['source']
@@ -54,7 +57,36 @@ type ChunkRow = {
 
 type EmbeddingRow = {
   chunk_id: string
+  source: SearchChunkRecord['source']
+  project_encoded: string
+  session_id: string
+  kind: SearchChunkRecord['kind']
+  dims: number
   vector_json: string
+  vector_blob: Buffer
+}
+
+type EmbeddingDistanceRow = {
+  chunk_id: string
+  distance: number
+}
+
+type SessionChunkRow = {
+  id: number
+  chunk_id: string
+}
+
+type VecEmbeddingJoinRow = {
+  chunk_rowid: number
+  source: SearchChunkRecord['source']
+  project_encoded: string
+  session_id: string
+  kind: SearchChunkRecord['kind']
+  vector_json: string
+}
+
+type SqliteMasterRow = {
+  name: string
 }
 
 type MetaRow = {
@@ -99,6 +131,10 @@ function sessionKey(source: SearchChunkRecord['source'], projectEncoded: string,
   return `${source}:${projectEncoded}:${sessionId}`
 }
 
+function toVecPrimaryKey(value: number | bigint): bigint {
+  return typeof value === 'bigint' ? value : BigInt(value)
+}
+
 function chunkRowToRecord(row: ChunkRow): SearchChunkRecord {
   return {
     id: row.chunk_id,
@@ -128,8 +164,12 @@ function parseEmbedding(json: string): Float32Array {
   }
 }
 
-function serializeEmbedding(vector: Float32Array): string {
+function serializeEmbeddingText(vector: Float32Array): string {
   return JSON.stringify([...vector])
+}
+
+function serializeEmbeddingBlob(vector: Float32Array): Buffer {
+  return Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength)
 }
 
 function normalizeFtsSignals(rows: FtsCandidateRow[]): Map<string, number> {
@@ -196,12 +236,13 @@ export class SQLiteSearchService {
   private readonly lexicalCandidateLimit: number
   private readonly embeddingCandidateLimit: number
 
-  private engine: SearchEngine | null = null
-  private chunkEmbeddings = new Map<string, Float32Array>()
   private embeddingProvider: SearchEmbeddingProvider | null
   private embeddingEnabled: boolean
   private lastRefreshAt = 0
   private refreshPromise: Promise<void> | null = null
+  private sqliteVecEnabled = false
+  private vecLoadPromise: Promise<void> | null = null
+  private vecTableDirty = false
   private readonly queryEmbeddingCache = new Map<string, Float32Array>()
 
   private readonly selectIndexedSessionsStmt
@@ -212,8 +253,7 @@ export class SQLiteSearchService {
   private readonly repopulateFtsStmt
   private readonly deleteChunkEmbeddingStmt
   private readonly insertChunkStmt
-  private readonly selectAllChunksStmt
-  private readonly selectAllEmbeddingsStmt
+  private readonly selectEmbeddingRowsStmt
   private readonly insertEmbeddingStmt
   private readonly setMetaStmt
   private readonly getMetaStmt
@@ -290,7 +330,7 @@ export class SQLiteSearchService {
         updated_at = excluded.updated_at
     `)
     this.selectSessionChunkRowsStmt = this.db.prepare(`
-      SELECT chunk_id
+      SELECT id, chunk_id
       FROM search_chunks
       WHERE source = ? AND project_encoded = ? AND session_id = ?
     `)
@@ -325,39 +365,30 @@ export class SQLiteSearchService {
         search_tags_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
-    this.selectAllChunksStmt = this.db.prepare(`
-      SELECT
-        chunk_id,
-        source,
-        project_encoded,
-        project_label,
-        project_short_name,
-        session_id,
-        session_start_time,
-        kind,
-        title,
-        text,
-        normalized_text,
-        locator_json,
-        tokens_json,
-        trigrams_json,
-        search_tags_json
-      FROM search_chunks
-    `)
-    this.selectAllEmbeddingsStmt = this.db.prepare(`
-      SELECT chunk_id, vector_json
+    this.selectEmbeddingRowsStmt = this.db.prepare(`
+      SELECT chunk_id, source, project_encoded, session_id, kind, dims, vector_json, vector_blob
       FROM search_embeddings
     `)
     this.insertEmbeddingStmt = this.db.prepare(`
       INSERT INTO search_embeddings (
         chunk_id,
+        source,
+        project_encoded,
+        session_id,
+        kind,
         dims,
         vector_json,
+        vector_blob,
         updated_at
-      ) VALUES (?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(chunk_id) DO UPDATE SET
         dims = excluded.dims,
+        source = excluded.source,
+        project_encoded = excluded.project_encoded,
+        session_id = excluded.session_id,
+        kind = excluded.kind,
         vector_json = excluded.vector_json,
+        vector_blob = excluded.vector_blob,
         updated_at = excluded.updated_at
     `)
     this.searchFtsStmt = this.db.prepare(`
@@ -388,21 +419,41 @@ export class SQLiteSearchService {
       externalSignals[chunkId] = { ...existing, bm25: signal }
     }
 
-    const embeddingSignals = await this.collectEmbeddingSignals(query)
+    const embeddingSignals = await this.collectEmbeddingSignals(query, {
+      ...options,
+      candidateChunkIds: candidateChunkIds.size > 0 ? [...candidateChunkIds] : undefined,
+    })
     for (const [chunkId, signal] of embeddingSignals) {
       candidateChunkIds.add(chunkId)
       const existing = externalSignals[chunkId] ?? {}
       externalSignals[chunkId] = { ...existing, embedding: signal }
     }
 
-    const results = this.engine?.search(query, {
+    if (candidateChunkIds.size === 0) {
+      return {
+        results: [],
+        status: this.getStatusPayload(),
+      }
+    }
+
+    const chunks = this.selectChunksByIds([...candidateChunkIds])
+    if (chunks.length === 0) {
+      return {
+        results: [],
+        status: this.getStatusPayload(),
+      }
+    }
+
+    const engine = new SearchEngine()
+    engine.addChunks(chunks)
+    const results = engine.search(query, {
       ...options,
       candidateChunkIds: candidateChunkIds.size > 0 ? [...candidateChunkIds] : undefined,
       externalSignals,
-    }) ?? []
+    })
 
     return {
-      results,
+      results: results ?? [],
       status: this.getStatusPayload(),
     }
   }
@@ -417,9 +468,9 @@ export class SQLiteSearchService {
       backend: 'sqlite',
       dbPath: this.dbPath,
       indexedAt: this.getMeta('last_indexed_at'),
-      stats: this.engine?.getStats() ?? {
-        sessionCount: 0,
-        chunkCount: 0,
+      stats: {
+        sessionCount: this.countIndexedSessions(),
+        chunkCount: this.countIndexedChunks(),
         tokenCount: 0,
         trigramCount: 0,
       },
@@ -439,7 +490,7 @@ export class SQLiteSearchService {
 
   async ensureFreshIndex(force = false): Promise<void> {
     const now = Date.now()
-    if (!force && this.engine && now - this.lastRefreshAt < REFRESH_INTERVAL_MS) {
+    if (!force && this.lastRefreshAt > 0 && now - this.lastRefreshAt < REFRESH_INTERVAL_MS) {
       return
     }
     if (this.refreshPromise) {
@@ -465,29 +516,18 @@ export class SQLiteSearchService {
       return force || persisted.fingerprint !== session.fingerprint || persisted.file_path !== session.filePath
     })
 
-    if (!this.engine) {
-      this.engine = new SearchEngine()
-      const persistedChunks = (this.selectAllChunksStmt.all() as ChunkRow[]).map(chunkRowToRecord)
-      this.engine.addChunks(persistedChunks)
-      this.chunkEmbeddings = new Map(
-        (this.selectAllEmbeddingsStmt.all() as EmbeddingRow[]).map((row) => [row.chunk_id, parseEmbedding(row.vector_json)]),
-      )
-    }
-
     if (removed.length > 0) {
       this.removePersistedSessions(removed)
-      for (const row of removed) {
-        this.engine.removeSession(row.source, row.project_encoded, row.session_id)
-      }
     }
 
     for (const session of changed) {
-      const chunks = await this.reindexSession(session)
-      this.engine.removeSession(session.source, session.projectEncoded, session.sessionId)
-      this.engine.addChunks(chunks)
+      await this.reindexSession(session)
     }
 
     if (removed.length > 0 || changed.length > 0 || force) {
+      if (!this.sqliteVecEnabled || !this.vecTableExists()) {
+        this.vecTableDirty = true
+      }
       this.rebuildFtsIndex()
       this.setMeta('last_indexed_at', new Date().toISOString())
     }
@@ -496,19 +536,24 @@ export class SQLiteSearchService {
   }
 
   private removePersistedSessions(rows: IndexedSessionRow[]) {
-    const sessionChunkRows = new Map<string, Array<{ chunk_id: string }>>(
+    const sessionChunkRows = new Map<string, SessionChunkRow[]>(
       rows.map((row) => {
         const key = sessionKey(row.source, row.project_encoded, row.session_id)
-        const chunkRows = this.selectSessionChunkRowsStmt.all(row.source, row.project_encoded, row.session_id) as Array<{ chunk_id: string }>
+        const chunkRows = this.selectSessionChunkRowsStmt.all(row.source, row.project_encoded, row.session_id) as SessionChunkRow[]
         return [key, chunkRows]
       }),
     )
 
     const removeTransaction = this.db.transaction((input: IndexedSessionRow[]) => {
+      const deleteVecStmt = this.sqliteVecEnabled && this.vecTableExists()
+        ? this.db.prepare(`DELETE FROM ${SEARCH_VEC_TABLE} WHERE chunk_rowid = ?`)
+        : null
+
       for (const row of input) {
         const key = sessionKey(row.source, row.project_encoded, row.session_id)
         const chunkRows = sessionChunkRows.get(key) ?? []
         for (const chunk of chunkRows) {
+          deleteVecStmt?.run(toVecPrimaryKey(chunk.id))
           this.deleteChunkEmbeddingStmt.run(chunk.chunk_id)
         }
         this.db.prepare('DELETE FROM search_chunks WHERE source = ? AND project_encoded = ? AND session_id = ?')
@@ -518,14 +563,6 @@ export class SQLiteSearchService {
     })
 
     removeTransaction(rows)
-
-    for (const row of rows) {
-      const key = sessionKey(row.source, row.project_encoded, row.session_id)
-      const chunkRows = sessionChunkRows.get(key) ?? []
-      for (const chunk of chunkRows) {
-        this.chunkEmbeddings.delete(chunk.chunk_id)
-      }
-    }
   }
 
   private async reindexSession(session: IndexedSessionFile): Promise<SearchChunkRecord[]> {
@@ -540,11 +577,32 @@ export class SQLiteSearchService {
     })
 
     const embeddings = await this.embedChunks(chunks)
+    const firstVector = embeddings.values().next().value as Float32Array | undefined
+    if (firstVector && firstVector.length > 0) {
+      await this.ensureVecTable(firstVector.length)
+    }
     const timestamp = new Date().toISOString()
 
     const writeTransaction = this.db.transaction((input: IndexedSessionFile, nextChunks: SearchChunkRecord[]) => {
-      const existingRows = this.selectSessionChunkRowsStmt.all(input.source, input.projectEncoded, input.sessionId) as Array<{ chunk_id: string }>
+      const existingRows = this.selectSessionChunkRowsStmt.all(input.source, input.projectEncoded, input.sessionId) as SessionChunkRow[]
+      const deleteVecStmt = this.sqliteVecEnabled && this.vecTableExists()
+        ? this.db.prepare(`DELETE FROM ${SEARCH_VEC_TABLE} WHERE chunk_rowid = ?`)
+        : null
+      const insertVecStmt = this.sqliteVecEnabled && this.vecTableExists()
+        ? this.db.prepare(`
+          INSERT INTO ${SEARCH_VEC_TABLE} (
+            chunk_rowid,
+            embedding,
+            source,
+            project_encoded,
+            session_id,
+            kind
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `)
+        : null
+
       for (const row of existingRows) {
+        deleteVecStmt?.run(toVecPrimaryKey(row.id))
         this.deleteChunkEmbeddingStmt.run(row.chunk_id)
       }
       this.db.prepare('DELETE FROM search_chunks WHERE source = ? AND project_encoded = ? AND session_id = ?')
@@ -563,7 +621,7 @@ export class SQLiteSearchService {
       )
 
       for (const chunk of nextChunks) {
-        this.insertChunkStmt.run(
+        const inserted = this.insertChunkStmt.run(
           chunk.id,
           chunk.source,
           chunk.projectEncoded,
@@ -580,31 +638,34 @@ export class SQLiteSearchService {
           JSON.stringify(chunk.trigrams),
           JSON.stringify(chunk.searchTags),
         )
+        const chunkRowId = Number((inserted as { lastInsertRowid: number | bigint }).lastInsertRowid)
 
         const vector = embeddings.get(chunk.id)
         if (vector && vector.length > 0) {
           this.insertEmbeddingStmt.run(
             chunk.id,
+            chunk.source,
+            chunk.projectEncoded,
+            chunk.sessionId,
+            chunk.kind,
             vector.length,
-            serializeEmbedding(vector),
+            serializeEmbeddingText(vector),
+            serializeEmbeddingBlob(vector),
             timestamp,
+          )
+          insertVecStmt?.run(
+            toVecPrimaryKey(chunkRowId),
+            serializeEmbeddingText(vector),
+            chunk.source,
+            chunk.projectEncoded,
+            chunk.sessionId,
+            chunk.kind,
           )
         }
       }
     })
 
     writeTransaction(session, chunks)
-
-    for (const [chunkId, vector] of embeddings) {
-      this.chunkEmbeddings.set(chunkId, vector)
-    }
-
-    const indexedChunkIds = new Set(chunks.map((chunk) => chunk.id))
-    for (const chunkId of [...this.chunkEmbeddings.keys()]) {
-      if (chunkId.startsWith(`${session.projectEncoded}:${session.sessionId}:`) && !indexedChunkIds.has(chunkId)) {
-        this.chunkEmbeddings.delete(chunkId)
-      }
-    }
 
     this.queryEmbeddingCache.clear()
     return chunks
@@ -626,8 +687,8 @@ export class SQLiteSearchService {
     return normalizeFtsSignals(rows)
   }
 
-  private async collectEmbeddingSignals(query: string): Promise<Map<string, number>> {
-    if (!this.embeddingProvider || !this.embeddingEnabled || this.chunkEmbeddings.size === 0) {
+  private async collectEmbeddingSignals(query: string, options: SearchQueryOptions = {}): Promise<Map<string, number>> {
+    if (!this.embeddingProvider || !this.embeddingEnabled) {
       return new Map()
     }
 
@@ -635,25 +696,258 @@ export class SQLiteSearchService {
       let queryVector = this.queryEmbeddingCache.get(query)
       if (!queryVector) {
         queryVector = await this.embeddingProvider.embedQuery(query)
-        this.queryEmbeddingCache.set(query, queryVector)
+        this.setCachedQueryVector(query, queryVector)
       }
       if (!queryVector || queryVector.length === 0) return new Map()
 
-      const scores: Array<{ chunkId: string; similarity: number }> = []
-      for (const [chunkId, vector] of this.chunkEmbeddings) {
-        const similarity = dotSimilarity(queryVector, vector)
-        if (similarity > 0) {
-          scores.push({ chunkId, similarity })
+      await this.ensureVecTable(queryVector.length)
+      if (this.sqliteVecEnabled && this.vecTableExists()) {
+        try {
+          return await this.collectEmbeddingSignalsWithVec(queryVector, options)
+        } catch {
+          this.sqliteVecEnabled = false
         }
       }
 
-      return normalizeEmbeddingSignals(scores, this.embeddingCandidateLimit)
+      return this.collectEmbeddingSignalsInProcess(queryVector, options)
     } catch {
       this.embeddingEnabled = false
       this.embeddingProvider = null
       this.queryEmbeddingCache.clear()
       return new Map()
     }
+  }
+
+  private async collectEmbeddingSignalsWithVec(
+    queryVector: Float32Array,
+    options: SearchQueryOptions,
+  ): Promise<Map<string, number>> {
+    const candidateFilter = options.candidateChunkIds ? new Set(options.candidateChunkIds) : null
+    const queryVectorText = JSON.stringify(Array.from(queryVector))
+    const params: Array<string | number> = [queryVectorText, this.embeddingCandidateLimit]
+    let sql = `
+      WITH vector_matches AS (
+        SELECT chunk_rowid, distance
+        FROM ${SEARCH_VEC_TABLE}
+        WHERE embedding MATCH ?
+          AND k = ?
+    `
+
+    if (candidateFilter && candidateFilter.size > 0) {
+      const placeholders = Array.from(candidateFilter).map(() => '?').join(', ')
+      sql += ` AND chunk_rowid IN (
+        SELECT id
+        FROM search_chunks
+        WHERE chunk_id IN (${placeholders})
+      )`
+      params.push(...candidateFilter)
+    }
+
+    if (options.sources && options.sources.length > 0) {
+      const placeholders = options.sources.map(() => '?').join(', ')
+      sql += ` AND source IN (${placeholders})`
+      params.push(...options.sources)
+    }
+
+    if (options.projectEncoded) {
+      sql += ' AND project_encoded = ?'
+      params.push(options.projectEncoded)
+    }
+
+    if (options.sessionId) {
+      sql += ' AND session_id = ?'
+      params.push(options.sessionId)
+    }
+
+    if (options.kinds && options.kinds.length > 0) {
+      const placeholders = options.kinds.map(() => '?').join(', ')
+      sql += ` AND kind IN (${placeholders})`
+      params.push(...options.kinds)
+    }
+
+    sql += `
+      )
+      SELECT search_chunks.chunk_id, vector_matches.distance
+      FROM vector_matches
+      JOIN search_chunks ON search_chunks.id = vector_matches.chunk_rowid
+      ORDER BY vector_matches.distance ASC
+    `
+
+    const rows = this.db.prepare(sql).all(...params) as EmbeddingDistanceRow[]
+    const scores: Array<{ chunkId: string; similarity: number }> = []
+    for (const row of rows) {
+      const similarity = 1 - Math.max(0, Math.min(2, row.distance))
+      if (similarity > 0) {
+        scores.push({ chunkId: row.chunk_id, similarity })
+      }
+    }
+
+    return normalizeEmbeddingSignals(scores, this.embeddingCandidateLimit)
+  }
+
+  private vecTableExists(): boolean {
+    const row = this.db.prepare(`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table' AND name = ?
+    `).get(SEARCH_VEC_TABLE) as SqliteMasterRow | undefined
+    return Boolean(row)
+  }
+
+  private async ensureVecTable(dims: number): Promise<void> {
+    if (!Number.isInteger(dims) || dims <= 0) return
+
+    await this.ensureVecSupport()
+    if (!this.sqliteVecEnabled) return
+
+    const storedDims = Number(this.getMeta(EMBEDDING_DIMS_META_KEY) ?? Number.NaN)
+    const tableExists = this.vecTableExists()
+    if (tableExists && storedDims === dims && !this.vecTableDirty) {
+      return
+    }
+
+    this.db.exec(`DROP TABLE IF EXISTS ${SEARCH_VEC_TABLE}`)
+    this.db.exec(`
+      CREATE VIRTUAL TABLE ${SEARCH_VEC_TABLE} USING vec0(
+        chunk_rowid INTEGER PRIMARY KEY,
+        embedding FLOAT[${dims}] distance_metric=cosine,
+        source TEXT,
+        project_encoded TEXT,
+        session_id TEXT,
+        kind TEXT
+      )
+    `)
+    this.setMeta(EMBEDDING_DIMS_META_KEY, String(dims))
+    this.rebuildVecTable(dims)
+    this.vecTableDirty = false
+  }
+
+  private rebuildVecTable(dims: number): void {
+    if (!this.sqliteVecEnabled || !this.vecTableExists()) return
+
+    const rows = this.db.prepare(`
+      SELECT
+        search_chunks.id AS chunk_rowid,
+        search_embeddings.source,
+        search_embeddings.project_encoded,
+        search_embeddings.session_id,
+        search_embeddings.kind,
+        search_embeddings.vector_json
+      FROM search_embeddings
+      JOIN search_chunks ON search_chunks.chunk_id = search_embeddings.chunk_id
+      WHERE search_embeddings.dims = ?
+    `).all(dims) as VecEmbeddingJoinRow[]
+
+    const insertVecStmt = this.db.prepare(`
+      INSERT INTO ${SEARCH_VEC_TABLE} (
+        chunk_rowid,
+        embedding,
+        source,
+        project_encoded,
+        session_id,
+        kind
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `)
+    const writeTransaction = this.db.transaction((input: VecEmbeddingJoinRow[]) => {
+      for (const row of input) {
+        insertVecStmt.run(
+          toVecPrimaryKey(row.chunk_rowid),
+          row.vector_json,
+          row.source,
+          row.project_encoded,
+          row.session_id,
+          row.kind,
+        )
+      }
+    })
+    writeTransaction(rows)
+  }
+
+  private countIndexedSessions(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM indexed_sessions').get() as { count: number } | undefined
+    return row?.count ?? 0
+  }
+
+  private countIndexedChunks(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM search_chunks').get() as { count: number } | undefined
+    return row?.count ?? 0
+  }
+
+  private selectChunksByIds(chunkIds: string[]): SearchChunkRecord[] {
+    if (chunkIds.length === 0) return []
+    const placeholders = chunkIds.map(() => '?').join(', ')
+    const rows = this.db.prepare(`
+      SELECT
+        chunk_id,
+        source,
+        project_encoded,
+        project_label,
+        project_short_name,
+        session_id,
+        session_start_time,
+        kind,
+        title,
+        text,
+        normalized_text,
+        locator_json,
+        tokens_json,
+        trigrams_json,
+        search_tags_json
+      FROM search_chunks
+      WHERE chunk_id IN (${placeholders})
+    `).all(...chunkIds) as ChunkRow[]
+    return rows.map(chunkRowToRecord)
+  }
+
+  private collectEmbeddingSignalsInProcess(
+    queryVector: Float32Array,
+    options: SearchQueryOptions,
+  ): Map<string, number> {
+    const candidateFilter = options.candidateChunkIds ? new Set(options.candidateChunkIds) : null
+    const scores: Array<{ chunkId: string; similarity: number }> = []
+
+    for (const row of this.selectEmbeddingRowsStmt.iterate() as IterableIterator<EmbeddingRow>) {
+      if (row.dims !== queryVector.length) continue
+      if (candidateFilter && !candidateFilter.has(row.chunk_id)) continue
+      if (options.sources && !options.sources.includes(row.source)) continue
+      if (options.projectEncoded && row.project_encoded !== options.projectEncoded) continue
+      if (options.sessionId && row.session_id !== options.sessionId) continue
+      if (options.kinds && !options.kinds.includes(row.kind)) continue
+
+      const vector = parseEmbedding(row.vector_json)
+      if (vector.length === 0) continue
+      const similarity = dotSimilarity(queryVector, vector)
+      if (similarity > 0) {
+        scores.push({ chunkId: row.chunk_id, similarity })
+      }
+    }
+
+    return normalizeEmbeddingSignals(scores, this.embeddingCandidateLimit)
+  }
+
+  private async ensureVecSupport(): Promise<void> {
+    if (this.sqliteVecEnabled || !this.embeddingProvider || !this.embeddingEnabled) return
+    if (this.vecLoadPromise) {
+      await this.vecLoadPromise
+      return
+    }
+
+    this.vecLoadPromise = (async () => {
+      try {
+        const sqliteVec = await import('sqlite-vec')
+        const load = (sqliteVec as { load?: (db: InstanceType<typeof Database>) => Promise<void> | void }).load
+        if (typeof load === 'function') {
+          await load(this.db)
+          this.sqliteVecEnabled = true
+        }
+      } catch {
+        this.sqliteVecEnabled = false
+      } finally {
+        this.vecLoadPromise = null
+      }
+    })()
+
+    await this.vecLoadPromise
   }
 
   private async embedChunks(chunks: SearchChunkRecord[]): Promise<Map<string, Float32Array>> {
@@ -667,6 +961,17 @@ export class SQLiteSearchService {
       this.embeddingEnabled = false
       this.embeddingProvider = null
       return new Map()
+    }
+  }
+
+  private setCachedQueryVector(query: string, vector: Float32Array): void {
+    if (!vector.length) return
+    this.queryEmbeddingCache.set(query, vector)
+    if (this.queryEmbeddingCache.size <= MAX_QUERY_EMBEDDING_CACHE) return
+
+    const oldest = this.queryEmbeddingCache.keys().next().value
+    if (oldest !== undefined) {
+      this.queryEmbeddingCache.delete(oldest)
     }
   }
 
@@ -719,10 +1024,18 @@ export class SQLiteSearchService {
 
       CREATE TABLE search_embeddings (
         chunk_id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        project_encoded TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
         dims INTEGER NOT NULL,
         vector_json TEXT NOT NULL,
+        vector_blob BLOB NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE INDEX idx_search_embeddings_filter
+      ON search_embeddings (source, project_encoded, session_id);
 
       CREATE INDEX idx_search_chunks_session
       ON search_chunks (source, project_encoded, session_id);
