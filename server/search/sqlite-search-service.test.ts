@@ -66,6 +66,7 @@ describe('SQLiteSearchService', () => {
       codexSessionsDir: fixture.codexSessionsDir,
     }, fixture.dbPath)
 
+    await service.ensureFreshIndex()
     const initial = await service.search('amber reflections')
 
     expect(initial.results[0]?.sessionId).toBe('session-1')
@@ -88,6 +89,7 @@ describe('SQLiteSearchService', () => {
       codexSessionsDir: fixture.codexSessionsDir,
     }, fixture.dbPath)
 
+    await restarted.ensureFreshIndex()
     const updated = await restarted.search('watercolor harbor sunrise')
     expect(updated.results[0]?.sessionId).toBe('session-1')
     expect(updated.results[0]?.snippet.toLowerCase()).toContain('watercolor harbor')
@@ -104,6 +106,7 @@ describe('SQLiteSearchService', () => {
       codexSessionsDir: fixture.codexSessionsDir,
     }, fixture.dbPath)
 
+    await afterDelete.ensureFreshIndex()
     const deleted = await afterDelete.search('watercolor harbor sunrise')
     expect(deleted.results).toEqual([])
     expect(deleted.status.stats.sessionCount).toBe(0)
@@ -151,6 +154,7 @@ describe('SQLiteSearchService', () => {
       embeddingProvider: fakeProvider,
     })
 
+    await service.ensureFreshIndex()
     const results = await service.search('polar memory', { limit: 5 })
 
     expect(results.status.embeddingEnabled).toBe(true)

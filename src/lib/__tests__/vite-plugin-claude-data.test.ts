@@ -242,6 +242,9 @@ describe('vite-plugin-claude-data', () => {
     expect(status.available).toBe(true)
     expect(status.backend).toBe('sqlite')
 
+    const refreshRes = await request('/api/search/refresh', { method: 'POST' })
+    expect(refreshRes.statusCode).toBe(200)
+
     const searchRes = await request('/api/search', {
       method: 'POST',
       body: JSON.stringify({ query: 'Claude response' }),

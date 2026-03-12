@@ -97,6 +97,17 @@ export function claudeDataPlugin(): Plugin {
         return
       }
 
+      if (pathname === '/api/search/refresh') {
+        searchService.ensureFreshIndex(true).then(() => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ ok: true }))
+        }).catch((err) => {
+          res.statusCode = 500
+          res.end(JSON.stringify({ error: String(err) }))
+        })
+        return
+      }
+
       if (pathname === '/api/search') {
         if ((req.method ?? 'GET').toUpperCase() !== 'POST') {
           res.statusCode = 405

@@ -400,7 +400,6 @@ export class SQLiteSearchService {
   }
 
   async search(query: string, options: SearchQueryOptions = {}): Promise<SearchQueryPayload> {
-    await this.ensureFreshIndex()
 
     if (!query.trim()) {
       return {
@@ -459,7 +458,6 @@ export class SQLiteSearchService {
   }
 
   async getStatus(): Promise<SearchStatusPayload> {
-    await this.ensureFreshIndex()
     return this.getStatusPayload()
   }
 
