@@ -15,11 +15,15 @@ import {
 } from './src/lib/providers/codex'
 import { selectCodexRootSessions } from './src/lib/codex-navigation'
 import { createSQLiteSearchService } from './server/search/sqlite-search-service'
+import { listCherryStudioIndexedSessions, readCherryStudioSessionContent } from './server/cherrystudio/catalog'
+import { ClaudeSkillRecommendationService } from './server/recommendations/claude-skill-recommendation-service'
 import { SessionScanCache, getSessionScanCachePath } from './server/scan/session-scan-cache'
 import type { SearchQueryOptions } from './src/lib/search'
+import type { SkillRecommendationAnalyzeOptions } from './src/lib/skill-recommendations'
 
 const MAX_CLAUDE_SESSIONS_PER_PROJECT = 50
 const MAX_CODEX_GROUPS_PER_PROJECT = 50
+const MAX_CHERRY_SESSIONS_PER_PROJECT = 50
 const CLAUDE_PREVIEW_BYTES = 4096
 const CODEX_SCAN_CONCURRENCY = 24
 
@@ -42,6 +46,10 @@ const codexProjectSessionCatalog = new Map<string, SessionMeta[]>()
 type SearchRequestBody = {
   query?: string
   options?: SearchQueryOptions
+}
+
+type SkillRecommendationRequestBody = {
+  options?: SkillRecommendationAnalyzeOptions
 }
 
 type MiddlewareRegistrar = (fn: (req: IncomingMessage & { url?: string; method?: string }, res: {
@@ -73,6 +81,11 @@ export function claudeDataPlugin(): Plugin {
   const codexSessionsDir = path.join(codexRootDir, 'sessions')
   const sessionScanCache = new SessionScanCache(getSessionScanCachePath(homeDir))
   const searchService = createSQLiteSearchService({
+    claudeProjectsDir,
+    codexRootDir,
+    codexSessionsDir,
+  })
+  const skillRecommendationService = new ClaudeSkillRecommendationService({
     claudeProjectsDir,
     codexRootDir,
     codexSessionsDir,
@@ -118,6 +131,37 @@ export function claudeDataPlugin(): Plugin {
         readJsonBody(req).then((body) => {
           const payload = body as SearchRequestBody
           return searchService.search(payload.query ?? '', payload.options ?? {})
+        }).then((payload) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(payload))
+        }).catch((err) => {
+          res.statusCode = 500
+          res.end(JSON.stringify({ error: String(err) }))
+        })
+        return
+      }
+
+      if (pathname === '/api/skill-recommendations/status') {
+        skillRecommendationService.getStatus().then((status) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(status))
+        }).catch((err) => {
+          res.statusCode = 500
+          res.end(JSON.stringify({ error: String(err) }))
+        })
+        return
+      }
+
+      if (pathname === '/api/skill-recommendations') {
+        if ((req.method ?? 'GET').toUpperCase() !== 'POST') {
+          res.statusCode = 405
+          res.end('Use POST /api/skill-recommendations')
+          return
+        }
+
+        readJsonBody(req).then((body) => {
+          const payload = body as SkillRecommendationRequestBody
+          return skillRecommendationService.analyzeRecentHistory(payload.options ?? {})
         }).then((payload) => {
           res.setHeader('Content-Type', 'application/json')
           res.end(JSON.stringify(payload))
@@ -288,6 +332,7 @@ async function scanAllProjects(
     scanClaudeProjects(projectMap, claudeProjectsDir, sessionScanCache),
     scanCodexProjects(projectMap, codexRootDir, codexSessionsDir, sessionScanCache),
   ])
+  await scanCherryStudioProjects(projectMap)
   await sessionScanCache.persist()
 
   return finalizeProjects(projectMap)
@@ -312,6 +357,12 @@ async function scanProjectSessions(
     return projectMap.get(projectEncoded)?.sessions ?? []
   }
 
+  if (source === 'cherrystudio') {
+    const projectMap = new Map<string, ScanSummary>()
+    await scanCherryStudioProjects(projectMap, projectEncoded)
+    return projectMap.get(projectEncoded)?.sessions ?? []
+  }
+
   const projectMap = new Map<string, ScanSummary>()
   await scanClaudeProjects(projectMap, claudeProjectsDir, sessionScanCache, projectEncoded)
   await sessionScanCache.persist()
@@ -325,6 +376,12 @@ async function readSessionContent(
   claudeProjectsDir: string,
   codexSessionsDir: string,
 ): Promise<string> {
+  if (source === 'cherrystudio') {
+    return readCherryStudioSessionContent(sessionId, {
+      homeDir: path.resolve(claudeProjectsDir, '..', '..'),
+    })
+  }
+
   if (source === 'codex' || isCodexProjectId(projectEncoded)) {
     const filePath = await resolveCodexSessionFile(codexSessionsDir, sessionId)
     return fs.promises.readFile(filePath, 'utf-8')
@@ -332,6 +389,42 @@ async function readSessionContent(
 
   const filePath = path.join(claudeProjectsDir, projectEncoded, `${sessionId}.jsonl`)
   return fs.promises.readFile(filePath, 'utf-8')
+}
+
+async function scanCherryStudioProjects(
+  projectMap: Map<string, ScanSummary>,
+  onlyProject?: string,
+): Promise<void> {
+  const sessions = (await listCherryStudioIndexedSessions())
+    .filter((session) => !onlyProject || session.projectEncoded === onlyProject)
+
+  if (sessions.length === 0) return
+
+  const grouped = new Map<string, SessionMeta[]>()
+  const names = new Map<string, { decodedName: string; shortName: string }>()
+
+  for (const session of sessions) {
+    if (!grouped.has(session.projectEncoded)) {
+      grouped.set(session.projectEncoded, [])
+      names.set(session.projectEncoded, {
+        decodedName: session.projectLabel,
+        shortName: session.projectShortName,
+      })
+    }
+    grouped.get(session.projectEncoded)!.push(session.meta)
+  }
+
+  for (const [encodedName, projectSessions] of grouped) {
+    const named = names.get(encodedName)
+    const sorted = sortSessions(projectSessions)
+    projectMap.set(encodedName, {
+      source: 'cherrystudio',
+      decodedName: named?.decodedName ?? encodedName,
+      shortName: named?.shortName ?? 'Cherry Studio',
+      sessions: sorted.slice(0, MAX_CHERRY_SESSIONS_PER_PROJECT),
+      totalSessionCount: sorted.length,
+    })
+  }
 }
 
 async function scanClaudeProjects(

@@ -23,12 +23,21 @@ export function decodeHash(): { projectEncoded: string; sessionId: string } | nu
 export function useFileLoader() {
   const { state, dispatch } = useAppState()
 
+  const loadStore = useCallback(async (store: Awaited<ReturnType<typeof openDirectoryPicker>> | Awaited<ReturnType<typeof createStoreFromFiles>> | Awaited<ReturnType<typeof createStoreFromHandle>>) => {
+    const projects = await store.scanProjects()
+    dispatch({ type: 'LOAD_PROJECTS', projects, fileStore: store })
+
+    const notice = await store.getBrowserModeNotice?.()
+    if (notice && projects.length === 0) {
+      dispatch({ type: 'SET_ERROR', error: notice })
+    }
+  }, [dispatch])
+
   const loadDirectory = useCallback(async () => {
     dispatch({ type: 'LOAD_START' })
     try {
       const store = await openDirectoryPicker()
-      const projects = await store.scanProjects()
-      dispatch({ type: 'LOAD_PROJECTS', projects, fileStore: store })
+      await loadStore(store)
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         dispatch({ type: 'SET_ERROR', error: '' })
@@ -36,18 +45,17 @@ export function useFileLoader() {
       }
       dispatch({ type: 'SET_ERROR', error: (err as Error).message })
     }
-  }, [dispatch])
+  }, [dispatch, loadStore])
 
   const loadFromFiles = useCallback(async (files: FileList) => {
     dispatch({ type: 'LOAD_START' })
     try {
       const store = createStoreFromFiles(files)
-      const projects = await store.scanProjects()
-      dispatch({ type: 'LOAD_PROJECTS', projects, fileStore: store })
+      await loadStore(store)
     } catch (err) {
       dispatch({ type: 'SET_ERROR', error: (err as Error).message })
     }
-  }, [dispatch])
+  }, [dispatch, loadStore])
 
   const loadSession = useCallback(async (projectEncoded: string, sessionId: string) => {
     if (!state.fileStore) return
@@ -55,7 +63,7 @@ export function useFileLoader() {
     try {
       const project = state.projects.find((item) => item.encodedName === projectEncoded)
       const content = await state.fileStore.readSessionContent(projectEncoded, sessionId)
-      const data = parseSessionContent(content, project?.source || 'claude')
+      const data = parseSessionContent(content, project?.source)
       dispatch({ type: 'LOAD_SESSION', sessionId, projectEncoded, data })
       // Sync URL hash
       const newHash = encodeHash(projectEncoded, sessionId)
@@ -71,12 +79,11 @@ export function useFileLoader() {
     dispatch({ type: 'LOAD_START' })
     try {
       const store = createStoreFromHandle(handle)
-      const projects = await store.scanProjects()
-      dispatch({ type: 'LOAD_PROJECTS', projects, fileStore: store })
+      await loadStore(store)
     } catch (err) {
       dispatch({ type: 'SET_ERROR', error: (err as Error).message })
     }
-  }, [dispatch])
+  }, [dispatch, loadStore])
 
   const loadAllProjectSessions = useCallback(async (projectEncoded: string) => {
     if (!state.fileStore) return
@@ -95,16 +102,14 @@ export function useFileLoader() {
     try {
       const apiStore = await tryAutoLoad()
       if (apiStore) {
-        const projects = await apiStore.scanProjects()
-        dispatch({ type: 'LOAD_PROJECTS', projects, fileStore: apiStore })
+        await loadStore(apiStore)
         return
       }
     } catch { /* API not available, fall through */ }
     // No API — open directory picker
     try {
       const store = await openDirectoryPicker()
-      const projects = await store.scanProjects()
-      dispatch({ type: 'LOAD_PROJECTS', projects, fileStore: store })
+      await loadStore(store)
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         dispatch({ type: 'SET_ERROR', error: '' })
@@ -112,7 +117,7 @@ export function useFileLoader() {
       }
       dispatch({ type: 'SET_ERROR', error: (err as Error).message })
     }
-  }, [dispatch])
+  }, [dispatch, loadStore])
 
   return { loadDirectory, loadFromFiles, loadFromHandle, loadSession, loadAllProjectSessions, switchDirectory }
 }

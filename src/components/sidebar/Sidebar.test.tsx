@@ -43,6 +43,19 @@ function claudeProject(): ProjectMeta {
   }
 }
 
+function cherryStudioProject(): ProjectMeta {
+  return {
+    source: 'cherrystudio',
+    encodedName: 'cherrystudio:/Users/test/cherry-studio',
+    decodedName: '/Users/test/cherry-studio',
+    shortName: 'cherry-studio',
+    totalSessionCount: 1,
+    sessions: [
+      makeSession('cherrystudio', 'cherry-session', 'Review the agent workflow'),
+    ],
+  }
+}
+
 function codexProject(): ProjectMeta {
   return {
     source: 'codex',
@@ -84,7 +97,7 @@ describe('Sidebar', () => {
   it('uses full source names and descriptive section labels', () => {
     render(
       <Sidebar
-        projects={[claudeProject(), codexProject()]}
+        projects={[claudeProject(), codexProject(), cherryStudioProject()]}
         activeSessionId={null}
         activeProjectEncoded={null}
         searchQuery=""
@@ -96,8 +109,10 @@ describe('Sidebar', () => {
 
     expect(screen.getAllByText('Claude').length).toBeGreaterThan(0)
     expect(screen.getAllByText('Codex').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Cherry Studio').length).toBeGreaterThan(0)
     expect(screen.getByText('Claude conversations')).toBeTruthy()
     expect(screen.getByText('Codex tasks')).toBeTruthy()
+    expect(screen.getByText('Cherry Studio sessions')).toBeTruthy()
     expect(screen.queryByText('CLD')).toBeNull()
     expect(screen.queryByText('CDX')).toBeNull()
   })

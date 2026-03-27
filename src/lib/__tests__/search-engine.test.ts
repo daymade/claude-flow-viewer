@@ -114,6 +114,67 @@ describe('search extract', () => {
     expect(chunks.some((chunk) => chunk.kind === 'delegation-update')).toBe(true)
     expect(chunks.some((chunk) => chunk.kind === 'task-event')).toBe(true)
   })
+
+  it('keeps Cherry Studio chunks source-aware and searchable', () => {
+    const session = makeSessionRecord({
+      projectEncoded: 'cherrystudio:/Users/test/Library/Application Support/CherryStudioDev',
+      projectLabel: '/Users/test/Library/Application Support/CherryStudioDev',
+      projectShortName: 'Cherry Studio',
+      meta: {
+        ...makeSessionRecord().meta,
+        source: 'cherrystudio',
+        id: 'cs-session-1',
+        startTime: '2026-03-09T11:00:00.000Z',
+        startDisplay: '2026-03-09 19:00',
+        firstPromptPreview: 'Map amber reflections across the harbor',
+        agentName: 'Cherry Analyst',
+        agentRole: 'topic',
+      },
+      data: {
+        source: 'cherrystudio',
+        prompts: [{
+          num: 1,
+          preview: 'Map amber reflections',
+          fullText: 'Map amber reflections across the harbor',
+          time: '11:00:00',
+          decision: 'none',
+        }],
+        messages: [
+          {
+            kind: 'user-prompt',
+            promptNum: 1,
+            text: 'Map amber reflections across the harbor',
+            images: [],
+            time: '11:00:00',
+            decision: 'none',
+          },
+          {
+            kind: 'ai-text',
+            text: 'Cherry Studio rendered amber reflections with blue water shadows.',
+            timestamp: '11:00:05',
+          },
+        ],
+        heatmap: [0.75],
+        markers: {
+          compacts: 0,
+          plans: 0,
+          clears: 0,
+          forks: 0,
+        },
+      },
+    })
+
+    const chunks = extractSearchChunks(session)
+    expect(chunks.every((chunk) => chunk.source === 'cherrystudio')).toBe(true)
+
+    const engine = new SearchEngine()
+    engine.addChunks(chunks)
+
+    const results = engine.search('amber reflections', { limit: 3 })
+    expect(results[0]?.source).toBe('cherrystudio')
+    expect(results[0]?.sessionId).toBe('cs-session-1')
+    expect(results[0]?.projectShortName).toBe('Cherry Studio')
+  })
 })
 
 describe('SearchEngine', () => {

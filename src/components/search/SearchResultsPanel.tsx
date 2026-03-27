@@ -1,5 +1,6 @@
 import type { SearchResult } from '../../lib/search'
 import type { SearchControllerState } from '../../hooks/useSearchController'
+import { SOURCE_METADATA } from '../../lib/source-metadata'
 
 function kindLabel(kind: SearchResult['kind']): string {
   switch (kind) {
@@ -62,6 +63,7 @@ export function SearchResultsPanel({ query, search, onSelectResult }: SearchResu
         <div className="max-h-[320px] overflow-y-auto px-1 py-1">
           {search.results.map((result, index) => {
             const isActive = search.activeTarget?.chunkId === result.chunkId
+            const sourceMeta = SOURCE_METADATA[result.source]
             return (
               <button
                 key={result.chunkId}
@@ -76,11 +78,9 @@ export function SearchResultsPanel({ query, search, onSelectResult }: SearchResu
                 <div className="flex items-center gap-2 text-[10px]">
                   <span className="font-mono text-slate-300">{String(index + 1).padStart(2, '0')}</span>
                   <span className={`rounded px-1.5 py-0.5 font-semibold ${
-                    result.source === 'codex'
-                      ? 'bg-emerald-100 text-emerald-800'
-                      : 'bg-sky-100 text-sky-800'
+                    sourceMeta.badgeClass
                   }`}>
-                    {result.source === 'codex' ? 'Codex' : 'Claude'}
+                    {sourceMeta.label}
                   </span>
                   <span className="rounded bg-stone-100 px-1.5 py-0.5 font-semibold text-stone-700">
                     {kindLabel(result.kind)}

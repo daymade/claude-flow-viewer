@@ -8,6 +8,13 @@ import {
   quickScanClaudeMetadata,
 } from './providers/claude'
 import {
+  extractCherryStudioShortName,
+  isCherryStudioProjectId,
+  isCherryStudioSessionContent,
+  makeCherryStudioProjectId,
+  parseCherryStudioSessionContent,
+} from './providers/cherrystudio'
+import {
   extractCodexSessionId,
   extractCodexShortName,
   isCodexProjectId,
@@ -21,8 +28,11 @@ export {
   decodeProjectName,
   disambiguateShortNames,
   extractShortName,
+  extractCherryStudioShortName,
   extractCodexSessionId,
+  isCherryStudioProjectId,
   extractCodexShortName,
+  makeCherryStudioProjectId,
   isCodexProjectId,
   makeCodexProjectId,
   quickScanClaudeMetadata,
@@ -30,6 +40,7 @@ export {
 }
 
 export function detectSessionSource(content: string): SessionSource {
+  if (isCherryStudioSessionContent(content)) return 'cherrystudio'
   return isCodexSessionContent(content) && !isClaudeSessionContent(content)
     ? 'codex'
     : 'claude'
@@ -37,9 +48,9 @@ export function detectSessionSource(content: string): SessionSource {
 
 export function parseSessionContent(content: string, source?: SessionSource): SessionData {
   const resolvedSource = source ?? detectSessionSource(content)
-  return resolvedSource === 'codex'
-    ? parseCodexSessionContent(content)
-    : parseClaudeSessionContent(content)
+  if (resolvedSource === 'codex') return parseCodexSessionContent(content)
+  if (resolvedSource === 'cherrystudio') return parseCherryStudioSessionContent(content)
+  return parseClaudeSessionContent(content)
 }
 
 /**

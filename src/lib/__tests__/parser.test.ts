@@ -81,6 +81,210 @@ describe('parseSessionContent', () => {
       expect(result.prompts).toHaveLength(1)
     })
 
+    it('parses Cherry Studio serialized agent sessions', () => {
+      const content = JSON.stringify({
+        source: 'cherrystudio',
+        userDataPath: '/Users/test/Library/Application Support/CherryStudioDev',
+        session: {
+          id: 'cs-session-1',
+          name: 'Website scout',
+          description: 'Check recent websites',
+          agentId: 'agent-1',
+          agentName: 'Website Scout',
+          agentType: 'agent',
+          model: 'claude-4-sonnet',
+          createdAt: '2026-03-10T10:00:00.000Z',
+          updatedAt: '2026-03-10T10:00:05.000Z',
+          messages: [
+            {
+              role: 'user',
+              content: { text: 'Review recent history and recommend recurring sites.' },
+              createdAt: '2026-03-10T10:00:00.000Z',
+              updatedAt: '2026-03-10T10:00:00.000Z',
+            },
+            {
+              role: 'agent',
+              content: {
+                message: { id: 'a1' },
+                blocks: [
+                  { id: 'b1', type: 'thinking', content: 'Hidden internal reasoning' },
+                  { id: 'b2', type: 'main_text', content: 'You should inspect github.com and claude.com.' },
+                ],
+              },
+              createdAt: '2026-03-10T10:00:01.000Z',
+              updatedAt: '2026-03-10T10:00:01.000Z',
+            },
+            {
+              role: 'tool',
+              content: { text: 'Fetched site list successfully.' },
+              createdAt: '2026-03-10T10:00:02.000Z',
+              updatedAt: '2026-03-10T10:00:02.000Z',
+            },
+          ],
+        },
+      })
+
+      const result = parseSessionContent(content, 'cherrystudio')
+      expect(result.source).toBe('cherrystudio')
+      expect(result.messages).toHaveLength(3)
+      expect(result.messages[0]).toMatchObject({ kind: 'user-prompt', promptNum: 1, text: 'Review recent history and recommend recurring sites.' })
+      expect(result.messages[1]).toMatchObject({ kind: 'ai-text', text: 'You should inspect github.com and claude.com.' })
+      expect(result.messages[2]).toMatchObject({ kind: 'tool-result', content: 'Fetched site list successfully.' })
+      expect(result.messages.some((message) => message.kind === 'ai-thinking')).toBe(false)
+    })
+
+    it('prefers recovered Cherry Studio non-thinking assistant text over thinking-only fallback blocks', () => {
+      const content = JSON.stringify({
+        source: 'cherrystudio',
+        userDataPath: '/Users/test/Library/Application Support/CherryStudioDev',
+        session: {
+          id: 'topic:test',
+          name: 'Cherry Studio chat',
+          description: null,
+          agentId: 'default',
+          agentName: 'default',
+          agentType: 'topic',
+          model: null,
+          createdAt: '2026-03-10T10:00:00.000Z',
+          updatedAt: '2026-03-10T10:00:05.000Z',
+          messages: [
+            {
+              id: 'u1',
+              role: 'user',
+              content: {
+                blocks: [
+                  { id: 'ub1', type: 'main_text', content: 'hi' },
+                ],
+              },
+              createdAt: '2026-03-10T10:00:00.000Z',
+              updatedAt: '2026-03-10T10:00:00.000Z',
+            },
+            {
+              id: 'a1',
+              role: 'assistant',
+              content: {
+                blocks: [
+                  { id: 'ab1', type: 'thinking', content: 'Internal reasoning that should stay hidden.' },
+                  { id: 'ab2', type: 'error', content: 'The model "step-tts-2" does not exist or you do not have access to it.' },
+                ],
+              },
+              createdAt: '2026-03-10T10:00:01.000Z',
+              updatedAt: '2026-03-10T10:00:01.000Z',
+            },
+          ],
+        },
+      })
+
+      const result = parseSessionContent(content, 'cherrystudio')
+      expect(result.messages).toHaveLength(2)
+      expect(result.messages[0]).toMatchObject({ kind: 'user-prompt', text: 'hi' })
+      expect(result.messages[1]).toMatchObject({
+        kind: 'ai-text',
+        text: 'The model "step-tts-2" does not exist or you do not have access to it.',
+      })
+      expect(result.messages.some((message) => message.kind === 'ai-thinking')).toBe(false)
+    })
+
+    it('cleans noisy recovered Cherry Studio main_text before rendering', () => {
+      const content = JSON.stringify({
+        source: 'cherrystudio',
+        userDataPath: '/Users/test/Library/Application Support/CherryStudioDev',
+        session: {
+          id: 'topic:noisy-main-text',
+          name: 'Cherry Studio chat',
+          description: null,
+          agentId: 'default',
+          agentName: 'default',
+          agentType: 'topic',
+          model: null,
+          createdAt: '2026-03-10T10:00:00.000Z',
+          updatedAt: '2026-03-10T10:00:05.000Z',
+          messages: [
+            {
+              id: 'u1',
+              role: 'user',
+              content: {
+                blocks: [
+                  { id: 'ub1', type: 'main_text', content: 'hi' },
+                ],
+              },
+              createdAt: '2026-03-10T10:00:00.000Z',
+              updatedAt: '2026-03-10T10:00:00.000Z',
+            },
+            {
+              id: 'a1',
+              role: 'assistant',
+              content: {
+                blocks: [
+                  { id: 'ab1', type: 'thinking', content: 'cHmm, let me think this through."' },
+                  { id: 'ab2', type: 'main_text', content: 'Hi there! = Sounds like you\'re in a cheerful mood today! What\'s on your mind?"' },
+                ],
+              },
+              createdAt: '2026-03-10T10:00:01.000Z',
+              updatedAt: '2026-03-10T10:00:01.000Z',
+            },
+          ],
+        },
+      })
+
+      const result = parseSessionContent(content, 'cherrystudio')
+      expect(result.messages).toHaveLength(2)
+      expect(result.messages[1]).toMatchObject({
+        kind: 'ai-text',
+        text: 'Hi there! Sounds like you\'re in a cheerful mood today! What\'s on your mind?',
+      })
+      expect(result.messages.some((message) => message.kind === 'ai-thinking')).toBe(false)
+    })
+
+    it('cleans noisy Cherry Studio thinking fallback text when no main_text is recoverable', () => {
+      const content = JSON.stringify({
+        source: 'cherrystudio',
+        userDataPath: '/Users/test/Library/Application Support/CherryStudioDev',
+        session: {
+          id: 'topic:thinking-only',
+          name: 'Cherry Studio chat',
+          description: null,
+          agentId: 'default',
+          agentName: 'default',
+          agentType: 'topic',
+          model: null,
+          createdAt: '2026-03-10T10:00:00.000Z',
+          updatedAt: '2026-03-10T10:00:05.000Z',
+          messages: [
+            {
+              id: 'u1',
+              role: 'user',
+              content: {
+                blocks: [
+                  { id: 'ub1', type: 'main_text', content: 'hi' },
+                ],
+              },
+              createdAt: '2026-03-10T10:00:00.000Z',
+              updatedAt: '2026-03-10T10:00:00.000Z',
+            },
+            {
+              id: 'a1',
+              role: 'assistant',
+              content: {
+                blocks: [
+                  { id: 'ab1', type: 'thinking', content: 'cHmm, let me think this through."' },
+                ],
+              },
+              createdAt: '2026-03-10T10:00:01.000Z',
+              updatedAt: '2026-03-10T10:00:01.000Z',
+            },
+          ],
+        },
+      })
+
+      const result = parseSessionContent(content, 'cherrystudio')
+      expect(result.messages).toHaveLength(2)
+      expect(result.messages[1]).toMatchObject({
+        kind: 'ai-thinking',
+        full: 'Hmm, let me think this through.',
+      })
+    })
+
     it('filters out system content (local-command, command-)', () => {
       const content = jsonl(
         { type: 'user', message: { role: 'user', content: '<local-command>foo</local-command>' }, timestamp: '2026-03-07T10:00:00Z' },

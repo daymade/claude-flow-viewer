@@ -1,5 +1,10 @@
 import type { ProjectMeta, SessionMeta, SessionSource } from '../types/session'
 import type { SearchQueryOptions, SearchResult, SearchStats } from './search'
+import type {
+  SkillRecommendationAnalysis,
+  SkillRecommendationAnalyzeOptions,
+  SkillRecommendationBackendStatus,
+} from './skill-recommendations'
 import { quickScanMetadata, decodeProjectName, extractShortName, disambiguateShortNames } from './parser'
 import {
   CODEX_PROJECT_PREFIX,
@@ -9,6 +14,7 @@ import {
   isCodexProjectId,
   quickScanCodexMetadata,
 } from './providers/codex'
+import { isCherryStudioProjectId } from './providers/cherrystudio'
 import { selectCodexRootSessions } from './codex-navigation'
 
 const MAX_CLAUDE_SESSIONS_PER_PROJECT = 50
@@ -37,6 +43,14 @@ export interface FileStore {
   readToolResult(projectEncoded: string, sessionId: string, relativePath: string): Promise<string>
   searchSessions(query: string, options?: SearchQueryOptions): Promise<SearchResult[]>
   getSearchBackendStatus(): Promise<SearchBackendStatus>
+  analyzeSkillRecommendations(options?: SkillRecommendationAnalyzeOptions): Promise<SkillRecommendationAnalysis>
+  getSkillRecommendationBackendStatus(): Promise<SkillRecommendationBackendStatus>
+  /** Optional browser/manual-mode notice for unsupported source layouts. */
+  getBrowserModeNotice?(): Promise<string | null>
+}
+
+export function getCherryStudioBrowserModeNotice(): string {
+  return 'Cherry Studio sessions are unavailable in browser-only file access mode because the browser/manual store cannot read the local agents.db database. Use npm run dev or npm run preview to load Cherry Studio sessions through the local Node/Vite API.'
 }
 
 export interface SearchBackendReadyStatus {
@@ -63,6 +77,24 @@ export function getUnavailableSearchStatus(): SearchBackendUnavailableStatus {
     backend: 'sqlite',
     reason: 'server-required',
     message: 'Search requires the local Node/Vite server API and is unavailable in browser-only file access mode.',
+  }
+}
+
+export function getUnavailableSkillRecommendationStatus(): SkillRecommendationBackendStatus {
+  return {
+    available: false,
+    backend: 'claude-code',
+    reason: 'server-required',
+    message: 'Claude-backed skill analysis requires the local Node/Vite server API and is unavailable in browser-only file access mode.',
+  }
+}
+
+async function readApiErrorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = await res.json() as { error?: string }
+    return data.error || fallback
+  } catch {
+    return fallback
   }
 }
 
@@ -131,6 +163,13 @@ function sortSessions(sessions: SessionMeta[]): SessionMeta[] {
 type ClaudFileEntry = { handle: FileSystemFileHandle; file: File }
 type CodexFileEntry = { handle: FileSystemFileHandle; file: File }
 
+function isCherryStudioManualPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, '/')
+  const segments = normalized.split('/').filter(Boolean)
+  if (segments.some((segment) => /cherrystudio/i.test(segment) || segment === '.cherrystudio')) return true
+  return segments.at(-1)?.toLowerCase() === 'agents.db'
+}
+
 async function *walkJsonlFiles(dirHandle: FileSystemDirectoryHandle): AsyncGenerator<CodexFileEntry> {
   for await (const entry of dirHandle.values()) {
     if (entry.kind === 'directory') {
@@ -169,6 +208,7 @@ async function mapInBatches<T, R>(
 class FSAccessStore implements FileStore {
   private rootHandle: FileSystemDirectoryHandle
   private sessionFiles = new Map<string, FileSystemFileHandle>()
+  private browserModeNoticePromise: Promise<string | null> | null = null
 
   constructor(rootHandle: FileSystemDirectoryHandle) {
     this.rootHandle = rootHandle
@@ -232,12 +272,27 @@ class FSAccessStore implements FileStore {
     return (await fileHandle.getFile()).text()
   }
 
+  async getBrowserModeNotice(): Promise<string | null> {
+    if (!this.browserModeNoticePromise) {
+      this.browserModeNoticePromise = this.detectBrowserModeNotice()
+    }
+    return this.browserModeNoticePromise
+  }
+
   async searchSessions(): Promise<SearchResult[]> {
     throw new Error(getUnavailableSearchStatus().message)
   }
 
   async getSearchBackendStatus(): Promise<SearchBackendStatus> {
     return getUnavailableSearchStatus()
+  }
+
+  async analyzeSkillRecommendations(): Promise<SkillRecommendationAnalysis> {
+    throw new Error(getUnavailableSkillRecommendationStatus().message)
+  }
+
+  async getSkillRecommendationBackendStatus(): Promise<SkillRecommendationBackendStatus> {
+    return getUnavailableSkillRecommendationStatus()
   }
 
   private async scanClaudeProjects(projectMap: Map<string, ScanSummary>, onlyProject?: string): Promise<void> {
@@ -410,6 +465,49 @@ class FSAccessStore implements FileStore {
     }
     return index
   }
+
+  private async detectBrowserModeNotice(): Promise<string | null> {
+    if (await this.hasCherryStudioData()) {
+      return getCherryStudioBrowserModeNotice()
+    }
+    return null
+  }
+
+  private async hasCherryStudioData(): Promise<boolean> {
+    const candidates: string[][] = [
+      ['agents.db'],
+      ['Data', 'agents.db'],
+      ['CherryStudio', 'Data', 'agents.db'],
+      ['CherryStudioDev', 'Data', 'agents.db'],
+      ['Library', 'Application Support', 'CherryStudio', 'Data', 'agents.db'],
+      ['Library', 'Application Support', 'CherryStudioDev', 'Data', 'agents.db'],
+    ]
+
+    for (const parts of candidates) {
+      if (await this.hasPath(parts)) return true
+    }
+
+    return false
+  }
+
+  private async hasPath(parts: string[]): Promise<boolean> {
+    let current: FileSystemDirectoryHandle = this.rootHandle
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index]
+      const isLeaf = index === parts.length - 1
+      try {
+        if (isLeaf) {
+          await current.getFileHandle(part)
+          return true
+        }
+        current = await current.getDirectoryHandle(part)
+      } catch {
+        return false
+      }
+    }
+
+    return false
+  }
 }
 
 // --- Input fallback implementation ---
@@ -418,6 +516,7 @@ class InputFallbackStore implements FileStore {
   private claudeFiles = new Map<string, File>()
   private codexFiles = new Map<string, File>()
   private codexSessionIndexFile: File | null = null
+  private browserModeNotice: string | null = null
 
   constructor(files: FileList) {
     for (let i = 0; i < files.length; i++) {
@@ -440,6 +539,10 @@ class InputFallbackStore implements FileStore {
         const sessionId = extractCodexSessionId(file.name)
         this.codexFiles.set(sessionId, file)
         continue
+      }
+
+      if (isCherryStudioManualPath(path)) {
+        this.browserModeNotice = getCherryStudioBrowserModeNotice()
       }
 
       if ((path.endsWith('/session_index.jsonl') || path === 'session_index.jsonl')
@@ -483,12 +586,24 @@ class InputFallbackStore implements FileStore {
     throw new Error('Tool result files are not available in input fallback mode')
   }
 
+  async getBrowserModeNotice(): Promise<string | null> {
+    return this.browserModeNotice
+  }
+
   async searchSessions(): Promise<SearchResult[]> {
     throw new Error(getUnavailableSearchStatus().message)
   }
 
   async getSearchBackendStatus(): Promise<SearchBackendStatus> {
     return getUnavailableSearchStatus()
+  }
+
+  async analyzeSkillRecommendations(): Promise<SkillRecommendationAnalysis> {
+    throw new Error(getUnavailableSkillRecommendationStatus().message)
+  }
+
+  async getSkillRecommendationBackendStatus(): Promise<SkillRecommendationBackendStatus> {
+    return getUnavailableSkillRecommendationStatus()
   }
 
   private async scanClaudeProjects(projectMap: Map<string, ScanSummary>, onlyProject?: string): Promise<void> {
@@ -647,6 +762,26 @@ class APIFileStore implements FileStore {
     return res.json()
   }
 
+  async analyzeSkillRecommendations(options: SkillRecommendationAnalyzeOptions = {}): Promise<SkillRecommendationAnalysis> {
+    const res = await fetch('/api/skill-recommendations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ options }),
+    })
+    if (!res.ok) throw new Error(await readApiErrorMessage(res, `Skill recommendation request failed: ${res.status}`))
+    return res.json()
+  }
+
+  async getSkillRecommendationBackendStatus(): Promise<SkillRecommendationBackendStatus> {
+    const res = await fetch('/api/skill-recommendations/status')
+    if (!res.ok) throw new Error(await readApiErrorMessage(res, `Skill recommendation status request failed: ${res.status}`))
+    return res.json()
+  }
+
+  async getBrowserModeNotice(): Promise<string | null> {
+    return null
+  }
+
   private rememberProjectSources(projects: ProjectMeta[]) {
     for (const project of projects) {
       this.projectSources.set(project.encodedName, project.source)
@@ -656,6 +791,7 @@ class APIFileStore implements FileStore {
   private resolveProjectSource(projectEncoded: string): SessionSource {
     const source = this.projectSources.get(projectEncoded)
     if (source) return source
+    if (isCherryStudioProjectId(projectEncoded)) return 'cherrystudio'
     return isCodexProjectId(projectEncoded) ? 'codex' : 'claude'
   }
 }

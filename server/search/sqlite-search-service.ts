@@ -7,14 +7,16 @@ import Database from 'better-sqlite3'
 import { parseSessionContent } from '../../src/lib/parser'
 import {
   SearchEngine,
+  buildSearchTrigrams,
   extractSearchChunks,
+  normalizeSearchText,
   tokenizeSearchText,
   type SearchChunkRecord,
   type SearchQueryOptions,
   type SearchResult,
   type SearchStats,
 } from '../../src/lib/search'
-import { createDefaultEmbeddingProvider, type SearchEmbeddingProvider } from './embedding-provider'
+import type { SearchEmbeddingProvider } from './embedding-provider'
 import { listIndexedSessionFiles, type IndexedSessionFile, type SearchRoots } from './session-catalog'
 
 const SEARCH_HOME_DIR = path.join(os.homedir(), '.claude-flow-viewer')
@@ -23,6 +25,7 @@ const REFRESH_INTERVAL_MS = 5000
 const SCHEMA_VERSION = '4'
 const DEFAULT_LEXICAL_LIMIT = 80
 const DEFAULT_EMBEDDING_LIMIT = 80
+const DEFAULT_FALLBACK_SCAN_LIMIT = 160
 const BM25_SIGNAL_WEIGHT = 12
 const EMBEDDING_SIGNAL_WEIGHT = 12
 const MAX_QUERY_EMBEDDING_CACHE = 64
@@ -96,6 +99,10 @@ type MetaRow = {
 type FtsCandidateRow = {
   chunk_id: string
   bm25_score: number
+}
+
+type CountRow = {
+  count: number
 }
 
 type SearchSignal = {
@@ -229,6 +236,10 @@ function buildFtsQuery(query: string): string | null {
   return tokens.map((token) => `"${token.replace(/"/g, '""')}"`).join(' OR ')
 }
 
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&')
+}
+
 export class SQLiteSearchService {
   private readonly roots: SearchRoots
   private readonly dbPath: string
@@ -240,6 +251,7 @@ export class SQLiteSearchService {
   private embeddingEnabled: boolean
   private lastRefreshAt = 0
   private refreshPromise: Promise<void> | null = null
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private sqliteVecEnabled = false
   private vecLoadPromise: Promise<void> | null = null
   private vecTableDirty = false
@@ -268,7 +280,7 @@ export class SQLiteSearchService {
     this.dbPath = dbPath
     this.lexicalCandidateLimit = options.lexicalCandidateLimit ?? DEFAULT_LEXICAL_LIMIT
     this.embeddingCandidateLimit = options.embeddingCandidateLimit ?? DEFAULT_EMBEDDING_LIMIT
-    this.embeddingProvider = options.embeddingProvider ?? createDefaultEmbeddingProvider()
+    this.embeddingProvider = options.embeddingProvider ?? null
     this.embeddingEnabled = Boolean(this.embeddingProvider)
 
     fs.mkdirSync(path.dirname(dbPath), { recursive: true })
@@ -400,6 +412,11 @@ export class SQLiteSearchService {
   }
 
   async search(query: string, options: SearchQueryOptions = {}): Promise<SearchQueryPayload> {
+    if (this.countIndexedSessions() === 0) {
+      await this.ensureFreshIndex()
+    } else {
+      this.scheduleFreshIndex()
+    }
 
     if (!query.trim()) {
       return {
@@ -429,6 +446,17 @@ export class SQLiteSearchService {
     }
 
     if (candidateChunkIds.size === 0) {
+      const fallbackChunks = this.collectFallbackChunks(query, options)
+      if (fallbackChunks.length > 0) {
+        const engine = new SearchEngine()
+        engine.addChunks(fallbackChunks)
+
+        return {
+          results: engine.search(query, options),
+          status: this.getStatusPayload(),
+        }
+      }
+
       return {
         results: [],
         status: this.getStatusPayload(),
@@ -458,6 +486,11 @@ export class SQLiteSearchService {
   }
 
   async getStatus(): Promise<SearchStatusPayload> {
+    if (this.countIndexedSessions() === 0) {
+      await this.ensureFreshIndex()
+    } else {
+      this.scheduleFreshIndex()
+    }
     return this.getStatusPayload()
   }
 
@@ -487,10 +520,6 @@ export class SQLiteSearchService {
   }
 
   async ensureFreshIndex(force = false): Promise<void> {
-    const now = Date.now()
-    if (!force && this.lastRefreshAt > 0 && now - this.lastRefreshAt < REFRESH_INTERVAL_MS) {
-      return
-    }
     if (this.refreshPromise) {
       return this.refreshPromise
     }
@@ -499,6 +528,33 @@ export class SQLiteSearchService {
       this.refreshPromise = null
     })
     return this.refreshPromise
+  }
+
+  private scheduleFreshIndex(force = false): void {
+    if (!force && this.countIndexedSessions() > 0 && !this.getMeta('last_indexed_at')) {
+      return
+    }
+
+    const now = Date.now()
+    if (!force && this.lastRefreshAt > 0 && now - this.lastRefreshAt < REFRESH_INTERVAL_MS) {
+      return
+    }
+    if (this.refreshPromise) {
+      return
+    }
+    if (this.refreshTimer) {
+      return
+    }
+
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null
+      if (this.refreshPromise) return
+
+      this.refreshPromise = this.refreshIndex(force).finally(() => {
+        this.refreshPromise = null
+      })
+      void this.refreshPromise
+    }, 0)
   }
 
   private async refreshIndex(force: boolean): Promise<void> {
@@ -564,7 +620,9 @@ export class SQLiteSearchService {
   }
 
   private async reindexSession(session: IndexedSessionFile): Promise<SearchChunkRecord[]> {
-    const content = await fs.promises.readFile(session.filePath, 'utf-8')
+    const content = session.loadContent
+      ? await session.loadContent()
+      : await fs.promises.readFile(session.filePath, 'utf-8')
     const data = parseSessionContent(content, session.source)
     const chunks = extractSearchChunks({
       projectEncoded: session.projectEncoded,
@@ -680,9 +738,99 @@ export class SQLiteSearchService {
   private collectLexicalSignals(query: string): Map<string, number> {
     const ftsQuery = buildFtsQuery(query)
     if (!ftsQuery) return new Map()
+    if (!this.hasFtsRows()) return new Map()
 
     const rows = this.searchFtsStmt.all(ftsQuery, this.lexicalCandidateLimit) as FtsCandidateRow[]
     return normalizeFtsSignals(rows)
+  }
+
+  private hasFtsRows(): boolean {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM search_chunks_fts').get() as CountRow | undefined
+    return (row?.count ?? 0) > 0
+  }
+
+  private collectFallbackChunks(query: string, options: SearchQueryOptions): SearchChunkRecord[] {
+    const normalizedQuery = normalizeSearchText(query)
+    if (!normalizedQuery) return []
+
+    const selectFallbackRows = (likeClauses: string[], params: string[]): ChunkRow[] => {
+      if (likeClauses.length === 0) return []
+
+      const whereClauses = [`(${likeClauses.join(' OR ')})`]
+      if (options.sources && options.sources.length > 0) {
+        const placeholders = options.sources.map(() => '?').join(', ')
+        whereClauses.push(`source IN (${placeholders})`)
+        params.push(...options.sources)
+      }
+      if (options.projectEncoded) {
+        whereClauses.push('project_encoded = ?')
+        params.push(options.projectEncoded)
+      }
+      if (options.sessionId) {
+        whereClauses.push('session_id = ?')
+        params.push(options.sessionId)
+      }
+      if (options.kinds && options.kinds.length > 0) {
+        const placeholders = options.kinds.map(() => '?').join(', ')
+        whereClauses.push(`kind IN (${placeholders})`)
+        params.push(...options.kinds)
+      }
+
+      return this.db.prepare(`
+      SELECT
+        chunk_id,
+        source,
+        project_encoded,
+        project_label,
+        project_short_name,
+        session_id,
+        session_start_time,
+        kind,
+        title,
+        text,
+        normalized_text,
+        locator_json,
+        tokens_json,
+        trigrams_json,
+        search_tags_json
+      FROM search_chunks
+      WHERE ${whereClauses.join(' AND ')}
+      ORDER BY session_start_time DESC, id DESC
+      LIMIT ?
+    `).all(...params, DEFAULT_FALLBACK_SCAN_LIMIT) as ChunkRow[]
+    }
+
+    const exactRows = selectFallbackRows(
+      ['normalized_text LIKE ? ESCAPE \'\\\''],
+      [`%${escapeLikePattern(normalizedQuery)}%`],
+    )
+    if (exactRows.length > 0) {
+      return exactRows.map(chunkRowToRecord)
+    }
+
+    const patterns = new Set<string>([normalizedQuery])
+    for (const token of tokenizeSearchText(query)) {
+      patterns.add(token)
+    }
+    for (const trigram of buildSearchTrigrams(query)) {
+      patterns.add(trigram)
+    }
+
+    const likeClauses: string[] = []
+    const params: string[] = []
+    const orderedPatterns = [...patterns].filter(Boolean)
+
+    for (const pattern of orderedPatterns) {
+      likeClauses.push('normalized_text LIKE ? ESCAPE \'\\\'')
+      params.push(`%${escapeLikePattern(pattern)}%`)
+    }
+
+    for (const pattern of orderedPatterns.slice(0, 12)) {
+      likeClauses.push('trigrams_json LIKE ? ESCAPE \'\\\'')
+      params.push(`%${escapeLikePattern(`"${pattern}"`)}%`)
+    }
+
+    return selectFallbackRows(likeClauses, params).map(chunkRowToRecord)
   }
 
   private async collectEmbeddingSignals(query: string, options: SearchQueryOptions = {}): Promise<Map<string, number>> {

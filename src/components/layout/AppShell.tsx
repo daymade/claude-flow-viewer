@@ -1,10 +1,13 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import { useAppState } from '../../hooks/useSessionStore'
+import { useClaudeSkillRecommendations } from '../../hooks/useClaudeSkillRecommendations'
 import { useFileLoader } from '../../hooks/useFileLoader'
 import { useSearchController } from '../../hooks/useSearchController'
 import { buildCodexThreadForest, findCodexSelectionContext } from '../../lib/codex-navigation'
+import { SOURCE_METADATA } from '../../lib/source-metadata'
 import { Sidebar } from '../sidebar/Sidebar'
 import { CodexWorkspaceView } from '../codex/CodexWorkspaceView'
+import { SkillRecommendationsPanel } from '../recommendations/SkillRecommendationsPanel'
 import { SearchResultsPanel } from '../search/SearchResultsPanel'
 import { SessionView } from '../session/SessionView'
 import type { FilterState } from '../../types/session'
@@ -31,6 +34,9 @@ export function AppShell() {
     query: state.searchQuery,
     fileStore: state.fileStore,
     loadSession,
+  })
+  const { recommendations, analyze, recheck } = useClaudeSkillRecommendations({
+    fileStore: state.fileStore,
   })
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT)
   const dragging = useRef(false)
@@ -90,6 +96,7 @@ export function AppShell() {
     return findCodexSelectionContext(forest, activeSession.id)
   }, [activeProject, activeSession])
   const showMessageFilters = activeProject?.source !== 'codex'
+  const activeSourceMeta = activeProject ? SOURCE_METADATA[activeProject.source] : null
 
   // Keyboard shortcut: Cmd+K for search focus
   const searchRef = useRef<HTMLInputElement>(null)
@@ -120,6 +127,10 @@ export function AppShell() {
     && search.activeTarget.sessionId === state.activeSessionId
     ? search.activeTarget
     : null
+  const skillPanelStoreKey = useMemo(
+    () => `${recommendations.contextVersion}:${activeProject?.encodedName ?? 'no-active-project'}`,
+    [activeProject?.encodedName, recommendations.contextVersion],
+  )
 
   return (
     <div className="h-screen flex bg-[#FAFAF8]">
@@ -170,6 +181,18 @@ export function AppShell() {
             search={search}
             onSelectResult={selectResult}
           />
+          {!state.searchQuery.trim() && (
+            <SkillRecommendationsPanel
+              key={skillPanelStoreKey}
+              recommendations={recommendations}
+              activeProject={activeProject ? {
+                encodedName: activeProject.encodedName,
+                shortName: activeProject.shortName,
+              } : null}
+              onAnalyze={(options) => void analyze(options)}
+              onRecheck={() => void recheck()}
+            />
+          )}
 
           {/* Stats */}
           <div className="flex gap-3 mt-2 text-[10px] text-slate-400">
@@ -211,19 +234,17 @@ export function AppShell() {
           {activeProject ? (
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${
-                  activeProject.source === 'codex'
-                    ? 'bg-emerald-100 text-emerald-800'
-                    : 'bg-sky-100 text-sky-800'
-                }`}>
-                  {activeProject.source === 'codex' ? 'Codex' : 'Claude'}
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${activeSourceMeta!.badgeClass}`}>
+                  {activeSourceMeta!.label}
                 </span>
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${
                   activeProject.source === 'codex'
                     ? 'bg-emerald-50 text-emerald-700'
-                    : 'bg-slate-100 text-slate-600'
+                    : activeProject.source === 'cherrystudio'
+                      ? 'bg-orange-50 text-orange-700'
+                      : 'bg-slate-100 text-slate-600'
                 }`}>
-                  {activeProject.source === 'codex' ? 'Learning map' : 'Conversation view'}
+                  {activeSourceMeta!.viewLabel}
                 </span>
                 <span className="text-xs font-medium text-slate-500 truncate" title={activeProject.decodedName}>
                   {activeProject.shortName}

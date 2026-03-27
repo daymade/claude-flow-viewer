@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, type DragEvent } from 'react'
 import { useFileLoader } from '../../hooks/useFileLoader'
 import { useAppState } from '../../hooks/useSessionStore'
-import { supportsDirectoryPicker } from '../../lib/fs-access'
+import { getCherryStudioBrowserModeNotice, supportsDirectoryPicker } from '../../lib/fs-access'
 
 export function WelcomeScreen() {
   const { loadDirectory, loadFromFiles, loadFromHandle, switchDirectory } = useFileLoader()
@@ -71,7 +71,7 @@ export function WelcomeScreen() {
 
         <h1 className="text-2xl font-bold text-slate-900 mb-1.5 tracking-tight font-sans">Decision Flow Viewer</h1>
         <p className="text-slate-500 text-sm mb-8 leading-relaxed max-w-xs mx-auto font-sans">
-          Visualize Claude Code and Codex sessions. User prompts and decisions take center stage.
+          Visualize Claude Code, Codex, and Cherry Studio sessions. User prompts and decisions take center stage.
         </p>
 
         {state.loading && (
@@ -106,6 +106,10 @@ export function WelcomeScreen() {
               </button>
             )}
 
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-left text-[13px] leading-relaxed text-amber-900">
+              <span className="font-semibold">Cherry Studio boundary:</span> {getCherryStudioBrowserModeNotice()}
+            </div>
+
             <input
               type="file"
               ref={inputRef}
@@ -115,7 +119,7 @@ export function WelcomeScreen() {
 
             <div className="mt-8 pt-5 border-t border-slate-100">
               <p className="text-slate-400 text-xs leading-relaxed">
-                Select your home directory, <code className="text-amber-500 bg-amber-50 px-1.5 py-0.5 rounded text-[11px] font-mono">.claude</code>, or <code className="text-amber-500 bg-amber-50 px-1.5 py-0.5 rounded text-[11px] font-mono">.codex</code>.
+                Select your home directory, <code className="text-amber-500 bg-amber-50 px-1.5 py-0.5 rounded text-[11px] font-mono">.claude</code>, <code className="text-amber-500 bg-amber-50 px-1.5 py-0.5 rounded text-[11px] font-mono">.codex</code>, or the Cherry Studio data directory.
                 Sessions are discovered automatically.
               </p>
               <p className="text-slate-300 text-xs mt-2">

@@ -8,6 +8,7 @@ import {
   summarizeCodexThreadForest,
   type CodexThreadNode,
 } from '../../lib/codex-navigation'
+import { SOURCE_METADATA, SOURCE_ORDER } from '../../lib/source-metadata'
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`
@@ -40,6 +41,7 @@ const SOURCE_FILTERS: Array<{ key: SourceFilter; label: string; activeClass: str
   { key: 'all', label: 'All sources', activeClass: 'bg-slate-200 text-slate-800' },
   { key: 'claude', label: 'Claude', activeClass: 'bg-sky-100 text-sky-800' },
   { key: 'codex', label: 'Codex', activeClass: 'bg-emerald-100 text-emerald-800' },
+  { key: 'cherrystudio', label: 'Cherry Studio', activeClass: 'bg-orange-100 text-orange-800' },
 ]
 
 interface SidebarProps {
@@ -208,14 +210,13 @@ export function Sidebar({
         )}
       </div>
 
-      {(['claude', 'codex'] as const).map((source) => {
+      {SOURCE_ORDER.map((source) => {
         const sectionProjects = filteredProjects.filter((project) => project.source === source)
         if (sectionProjects.length === 0) return null
 
-        const sectionLabel = source === 'codex' ? 'Codex tasks' : 'Claude conversations'
-        const sectionClass = source === 'codex'
-          ? 'bg-emerald-50/60 text-emerald-800 border-emerald-100'
-          : 'bg-sky-50/60 text-sky-800 border-sky-100'
+        const sectionMeta = SOURCE_METADATA[source]
+        const sectionLabel = sectionMeta.sectionLabel
+        const sectionClass = sectionMeta.projectClass
 
         return (
           <div key={source}>
@@ -357,7 +358,7 @@ export function Sidebar({
                       {project.sessions.map((session) => (
                         <SessionCard
                           key={session.id}
-                          projectSource="claude"
+                          projectSource={project.source}
                           session={session}
                           activeSessionId={activeSessionId}
                           activeHeatmap={activeHeatmap}
@@ -416,9 +417,7 @@ function ProjectHeader({
       className={`px-3 py-2.5 text-xs font-semibold cursor-pointer flex items-start gap-2 transition-colors ${
         isActiveProject
           ? 'bg-amber-50/80'
-          : project.source === 'codex'
-            ? 'bg-emerald-50/40 hover:bg-emerald-50/60'
-            : 'bg-sky-50/30 hover:bg-sky-50/50'
+          : SOURCE_METADATA[project.source].projectHoverClass
       }`}
       onClick={onToggle}
       title={`${project.decodedName}\n${loadedCount}/${totalCount} entries loaded`}
@@ -433,12 +432,8 @@ function ProjectHeader({
         <path d="M3 1l5 4-5 4V1z" />
       </svg>
 
-      <span className={`mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${
-        project.source === 'codex'
-          ? 'bg-emerald-100 text-emerald-800'
-          : 'bg-sky-100 text-sky-800'
-      }`}>
-        {project.source === 'codex' ? 'Codex' : 'Claude'}
+      <span className={`mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${SOURCE_METADATA[project.source].badgeClass}`}>
+        {SOURCE_METADATA[project.source].label}
       </span>
 
       <div className="min-w-0 flex-1">
@@ -585,9 +580,7 @@ function SessionCard({ projectSource, session, activeSessionId, activeHeatmap, o
   const isActive = session.id === activeSessionId
   const stateClass = isActive
     ? 'bg-amber-50 border-l-amber-600 shadow-sm shadow-amber-100'
-    : projectSource === 'codex'
-      ? 'border-l-emerald-400/60 hover:bg-emerald-50/40'
-      : 'border-l-sky-400/60 hover:bg-sky-50/40'
+    : SOURCE_METADATA[projectSource].sessionClass
 
   return (
     <div

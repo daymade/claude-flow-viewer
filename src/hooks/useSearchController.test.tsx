@@ -69,6 +69,8 @@ describe('useSearchController', () => {
       readToolResult: vi.fn(),
       getSearchBackendStatus: vi.fn().mockResolvedValue(READY_BACKEND),
       searchSessions: vi.fn().mockResolvedValue([makeResult()]),
+      analyzeSkillRecommendations: vi.fn(),
+      getSkillRecommendationBackendStatus: vi.fn(),
     }
     const loadSession = vi.fn().mockResolvedValue(undefined)
 
@@ -110,6 +112,8 @@ describe('useSearchController', () => {
       readToolResult: vi.fn(),
       getSearchBackendStatus: vi.fn().mockResolvedValue(UNAVAILABLE_BACKEND),
       searchSessions: vi.fn(),
+      analyzeSkillRecommendations: vi.fn(),
+      getSkillRecommendationBackendStatus: vi.fn(),
     }
 
     const { result } = renderHook(() => useSearchController({

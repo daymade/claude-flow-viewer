@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Decision Flow Viewer — a browser-based viewer for local Claude Code and Codex session history. Supports Claude JSONL sessions in `~/.claude/projects/**/*.jsonl` and Codex rollout sessions in `~/.codex/sessions/**/*.jsonl`, with optional preview labels from `~/.codex/session_index.jsonl`.
+Decision Flow Viewer — a browser-based viewer for local Claude Code, Codex, and Cherry Studio session history. Supports Claude JSONL sessions in `~/.claude/projects/**/*.jsonl`, Codex rollout sessions in `~/.codex/sessions/**/*.jsonl`, and server-backed Cherry Studio sessions from the resolved local user-data store: agent sessions from `Data/agents.db` plus recovered regular chats from the same IndexedDB/Local Storage-backed app data.
 
 ## Commands
 
@@ -27,7 +27,7 @@ npx vitest run src/components/sidebar/Sidebar.test.tsx
 - There is no separate backend process to start. `npm run dev` and `npm run preview` both run the frontend and the local Node-side API in one process.
 - The local API is mounted by `vite-plugin-claude-data.ts`; it serves scan/session/tool-result endpoints and the SQLite-backed search endpoints.
 - Transcript search requires this local server mode. Opening static built files without the Vite/preview server will not provide `/api/search` or any other local API routes.
-- Browser-only file access mode is still supported for browsing session files, but not for transcript search.
+- Browser-only file access mode is still supported for browsing Claude Code and Codex session files, but not for transcript search or Cherry Studio sessions. Cherry Studio support is currently local-server-only because the browser/manual store does not read the app's local user-data stores or recover Cherry regular chats; manual/browser loading must surface that boundary instead of pretending it is a normal folder scan.
 
 ## Architecture
 
@@ -36,12 +36,15 @@ npx vitest run src/components/sidebar/Sidebar.test.tsx
 ```
 ~/.claude/projects/{encodedProjectName}/{sessionId}.jsonl
 ~/.codex/sessions/YYYY/MM/DD/{rolloutId}.jsonl + ~/.codex/session_index.jsonl
+~/.cherrystudio/config/config.json (optional `userData` override)
+~/Library/Application Support/CherryStudio*/Data/agents.db
+~/Library/Application Support/CherryStudio*/IndexedDB/**
     ↓
 FileStore (3 implementations, source-aware)
     ↓
 parser.ts: source detection + dispatch
     ↓
-providers/claude.ts | codex-parser.ts → SessionData { source, messages, prompts, heatmap, markers }
+providers/claude.ts | codex-parser.ts | providers/cherrystudio.ts → SessionData { source, messages, prompts, heatmap, markers }
     ↓
 useSessionStore (useReducer) → AppContext
     ↓
@@ -62,10 +65,13 @@ Three implementations behind one `FileStore` interface, tried in order:
 - `/api/tool-result/:source/:project/:session/:path` — Read tool result overflow files (`claude` only)
 - `/api/search/status` — Report local SQLite search availability and index stats
 - `/api/search` — Query the local SQLite-backed transcript index
+- `/api/skill-recommendations/status` — Report whether local Claude-backed skill analysis is ready to run
+- `/api/skill-recommendations` — Run the on-demand Claude-backed skill analysis flow
 
 **Scanning strategy differs by store**:
 - **APIFileStore (dev)**: source-aware Vite plugin scans both roots, persists quick-scan metadata to a local cache under the user's cache directory, and reuses the first `/api/scan` response instead of fetching it twice on boot. Initial `Codex` project payloads are root-first; full per-project session lists are fetched on demand.
 - **FSAccessStore / InputFallbackStore (production)**: source-aware browser scans use lightweight reads only. Claude uses `quickScanMetadata()`. Codex uses `quickScanCodexMetadata()`, groups sessions by `session_meta.cwd`, extracts primary/subagent thread metadata from `session_meta`, and uses batched concurrent head reads instead of fully serial scanning.
+- Cherry Studio stays local-server-only. The browser store should show an explicit unsupported notice for Cherry inputs and never misclassify them as Claude data.
 
 ### JSONL Parsing Pipeline (`src/lib/parser.ts`)
 
@@ -78,6 +84,7 @@ Three implementations behind one `FileStore` interface, tried in order:
 Provider details:
 - `src/lib/providers/claude.ts` keeps Claude-specific tree parsing, compaction, `/clear`, and marker logic
 - `src/lib/codex-parser.ts` handles Codex `response_item` / `event_msg` normalization, task lifecycle, tool calls/results, rollback markers, and thread metadata extraction (`primary` vs `subagent`)
+- `src/lib/providers/cherrystudio.ts` parses serialized Cherry Studio payloads for both `agents.db` agent sessions and recovered regular-chat topics
 
 **Exports from `parser.ts`**:
 - `parseSessionContent(content, source?)` → `SessionData`
@@ -124,6 +131,11 @@ Counts of special events in a session: `{ compacts, plans, clears, forks }`.
 - `src/lib/timeline.ts` — Extracts `TimelineEvent[]` from messages, computes time gaps, formats tokens/durations
 - `src/lib/codex-navigation.ts` — SSOT for the `Codex` sidebar task tree: builds root/delegated hierarchy, filters whole task paths, preserves active lineage, and selects the latest root tasks for scan-time display
 - `src/lib/codex-learning.ts` — Extracts learning-oriented `Codex` branch summaries: key moments, decision points, hidden-noise buckets, and role/status labels for the current active rollout
+- `src/lib/providers/cherrystudio.ts` — Parses serialized Cherry Studio agent-session and recovered regular-chat payloads into the shared session model. Also exports shared Cherry Studio text utilities (`collectText`, `sanitizeCherryStudioText`) used by the server catalog — keep these as the SSOT for Cherry Studio text processing
+- `src/lib/source-metadata.ts` — Source label/badge/section registry used by the sidebar, header, and search results
+- `src/lib/skill-recommendations.ts` — Shared types plus compact recent-session dossiers for the Claude-backed skill recommendation flow
+- `server/cherrystudio/catalog.ts` — Resolves Cherry Studio user-data paths, loads agent sessions from `agents.db`, recovers regular chats from IndexedDB-backed app data, and serializes per-session content for API/search consumers. Regular-chat recovery is cached with a 30s TTL to avoid rescanning IndexedDB on every session load
+- `server/recommendations/claude-skill-recommendation-service.ts` — Runs an on-demand local Claude Code custom-agent team (`scout` → `skeptic` → `writer`) over recent session dossiers and returns structured skill ideas, launched through the user’s real shell environment (`zsh` / `bash` startup files) rather than a clean process env
 - `src/lib/search/` — Local chunk-based search core. `extract.ts` converts `SessionMeta + SessionData` into searchable chunks, `search-engine.ts` supports chunk hydration/replacement plus hybrid ranking hooks (`bm25` / `embedding` external signals), and `semantic.ts` keeps the lightweight corpus-driven scorer used alongside server signals
 - `server/search/` — Node-side SQLite search service. `session-catalog.ts` discovers session files + quick-scan metadata, `sqlite-search-service.ts` persists chunk rows to `~/.claude-flow-viewer/search.sqlite`, maintains the FTS5/BM25 and embedding tables, and incrementally refreshes them, while `embedding-provider.ts` provides the local model-backed embedding runtime
 - `server/scan/session-scan-cache.ts` — Persistent dev-server quick-scan cache for `~/.claude` and `~/.codex`. Reuses unchanged session metadata across server restarts so `/api/scan` stays fast on large local histories.
@@ -200,11 +212,12 @@ Single `useReducer` with `AppContext`. Key actions:
 
 ### Sidebar UX
 
-- Sidebar is source-aware and split into `Claude conversations` / `Codex tasks`
-- Source filter chips (`All sources`, `Claude`, `Codex`) are the primary way to narrow navigation
+- Sidebar is source-aware and split into `Claude conversations` / `Codex tasks` / `Cherry Studio sessions`
+- Source filter chips (`All sources`, `Claude`, `Codex`, `Cherry Studio`) are the primary way to narrow navigation
 - Codex projects render a task map summary plus `Main tasks` and `Unlinked delegated work` sections
 - `Codex` delegated runs are nested under their parent task rather than dumped flat, and filters keep the full parent-child path visible
 - Search results now come from the server-backed SQLite index in `SearchResultsPanel`; sidebar tree filtering remains metadata-driven when used on its own
+- When the search box is empty, `AppShell` shows `src/components/recommendations/SkillRecommendationsPanel.tsx`, driven by `src/hooks/useClaudeSkillRecommendations.ts`; it uses the local Node/Vite API to run an on-demand local Claude Code analysis instead of heuristic matching, with user-selectable scopes (`Smart`, `This project`, `Recent all`) so cost and breadth stay explicit
 - Marker filters still auto-expand matching `Codex` delegated chains so users do not have to re-open branches just to see a hit
 - The currently active project may be manually collapsed; it should stay collapsed until the user deliberately selects a session in another project
 

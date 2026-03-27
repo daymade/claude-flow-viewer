@@ -3,6 +3,7 @@ import path from 'node:path'
 
 import type { SessionMeta, SessionSource } from '../../src/types/session'
 import { decodeProjectName, disambiguateShortNames, extractShortName, quickScanMetadata } from '../../src/lib/parser'
+import { listCherryStudioIndexedSessions } from '../cherrystudio/catalog'
 import type { CodexQuickScanResult } from '../../src/lib/codex-parser'
 import {
   CODEX_PREVIEW_BYTES,
@@ -42,6 +43,7 @@ export interface IndexedSessionFile {
   fileMtimeMs: number
   fingerprint: string
   meta: SessionMeta
+  loadContent?: () => Promise<string>
 }
 
 type CodexScanCandidate = {
@@ -122,7 +124,7 @@ function disambiguateProjectEntries(entries: ProjectNameEntry[]) {
 
   const codexGroups = new Map<string, ProjectNameEntry[]>()
   for (const entry of entries) {
-    if (entry.source !== 'codex') continue
+    if (entry.source !== 'codex' && entry.source !== 'cherrystudio') continue
     const list = codexGroups.get(entry.shortName)
     if (list) list.push(entry)
     else codexGroups.set(entry.shortName, [entry])
@@ -232,6 +234,19 @@ export async function listIndexedSessionFiles(roots: SearchRoots): Promise<Index
         meta: candidate.scanned.meta,
       })
     }
+  }
+
+  const cherrySessions = await listCherryStudioIndexedSessions({
+    homeDir: path.resolve(roots.claudeProjectsDir, '..', '..'),
+  })
+  for (const session of cherrySessions) {
+    sessions.push(session)
+    projectEntries.set(`cherrystudio:${session.projectEncoded}`, {
+      source: 'cherrystudio',
+      encodedName: session.projectEncoded,
+      decodedName: session.projectLabel,
+      shortName: session.projectShortName,
+    })
   }
 
   const projectList = [...projectEntries.values()]

@@ -8,14 +8,14 @@ import type { SearchControllerState } from '../../hooks/useSearchController'
 import type { SearchBackendStatus } from '../../lib/fs-access'
 import type { SearchResult } from '../../lib/search'
 
-function makeResult(): SearchResult {
+function makeResult(source: SearchResult['source'] = 'claude'): SearchResult {
   return {
     chunkId: 'project-alpha:session-1:1:ai-text',
     projectEncoded: 'project-alpha',
     projectLabel: '/Users/test/project-alpha',
     projectShortName: 'project-alpha',
     sessionId: 'session-1',
-    source: 'claude',
+    source,
     kind: 'ai-text',
     locator: {
       kind: 'ai-text',
@@ -67,11 +67,14 @@ describe('SearchResultsPanel', () => {
     render(
       <SearchResultsPanel
         query="neon skyline"
-        search={makeSearchState()}
+        search={makeSearchState({
+          results: [makeResult('cherrystudio')],
+        })}
         onSelectResult={onSelectResult}
       />,
     )
 
+    expect(screen.getByText('Cherry Studio')).toBeTruthy()
     expect(screen.getByText('AI response · Message 2')).toBeTruthy()
     expect(screen.getByText('Match: neon city skyline')).toBeTruthy()
 

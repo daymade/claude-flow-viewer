@@ -1,5 +1,5 @@
 export type DecisionMarker = 'none' | 'interrupt' | 'correction'
-export type SessionSource = 'claude' | 'codex'
+export type SessionSource = 'claude' | 'codex' | 'cherrystudio'
 export type SessionThreadKind = 'primary' | 'subagent'
 
 export interface EmbeddedImage {
