@@ -5,6 +5,7 @@ import { useFileLoader } from '../../hooks/useFileLoader'
 import { useSearchController } from '../../hooks/useSearchController'
 import { buildCodexThreadForest, findCodexSelectionContext } from '../../lib/codex-navigation'
 import { SOURCE_METADATA } from '../../lib/source-metadata'
+import { exportSessionAsHTML } from '../../lib/export-html'
 import { Sidebar } from '../sidebar/Sidebar'
 import { CodexWorkspaceView } from '../codex/CodexWorkspaceView'
 import { SkillRecommendationsPanel } from '../recommendations/SkillRecommendationsPanel'
@@ -41,6 +42,66 @@ export function AppShell() {
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT)
   const dragging = useRef(false)
   const hydratedCodexProjects = useRef(new Set<string>())
+  const importFileRef = useRef<HTMLInputElement>(null)
+  const [importing, setImporting] = useState(false)
+
+  const handleExport = useCallback(() => {
+    exportSessionAsHTML()
+  }, [])
+
+  const handleImportClick = useCallback(() => {
+    importFileRef.current?.click()
+  }, [])
+
+  const handleImportFiles = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+
+    setImporting(true)
+    try {
+      // Read files and send as JSON
+      const fileData: { name: string; content: string }[] = []
+      for (let i = 0; i < files.length; i++) {
+        const content = await files[i].text()
+        fileData.push({ name: files[i].name, content })
+      }
+
+      const resp = await fetch('/api/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: fileData }),
+      })
+
+      if (resp.ok) {
+        const result = await resp.json() as { imported: number; errors: string[] }
+        if (result.errors.length > 0) {
+          console.warn('Import warnings:', result.errors)
+        }
+        window.location.reload()
+      } else {
+        const errText = await resp.text().catch(() => 'Unknown error')
+        throw new Error(errText)
+      }
+    } catch (err) {
+      console.error('API import failed, trying browser-side:', err)
+      // Fallback: use browser-side import
+      try {
+        const { createStoreFromFiles } = await import('../../lib/fs-access')
+        const store = createStoreFromFiles(files)
+        const projects = await store.scanProjects()
+        if (projects.length > 0) {
+          dispatch({ type: 'LOAD_PROJECTS', projects, fileStore: store })
+        } else {
+          alert('No valid session files found in the selected files.')
+        }
+      } catch (fallbackErr) {
+        alert('Import failed: ' + String(err))
+      }
+    } finally {
+      setImporting(false)
+      if (importFileRef.current) importFileRef.current.value = ''
+    }
+  }, [dispatch])
 
   // Drag handle for resizable sidebar
   const onDragStart = useCallback((e: React.MouseEvent) => {
@@ -313,6 +374,44 @@ export function AppShell() {
           ) : (
             <div className="text-xs text-slate-400">No session selected</div>
           )}
+
+          {/* Action buttons: Import / Export */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={handleImportClick}
+              disabled={importing}
+              className="px-2.5 py-1 text-[11px] font-medium text-stone-500 hover:text-stone-700 hover:bg-stone-100 rounded-md transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1"
+              title="Import .jsonl session files"
+            >
+              {importing ? (
+                <div className="w-3 h-3 border-1.5 border-stone-300 border-t-stone-500 rounded-full animate-spin" />
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                </svg>
+              )}
+              Import
+            </button>
+            <button
+              onClick={handleExport}
+              disabled={!state.activeSessionData}
+              className="px-2.5 py-1 text-[11px] font-medium text-amber-600 hover:text-amber-700 hover:bg-amber-50 rounded-md transition-colors cursor-pointer disabled:opacity-40 flex items-center gap-1"
+              title="Export current session as standalone HTML"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+              </svg>
+              Export
+            </button>
+          </div>
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".jsonl,.json"
+            multiple
+            onChange={handleImportFiles}
+            className="hidden"
+          />
 
           {/* Filter toggles */}
           {showMessageFilters ? (

@@ -172,6 +172,56 @@ export function claudeDataPlugin(): Plugin {
         return
       }
 
+      if (pathname === '/api/import') {
+        if ((req.method ?? 'GET').toUpperCase() !== 'POST') {
+          res.statusCode = 405
+          res.end('Use POST /api/import')
+          return
+        }
+
+        readJsonBody(req).then(async (body) => {
+          const { files } = body as { files?: { name: string; content: string }[] }
+          if (!files || !Array.isArray(files) || files.length === 0) {
+            return { imported: 0, errors: ['No files provided'] }
+          }
+
+          const errors: string[] = []
+          let imported = 0
+
+          for (const file of files) {
+            try {
+              // Detect source and project from filename pattern
+              // Claude format: {sessionId}.jsonl
+              // We place it under a generic "imported" project
+              const sessionId = file.name.replace(/\.jsonl?$/i, '')
+              if (!sessionId) {
+                errors.push(`Could not parse session ID from filename: ${file.name}`)
+                continue
+              }
+
+              // Use a dedicated import project
+              const importProjectDir = path.resolve(claudeProjectsDir, 'C--imported')
+              fs.mkdirSync(importProjectDir, { recursive: true })
+
+              const destPath = path.resolve(importProjectDir, file.name.endsWith('.jsonl') ? file.name : `${file.name}.jsonl`)
+              fs.writeFileSync(destPath, file.content, 'utf-8')
+              imported++
+            } catch (err) {
+              errors.push(`Failed to import ${file.name}: ${String(err)}`)
+            }
+          }
+
+          return { imported, errors }
+        }).then((result) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(result))
+        }).catch((err) => {
+          res.statusCode = 500
+          res.end(JSON.stringify({ imported: 0, errors: [String(err)] }))
+        })
+        return
+      }
+
       if (pathname === '/api/scan') {
         scanAllProjects(claudeProjectsDir, codexRootDir, codexSessionsDir, sessionScanCache).then((projects) => {
           res.setHeader('Content-Type', 'application/json')
