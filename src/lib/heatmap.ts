@@ -3,21 +3,32 @@ import type { SessionMessage } from '../types/session'
 /**
  * Compute a per-prompt intensity score (0-1) for heatmap visualization.
  * Intensity is driven by: tool calls, forks, errors, thinking length.
+ *
+ * ALIGNMENT CONTRACT: the returned array has exactly one entry per *numbered* prompt,
+ * so `heatmap[i]` always lines up with `SessionData.prompts[i]`. Two things would
+ * silently break that if segmented naively:
+ *   - Abandoned fork-branch prompts are pushed into `messages` with `promptNum: 0` but
+ *     are NOT added to `prompts`. They must NOT open a new segment (they are folded into
+ *     the current prompt's segment, which is also semantically right — an abandoned branch
+ *     is work done during that turn).
+ *   - Messages before the first numbered prompt must not form a leading segment.
+ * Both would shift every subsequent index and paint intensities onto the wrong rows.
+ * Guarded by `heatmap.test.ts`.
  */
 export function computeHeatmap(messages: SessionMessage[]): number[] {
-  // Group messages by prompt segments
   const segments: SessionMessage[][] = []
-  let current: SessionMessage[] = []
+  let current: SessionMessage[] | null = null
 
   for (const msg of messages) {
-    if (msg.kind === 'user-prompt') {
-      if (current.length > 0) segments.push(current)
+    if (msg.kind === 'user-prompt' && msg.promptNum > 0) {
+      if (current) segments.push(current)
       current = [msg]
-    } else {
+    } else if (current) {
       current.push(msg)
     }
+    // messages before the first numbered prompt are intentionally dropped
   }
-  if (current.length > 0) segments.push(current)
+  if (current) segments.push(current)
 
   if (segments.length === 0) return []
 

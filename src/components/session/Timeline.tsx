@@ -18,6 +18,9 @@ interface TimelineProps {
 
 /** Edge padding so dots at extremes don't clip */
 const EDGE_PAD = 0.012
+/** The start/end time anchors live at the very top/bottom — suppress marker labels
+ *  inside this zone so they don't collide with (and garble) those anchors. */
+const LABEL_SAFE_ZONE = 0.085
 
 export function Timeline({
   events, onJump, onScrollTo, activeNums, prompts,
@@ -96,8 +99,9 @@ export function Timeline({
   return (
     <div
       ref={containerRef}
-      className="w-[72px] shrink-0 bg-white border-l border-stone-200 relative select-none cursor-pointer"
+      className="h-full min-h-0 w-[72px] shrink-0 bg-white border-l border-stone-200 relative select-none cursor-pointer"
       onClick={onTrackClick}
+      data-export-remove
     >
       {/* Track line */}
       <div
@@ -130,10 +134,12 @@ export function Timeline({
         const ev = pe.event
         const isActive = ev.promptNum !== undefined && activeNums.has(ev.promptNum)
         const top = toPercent(pe.position)
+        const isEdge = pe.position <= LABEL_SAFE_ZONE || pe.position >= 1 - LABEL_SAFE_ZONE
 
         if (ev.kind === 'prompt') {
           const dot = getDotColor(ev)
-          const showTime = isActive || (ev.promptNum !== undefined && labelVisible.has(ev.promptNum))
+          const showTime = (isActive || (ev.promptNum !== undefined && labelVisible.has(ev.promptNum)))
+            && (!isEdge || isActive)
           return (
             <button
               key={i}
@@ -168,9 +174,11 @@ export function Timeline({
             title={ev.preview}
           >
             <div className={getEventMarkerStyle(ev.kind)} />
-            <span className="text-[6px] font-mono text-stone-400 leading-none mt-0.5 whitespace-nowrap">
-              {getEventLabel(ev.kind)}
-            </span>
+            {!isEdge && (
+              <span className="text-[6px] font-mono text-stone-400 leading-none mt-0.5 whitespace-nowrap">
+                {getEventLabel(ev.kind)}
+              </span>
+            )}
           </div>
         )
       })}
@@ -179,7 +187,7 @@ export function Timeline({
       {hoveredPrompt && hover.anchorRect && (
         <HoverCard
           header={<>
-            <span className="font-bold text-blue-600 text-xs">#{hoveredPrompt.num}</span>
+            <span className="font-bold text-amber-700 text-xs">#{hoveredPrompt.num}</span>
             <span className="text-[10px] text-stone-400 font-mono">{hoveredPrompt.time}</span>
           </>}
           content={hoveredPrompt.fullText}
@@ -259,7 +267,7 @@ function getDotColor(ev: TimelineEvent) {
   if (ev.decision === 'correction') {
     return { border: 'border-rose-400', activeBg: 'bg-rose-500', activeBorder: 'border-rose-500' }
   }
-  return { border: 'border-blue-400', activeBg: 'bg-blue-500', activeBorder: 'border-blue-500' }
+  return { border: 'border-stone-400', activeBg: 'bg-amber-500', activeBorder: 'border-amber-500' }
 }
 
 function getEventMarkerStyle(kind: TimelineEvent['kind']): string {

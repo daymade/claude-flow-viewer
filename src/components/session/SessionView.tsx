@@ -26,9 +26,22 @@ interface SessionViewProps {
   filter: FilterState
   searchQuery: string
   activeSearchTarget?: SearchJumpTarget | null
+  showTimeline?: boolean
+  showPromptIndex?: boolean
+  header?: React.ReactNode
+  readerMode?: boolean
 }
 
-export function SessionView({ data, filter, searchQuery, activeSearchTarget = null }: SessionViewProps) {
+export function SessionView({
+  data,
+  filter,
+  searchQuery,
+  activeSearchTarget = null,
+  showTimeline = true,
+  showPromptIndex = true,
+  header = null,
+  readerMode = false,
+}: SessionViewProps) {
   const contentRef = useRef<HTMLDivElement>(null)
   const [activePromptNums, setActivePromptNums] = useState<Set<number>>(new Set())
   const [scrollFraction, setScrollFraction] = useState(0)
@@ -48,8 +61,8 @@ export function SessionView({ data, filter, searchQuery, activeSearchTarget = nu
   }, [])
 
   const rendered = useMemo(
-    () => renderMessages(data.messages, filter, searchQuery, activeSearchTarget?.messageIndex ?? null),
-    [activeSearchTarget?.messageIndex, data.messages, filter, searchQuery],
+    () => renderMessages(data.messages, filter, searchQuery, activeSearchTarget?.messageIndex ?? null, readerMode),
+    [activeSearchTarget?.messageIndex, data.messages, filter, readerMode, searchQuery],
   )
 
   const timelineEvents = useMemo(
@@ -77,13 +90,13 @@ export function SessionView({ data, filter, searchQuery, activeSearchTarget = nu
     el.addEventListener('scroll', onScroll, { passive: true })
     update()
 
-    const resizeObs = new ResizeObserver(update)
-    resizeObs.observe(el)
+    const resizeObs = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update)
+    resizeObs?.observe(el)
 
     return () => {
       el.removeEventListener('scroll', onScroll)
       cancelAnimationFrame(rafRef.current)
-      resizeObs.disconnect()
+      resizeObs?.disconnect()
     }
   }, [])
 
@@ -109,12 +122,12 @@ export function SessionView({ data, filter, searchQuery, activeSearchTarget = nu
     }
 
     const raf = requestAnimationFrame(measure)
-    const resizeObs = new ResizeObserver(() => requestAnimationFrame(measure))
-    resizeObs.observe(el)
+    const resizeObs = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => requestAnimationFrame(measure))
+    resizeObs?.observe(el)
 
     return () => {
       cancelAnimationFrame(raf)
-      resizeObs.disconnect()
+      resizeObs?.disconnect()
     }
   }, [rendered])
 
@@ -139,6 +152,8 @@ export function SessionView({ data, filter, searchQuery, activeSearchTarget = nu
   useEffect(() => {
     const container = contentRef.current
     if (!container) return
+
+    if (typeof IntersectionObserver === 'undefined') return
 
     const observer = new IntersectionObserver(
       (entries) => {
@@ -166,123 +181,147 @@ export function SessionView({ data, filter, searchQuery, activeSearchTarget = nu
 
   return (
     <div className="flex-1 flex min-w-0 min-h-0 overflow-hidden">
-      <div className="flex-1 overflow-y-auto bg-[#FAFAF8] min-h-0" ref={contentRef}>
-        <PromptIndex prompts={data.prompts} onJump={scrollToPrompt} />
-        <div className="py-8 px-8 max-w-4xl mx-auto">
+      <div
+        className="min-h-0 flex-1 overflow-y-auto bg-[#FAFAF8] focus:outline-none"
+        ref={contentRef}
+        data-primary-scroll
+        data-export-primary
+        tabIndex={0}
+      >
+        {header}
+        <div className="py-6 px-4 max-w-4xl mx-auto sm:py-8 sm:px-8">
           {rendered}
         </div>
       </div>
-      {filter.timeline && timelineEvents.length > 0 && (
-        <Timeline
-          events={timelineEvents}
-          onJump={scrollToPrompt}
-          onScrollTo={scrollToFraction}
-          activeNums={activePromptNums}
+      {showPromptIndex && (
+        <PromptOutline
           prompts={data.prompts}
-          scrollFraction={scrollFraction}
-          viewportFraction={viewportFraction}
-          promptPositions={promptPositions}
+          heatmap={data.heatmap}
+          activeNums={activePromptNums}
+          onJump={scrollToPrompt}
         />
+      )}
+      {showTimeline && filter.timeline && timelineEvents.length > 0 && (
+        <div className="hidden md:flex min-h-0">
+          <Timeline
+            events={timelineEvents}
+            onJump={scrollToPrompt}
+            onScrollTo={scrollToFraction}
+            activeNums={activePromptNums}
+            prompts={data.prompts}
+            scrollFraction={scrollFraction}
+            viewportFraction={viewportFraction}
+            promptPositions={promptPositions}
+          />
+        </div>
       )}
     </div>
   )
 }
 
-// ─── Prompt Index (sticky table of contents) ───
+// ─── Prompt Outline (right-rail table of contents, Obsidian-style) ───
 
-const PROMPT_INDEX_MIN = 36
-const PROMPT_INDEX_DEFAULT = 68
-const PROMPT_INDEX_MAX = 400
-
-function PromptIndex({ prompts, onJump }: { prompts: PromptIndexEntry[]; onJump: (num: number) => void }) {
-  const [height, setHeight] = useState(PROMPT_INDEX_DEFAULT)
-  const dragging = useRef(false)
-  const startY = useRef(0)
-  const startH = useRef(0)
+function PromptOutline({
+  prompts,
+  heatmap,
+  activeNums,
+  onJump,
+}: {
+  prompts: PromptIndexEntry[]
+  /** Per-prompt intensity 0–1. `heatmap[i]` lines up with `prompts[i]` — contract pinned in `heatmap.test.ts`. */
+  heatmap: number[]
+  activeNums: Set<number>
+  onJump: (num: number) => void
+}) {
   const hover = useHoverCard<number>()
-
-  const onDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    dragging.current = true
-    startY.current = e.clientY
-    startH.current = height
-    document.body.style.cursor = 'row-resize'
-    document.body.style.userSelect = 'none'
-
-    const onMove = (ev: MouseEvent) => {
-      if (!dragging.current) return
-      const delta = ev.clientY - startY.current
-      setHeight(Math.min(PROMPT_INDEX_MAX, Math.max(PROMPT_INDEX_MIN, startH.current + delta)))
-    }
-    const onUp = () => {
-      dragging.current = false
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
-    }
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
-  }, [height])
 
   if (prompts.length === 0) return null
 
   const hoveredPrompt = hover.hoveredId !== null ? prompts.find(p => p.num === hover.hoveredId) : null
 
   return (
-    <div className="sticky top-0 z-10 bg-white/95 backdrop-blur-sm border-b border-gray-200" style={{ height }}>
-      <div className="overflow-y-auto py-1.5 overscroll-y-contain" style={{ height: height - 8 }}>
-        <div className="max-w-4xl mx-auto px-8 flex flex-wrap gap-0.5">
-        {prompts.map((p) => {
+    <div
+      className="hidden lg:flex w-[232px] shrink-0 flex-col border-l border-stone-200/70 bg-[#FAFAF8]"
+      data-export-remove
+    >
+      <div className="shrink-0 border-b border-stone-200/50 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.12em] text-stone-400">
+        Outline · {prompts.length}
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto py-1 overscroll-y-contain">
+        {prompts.map((p, i) => {
           const isSpecial = p.decision === 'interrupt' || p.decision === 'correction'
+          const isActive = activeNums.has(p.num)
+          // The left rail doubles as the heat strip: how much work happened under this prompt
+          // (tool calls, errors, forks, thinking). Scan it to find the heavy turns at a glance.
+          const intensity = Math.max(0, Math.min(1, heatmap[i] ?? 0))
           return (
             <button
               key={p.num}
               onClick={() => onJump(p.num)}
               onMouseEnter={(e) => hover.show(p.num, e.currentTarget)}
               onMouseLeave={hover.hide}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] cursor-pointer transition-colors whitespace-nowrap ${
-                isSpecial ? 'text-amber-700 hover:bg-amber-50' : 'text-gray-500 hover:bg-gray-100'
-              } ${hover.hoveredId === p.num ? (isSpecial ? 'bg-amber-50' : 'bg-gray-100') : ''}`}
+              title={`Activity ${Math.round(intensity * 100)}%`}
+              className={`group flex w-full items-stretch gap-2 px-2.5 py-1.5 text-left transition-colors ${
+                isActive ? 'bg-amber-50' : 'hover:bg-stone-100/70'
+              }`}
             >
-              <span className={`font-bold ${isSpecial ? 'text-amber-600' : 'text-blue-600'}`}>#{p.num}</span>
-              <span className="max-w-[100px] truncate text-gray-600">{p.preview.slice(0, 30)}</span>
-              <span className="text-[10px] text-gray-400 font-mono">{p.time.slice(0, 5)}</span>
+              <span
+                className={`w-[3px] shrink-0 rounded-full ${
+                  isActive ? 'bg-amber-500' : isSpecial ? 'bg-amber-300' : ''
+                }`}
+                style={
+                  isActive || isSpecial
+                    ? undefined
+                    : { backgroundColor: `rgba(120, 113, 108, ${(0.12 + intensity * 0.68).toFixed(3)})` }
+                }
+              />
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="flex items-center gap-1.5">
+                  <span className={`text-[10px] font-semibold tabular-nums ${isSpecial ? 'text-amber-600' : 'text-stone-400'}`}>#{p.num}</span>
+                  <span className="text-[10px] tabular-nums text-stone-400">{p.time.slice(0, 5)}</span>
+                  {isSpecial && (
+                    <span className="rounded-full bg-amber-100 px-1.5 text-[9px] font-semibold text-amber-700">
+                      {p.decision === 'interrupt' ? 'interrupt' : 'decision'}
+                    </span>
+                  )}
+                </span>
+                <span className={`mt-0.5 text-[12px] leading-snug line-clamp-2 ${
+                  isActive ? 'font-medium text-stone-900' : 'text-stone-600'
+                }`}>
+                  {p.preview}
+                </span>
+              </span>
             </button>
           )
         })}
-        </div>
       </div>
 
-      {/* Shared hover card */}
       {hoveredPrompt && hover.anchorRect && (
         <HoverCard
           header={<>
-            <span className="font-bold text-blue-600 text-xs">#{hoveredPrompt.num}</span>
-            <span className="text-[10px] text-gray-400 font-mono">{hoveredPrompt.time}</span>
+            <span className="text-xs font-bold text-amber-700">#{hoveredPrompt.num}</span>
+            <span className="text-[10px] font-mono text-stone-400">{hoveredPrompt.time}</span>
           </>}
           content={hoveredPrompt.fullText}
           anchorRect={hover.anchorRect}
-          placement="below"
+          placement="left"
           onMouseEnter={hover.keep}
           onMouseLeave={hover.hide}
         />
       )}
-
-      {/* Drag handle */}
-      <div
-        onMouseDown={onDragStart}
-        className="absolute bottom-0 left-0 right-0 h-2 cursor-row-resize group flex items-center justify-center"
-      >
-        <div className="w-8 h-0.5 rounded-full bg-gray-300 group-hover:bg-amber-400 transition-colors" />
-      </div>
     </div>
   )
 }
 
 // ─── Message rendering with tool call grouping ───
 
-function renderMessages(messages: SessionMessage[], filter: FilterState, searchQuery: string, highlightedMessageIndex: number | null): React.ReactNode[] {
+function renderMessages(
+  messages: SessionMessage[],
+  filter: FilterState,
+  searchQuery: string,
+  highlightedMessageIndex: number | null,
+  readerMode: boolean,
+): React.ReactNode[] {
   const nodes: React.ReactNode[] = []
   let i = 0
   const forceExpandedTools = Boolean(searchQuery) || highlightedMessageIndex !== null
@@ -303,11 +342,11 @@ function renderMessages(messages: SessionMessage[], filter: FilterState, searchQ
         nodes.push(<ToolGroup key={`tg-${i}`} messages={group} filter={filter} />)
       } else {
         for (let j = 0; j < group.length; j++) {
-          nodes.push(renderAnchoredMessage(group[j], i + j, filter, searchQuery, highlightedMessageIndex, `t-${i}-${j}`))
+          nodes.push(renderAnchoredMessage(group[j], i + j, filter, searchQuery, highlightedMessageIndex, `t-${i}-${j}`, readerMode))
         }
       }
     } else {
-      nodes.push(renderAnchoredMessage(msg, i, filter, searchQuery, highlightedMessageIndex, i))
+      nodes.push(renderAnchoredMessage(msg, i, filter, searchQuery, highlightedMessageIndex, i, readerMode))
       i++
     }
   }
@@ -321,9 +360,10 @@ function renderAnchoredMessage(
   searchQuery: string,
   highlightedMessageIndex: number | null,
   key: React.Key,
+  readerMode: boolean,
 ) {
   const forceVisible = highlightedMessageIndex === messageIndex
-  const content = MessageBlock({ msg, filter, searchQuery, forceVisible })
+  const content = MessageBlock({ msg, filter, searchQuery, forceVisible, readerMode })
   if (!content) return null
 
   return (
@@ -351,15 +391,15 @@ function ToolGroup({ messages, filter }: { messages: SessionMessage[]; filter: F
 
   return (
     <details className="mt-1.5 ml-6">
-      <summary className="cursor-pointer py-1.5 text-sm text-gray-500 select-none hover:text-gray-700 transition-colors flex items-center gap-2 whitespace-nowrap">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-gray-400 shrink-0">
+      <summary className="cursor-pointer py-1.5 text-sm text-stone-500 select-none hover:text-stone-700 transition-colors flex items-center gap-2 whitespace-nowrap">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-stone-400 shrink-0">
           <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         <span className="font-medium shrink-0">{toolCalls.length} tool calls</span>
-        <span className="text-gray-400 font-mono text-xs truncate min-w-0">({namesSummary})</span>
+        <span className="text-stone-400 font-mono text-xs truncate min-w-0">({namesSummary})</span>
         {errorCount > 0 && <span className="text-red-500 text-xs font-medium shrink-0">{errorCount} error{errorCount > 1 ? 's' : ''}</span>}
       </summary>
-      <div className="mt-1 ml-2 pl-3 border-l border-gray-200">
+      <div className="mt-1 ml-2 pl-3 border-l border-stone-200">
         {messages.map((m, j) => {
           if (m.kind === 'ai-tool-use' && !filter.toolCalls) return null
           if (m.kind === 'tool-result' && !filter.toolResults) return null
@@ -372,7 +412,19 @@ function ToolGroup({ messages, filter }: { messages: SessionMessage[]; filter: F
 
 // ─── Message dispatcher ───
 
-function MessageBlock({ msg, filter, searchQuery, forceVisible = false }: { msg: SessionMessage; filter: FilterState; searchQuery: string; forceVisible?: boolean }) {
+function MessageBlock({
+  msg,
+  filter,
+  searchQuery,
+  forceVisible = false,
+  readerMode = false,
+}: {
+  msg: SessionMessage
+  filter: FilterState
+  searchQuery: string
+  forceVisible?: boolean
+  readerMode?: boolean
+}) {
   switch (msg.kind) {
     case 'user-prompt': return <PromptBlock msg={msg} searchQuery={searchQuery} />
     case 'ai-thinking': return filter.thinking || forceVisible ? <ThinkingHint msg={msg} /> : null
@@ -381,7 +433,7 @@ function MessageBlock({ msg, filter, searchQuery, forceVisible = false }: { msg:
     case 'ai-text': return filter.aiText || forceVisible ? <AiTextBlock msg={msg} /> : null
     case 'team-message': return filter.team || forceVisible ? <TeamMessageBlock msg={msg} /> : null
     case 'delegation-update': return filter.team || forceVisible ? <DelegationUpdateBlock msg={msg} /> : null
-    case 'task-event': return filter.team || forceVisible ? <TaskEventBlock msg={msg} /> : null
+    case 'task-event': return !readerMode && (filter.team || forceVisible) ? <TaskEventBlock msg={msg} /> : null
     case 'fork-indicator': {
       // Only show user-decision forks; hide tool-error auto-retries (CLI doesn't show them)
       if (msg.reason === 'tool-error') return null
