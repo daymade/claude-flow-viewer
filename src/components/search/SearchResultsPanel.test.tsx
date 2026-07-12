@@ -51,14 +51,16 @@ const READY_BACKEND: SearchBackendStatus = {
 }
 
 function makeSearchState(overrides: Partial<SearchControllerState> = {}): SearchControllerState {
-  return {
+  const base: SearchControllerState = {
     status: 'ready',
     results: [makeResult()],
     error: null,
     activeTarget: null,
     backend: READY_BACKEND,
-    ...overrides,
+    resolved: null,
+    resolvedStatus: 'idle',
   }
+  return { ...base, ...overrides }
 }
 
 describe('SearchResultsPanel', () => {
@@ -71,6 +73,7 @@ describe('SearchResultsPanel', () => {
           results: [makeResult('cherrystudio')],
         })}
         onSelectResult={onSelectResult}
+        onOpenResolved={vi.fn()}
       />,
     )
 
@@ -94,6 +97,7 @@ describe('SearchResultsPanel', () => {
           results: [],
         })}
         onSelectResult={vi.fn()}
+        onOpenResolved={vi.fn()}
       />,
     )
 
@@ -117,6 +121,7 @@ describe('SearchResultsPanel', () => {
           },
         })}
         onSelectResult={vi.fn()}
+        onOpenResolved={vi.fn()}
       />,
     )
 

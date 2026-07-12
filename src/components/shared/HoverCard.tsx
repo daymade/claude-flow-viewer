@@ -87,15 +87,15 @@ export function HoverCard({ header, content, anchorRect, placement, onMouseEnter
     <div
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      className="fixed z-50 overflow-y-auto bg-white rounded-lg shadow-lg shadow-gray-200/80 border border-gray-200 p-4"
+      className="fixed z-50 overflow-y-auto bg-white rounded-lg shadow-lg shadow-stone-200/80 border border-stone-200 p-4"
       style={{ left: pos.left, top: pos.top, width: cardWidth, maxHeight: 400 }}
     >
       {header && (
-        <div className="flex items-center gap-2 mb-2 pb-2 border-b border-gray-100">
+        <div className="flex items-center gap-2 mb-2 pb-2 border-b border-stone-100">
           {header}
         </div>
       )}
-      <div className="text-sm text-gray-700 prose prose-sm prose-gray max-w-none [&_pre]:bg-gray-50 [&_pre]:p-2 [&_pre]:rounded [&_pre]:text-xs [&_code]:text-xs [&_code]:bg-gray-100 [&_code]:px-1 [&_code]:rounded">
+      <div className="text-sm text-stone-700 prose prose-sm prose-stone max-w-none [&_pre]:bg-stone-50 [&_pre]:p-2 [&_pre]:rounded [&_pre]:text-xs [&_code]:text-xs [&_code]:bg-stone-100 [&_code]:px-1 [&_code]:rounded">
         <Markdown remarkPlugins={REMARK_PLUGINS}>{content}</Markdown>
       </div>
     </div>,

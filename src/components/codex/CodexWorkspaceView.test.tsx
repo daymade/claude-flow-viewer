@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { CodexWorkspaceView } from './CodexWorkspaceView'
@@ -127,7 +127,7 @@ const activeSessionData: SessionData = {
 }
 
 describe('CodexWorkspaceView', () => {
-  it('starts in overview mode with a progressive-disclosure reading path', async () => {
+  it('starts with the readable conversation surface', () => {
     const fileStore = {
       readSessionContent: vi.fn().mockResolvedValue([
         JSON.stringify({
@@ -175,16 +175,18 @@ describe('CodexWorkspaceView', () => {
       />,
     )
 
-    expect(screen.getByText('Overview')).toBeTruthy()
-    expect(screen.getByText('How to read this task')).toBeTruthy()
-    expect(screen.getByText('Delegated branches')).toBeTruthy()
-    expect(screen.getByText('What happened in the main task')).toBeTruthy()
-    expect(screen.getByText('Hidden by default')).toBeTruthy()
-    expect(await screen.findByText('Assigned:')).toBeTruthy()
-    expect(await screen.findByText('Returned:')).toBeTruthy()
+    expect(screen.getAllByText('Conversation').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Build the learning map for Codex')).toHaveLength(1)
+    expect(screen.getAllByText('#1').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Agent: Audit the current graph model')).toBeNull()
+    expect(screen.queryByText('Task started')).toBeNull()
+    expect(document.querySelector('[class*="w-[72px]"]')).toBeNull()
+    expect(screen.queryByText('Hidden by default')).toBeNull()
+    expect(screen.queryByText('What happened in the main task')).toBeNull()
+    expect(document.querySelector('[data-export-snapshot]')).toBeNull()
   })
 
-  it('keeps the raw transcript available as a secondary view', () => {
+  it('keeps the Codex task structure available as a secondary view', async () => {
     render(
       <CodexWorkspaceView
         project={project}
@@ -197,10 +199,10 @@ describe('CodexWorkspaceView', () => {
       />,
     )
 
-    fireEvent.click(screen.getByText('Raw transcript'))
+    fireEvent.click(screen.getByRole('button', { name: 'Structure' }))
 
-    expect(screen.getByText('Build the learning map for Codex')).toBeTruthy()
-    expect(screen.getAllByText('#1').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Task graph').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Delegated branches').length).toBeGreaterThan(0)
   })
 
   it('shows that the delegated task map is still hydrating when only root sessions are loaded', () => {
@@ -216,6 +218,42 @@ describe('CodexWorkspaceView', () => {
       />,
     )
 
-    expect(screen.getByText('Loading the full delegated task map for this project...')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Structure' }))
+
+    expect(screen.getAllByText('Loading the full delegated task map for this project...').length).toBeGreaterThan(0)
+  })
+
+  it('returns to conversation when the active Codex session changes', async () => {
+    const { rerender } = render(
+      <CodexWorkspaceView
+        project={project}
+        activeSession={activeSession}
+        activeSessionData={activeSessionData}
+        filter={filter}
+        searchQuery=""
+        fileStore={null}
+        onSelectSession={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Structure' }))
+    expect(screen.getAllByText('Task graph').length).toBeGreaterThan(0)
+
+    rerender(
+      <CodexWorkspaceView
+        project={project}
+        activeSession={project.sessions[1]}
+        activeSessionData={activeSessionData}
+        filter={filter}
+        searchQuery=""
+        fileStore={null}
+        onSelectSession={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(screen.queryByText('Task graph')).toBeNull()
+    })
+    expect(screen.getAllByText('Build the learning map for Codex')).toHaveLength(1)
   })
 })

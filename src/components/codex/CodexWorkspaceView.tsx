@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import type { FileStore } from '../../lib/fs-access'
+import type { SearchJumpTarget } from '../../hooks/useSearchController'
 import { parseSessionContent } from '../../lib/parser'
 import {
   buildCodexTaskInsights,
@@ -17,7 +18,7 @@ import {
 import type { FilterState, ProjectMeta, SessionData, SessionMeta } from '../../types/session'
 import { SessionView } from '../session/SessionView'
 
-type ViewMode = 'overview' | 'structure' | 'transcript'
+type ViewMode = 'overview' | 'structure' | 'diagnostics'
 
 interface CodexWorkspaceViewProps {
   project: ProjectMeta
@@ -26,6 +27,7 @@ interface CodexWorkspaceViewProps {
   filter: FilterState
   searchQuery: string
   fileStore: FileStore | null
+  activeSearchTarget?: SearchJumpTarget | null
   onSelectSession: (projectEncoded: string, sessionId: string) => void
 }
 
@@ -36,7 +38,7 @@ function cacheKey(projectEncoded: string, sessionId: string): string {
 function statusTone(statusLabel: string): string {
   if (/complete/i.test(statusLabel)) return 'bg-emerald-100 text-emerald-800'
   if (/rollback|interrupt|redirect/i.test(statusLabel)) return 'bg-amber-100 text-amber-800'
-  return 'bg-slate-100 text-slate-700'
+  return 'bg-stone-100 text-stone-700'
 }
 
 function formatCount(count: number, singular: string, plural = `${singular}s`): string {
@@ -90,9 +92,16 @@ export function CodexWorkspaceView({
   filter,
   searchQuery,
   fileStore,
+  activeSearchTarget = null,
   onSelectSession,
 }: CodexWorkspaceViewProps) {
-  const [viewMode, setViewMode] = useState<ViewMode>('overview')
+  const activeViewKey = `${project.encodedName}:${activeSession.id}`
+  const [viewState, setViewState] = useState<{ key: string; mode: ViewMode }>(() => ({
+    key: activeViewKey,
+    mode: 'overview',
+  }))
+  const viewMode = viewState.key === activeViewKey ? viewState.mode : 'overview'
+  const setViewMode = (mode: ViewMode) => setViewState({ key: activeViewKey, mode })
   const [expandedBranches, setExpandedBranches] = useState<Set<string>>(() => new Set<string>())
   const [fetchedSessions, setFetchedSessions] = useState<Record<string, SessionData>>({})
   const [subtreeError, setSubtreeError] = useState<{ rootId: string; message: string } | null>(null)
@@ -198,14 +207,44 @@ export function CodexWorkspaceView({
     }
   }
 
-  if (viewMode === 'transcript') {
+  if (viewMode === 'overview') {
     return (
       <CodexViewFrame
         viewMode={viewMode}
         setViewMode={setViewMode}
-        subtitle="Raw transcript is preserved for audit. The overview stays first because Codex is multi-threaded work, not a single conversation."
       >
-        <SessionView data={activeData} filter={filter} searchQuery={searchQuery} />
+        <ReadableConversationView
+          activeSession={activeSession}
+          activeData={activeData}
+          selectedRoot={selectedRoot}
+          selectionSummary={selectionSummary}
+          delegatedNodes={delegatedNodes}
+          loadingSubtree={loadingSubtree}
+          subtreeError={activeSubtreeError}
+          loadedCount={loadedCount}
+          totalCount={subtreeNodes.length}
+          filter={filter}
+          searchQuery={searchQuery}
+          activeSearchTarget={activeSearchTarget}
+        />
+      </CodexViewFrame>
+    )
+  }
+
+  if (viewMode === 'diagnostics') {
+    return (
+      <CodexViewFrame
+        viewMode={viewMode}
+        setViewMode={setViewMode}
+      >
+        <div className="h-full min-h-0 overflow-y-auto bg-[#FAFAF8]" data-primary-scroll>
+          <div className="mx-auto max-w-4xl px-4 py-6 sm:px-8">
+            <DecisionSummary insights={activeInsights} />
+            <div className="mt-6">
+              <NoiseSummary insights={activeInsights} />
+            </div>
+          </div>
+        </div>
       </CodexViewFrame>
     )
   }
@@ -214,10 +253,9 @@ export function CodexWorkspaceView({
     <CodexViewFrame
       viewMode={viewMode}
       setViewMode={setViewMode}
-      subtitle="Start with overview. Structure is secondary. Raw transcript is only for proof."
     >
-      <div className="h-full min-h-0 overflow-y-auto bg-[#FAFAF8]">
-        <div className="mx-auto max-w-[1180px] px-6 py-6">
+      <div className="h-full min-h-0 overflow-y-auto bg-[#FAFAF8]" data-primary-scroll>
+        <div className="mx-auto max-w-[1180px] px-4 py-5 sm:px-6 sm:py-6">
           {selectedRoot ? (
             <>
               <SelectedRootHero
@@ -230,67 +268,35 @@ export function CodexWorkspaceView({
                 totalCount={subtreeNodes.length}
               />
 
-              {viewMode === 'overview' ? (
-                <>
-                  <LearningGuide />
-                  <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr),minmax(0,1fr)]">
-                    <CurrentFocusSection
-                      session={activeSession}
-                      insights={activeInsights}
-                      selectionSummary={selectionSummary}
-                    />
-                    <MainThreadNarrative insights={rootInsights} />
-                  </div>
-                  <DelegatedBranchesPanel
-                    nodes={delegatedNodes}
-                    activeSessionId={activeSession.id}
-                    expandedBranches={expandedBranches}
-                    projectEncoded={project.encodedName}
-                    sessionDataFor={sessionDataFor}
-                    loadingProjectSessions={loadingProjectSessions}
-                    onSelectBranch={selectBranch}
-                    onToggleBranch={expandBranch}
-                  />
-                  <div className="mt-6 grid gap-6 lg:grid-cols-2">
-                    <DecisionSummary insights={rootInsights} />
-                    <NoiseSummary insights={rootInsights} />
-                  </div>
-                </>
-              ) : (
-                <>
-                  <StructureGuide
-                    mainTaskCount={mainTasks.length}
-                    unlinkedCount={unlinkedTasks.length}
-                  />
-                  <div className="mt-6 rounded-2xl border border-emerald-100 bg-white shadow-sm shadow-slate-100">
-                    <div className="border-b border-emerald-100 px-5 py-4">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">Task graph</div>
-                      <div className="mt-1 text-sm text-slate-500">
-                        Use this when you want the exact delegation structure. It is no longer the default reading mode.
-                      </div>
-                    </div>
-                    <div className="overflow-x-auto px-5 py-6">
-                      <div className="min-w-[860px]">
-                        <TaskGraphBranch
-                          node={selectedRoot}
-                          projectEncoded={project.encodedName}
-                          activeSessionId={activeSession.id}
-                          sessionDataFor={sessionDataFor}
-                          onSelectSession={onSelectSession}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr),360px]">
-                    <MainThreadNarrative insights={rootInsights} />
-                    <CurrentFocusSection
-                      session={activeSession}
-                      insights={activeInsights}
-                      selectionSummary={selectionSummary}
-                    />
-                  </div>
-                </>
-              )}
+              <StructureGuide
+                mainTaskCount={mainTasks.length}
+                unlinkedCount={unlinkedTasks.length}
+              />
+              <TaskGraphSection
+                node={selectedRoot}
+                projectEncoded={project.encodedName}
+                activeSessionId={activeSession.id}
+                sessionDataFor={sessionDataFor}
+                onSelectSession={onSelectSession}
+              />
+              <DelegatedBranchesPanel
+                nodes={delegatedNodes}
+                activeSessionId={activeSession.id}
+                expandedBranches={expandedBranches}
+                projectEncoded={project.encodedName}
+                sessionDataFor={sessionDataFor}
+                loadingProjectSessions={loadingProjectSessions}
+                onSelectBranch={selectBranch}
+                onToggleBranch={expandBranch}
+              />
+              <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr),360px]">
+                <MainThreadNarrative insights={rootInsights} />
+                <CurrentFocusSection
+                  session={activeSession}
+                  insights={activeInsights}
+                  selectionSummary={selectionSummary}
+                />
+              </div>
             </>
           ) : (
             <EmptyState />
@@ -304,55 +310,147 @@ export function CodexWorkspaceView({
 function CodexViewFrame({
   viewMode,
   setViewMode,
-  subtitle,
   children,
 }: {
   viewMode: ViewMode
   setViewMode: (mode: ViewMode) => void
-  subtitle: string
   children: ReactNode
 }) {
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="border-b border-slate-200 bg-white px-5 py-3">
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col">
+      <div className="border-b border-stone-200 bg-white px-5 py-3" data-export-remove>
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => setViewMode('overview')}
             className={`rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors ${
               viewMode === 'overview'
-                ? 'bg-emerald-100 text-emerald-800'
-                : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                ? 'bg-stone-900 text-white'
+                : 'text-stone-500 hover:bg-stone-100 hover:text-stone-700'
             }`}
           >
-            Overview
+            Conversation
           </button>
           <button
             type="button"
             onClick={() => setViewMode('structure')}
             className={`rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors ${
               viewMode === 'structure'
-                ? 'bg-slate-200 text-slate-800'
-                : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                ? 'bg-stone-200 text-stone-800'
+                : 'text-stone-500 hover:bg-stone-100 hover:text-stone-700'
             }`}
           >
             Structure
           </button>
           <button
             type="button"
-            onClick={() => setViewMode('transcript')}
+            onClick={() => setViewMode('diagnostics')}
             className={`rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors ${
-              viewMode === 'transcript'
-                ? 'bg-slate-200 text-slate-800'
-                : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+              viewMode === 'diagnostics'
+                ? 'bg-stone-200 text-stone-800'
+                : 'text-stone-500 hover:bg-stone-100 hover:text-stone-700'
             }`}
           >
-            Raw transcript
+            Diagnostics
           </button>
-          <span className="text-[11px] text-slate-400">{subtitle}</span>
         </div>
       </div>
       <div className="min-h-0 flex-1">{children}</div>
+    </div>
+  )
+}
+
+function ReadableConversationView({
+  activeSession,
+  activeData,
+  selectedRoot,
+  selectionSummary,
+  delegatedNodes,
+  loadingSubtree,
+  subtreeError,
+  loadedCount,
+  totalCount,
+  filter,
+  searchQuery,
+  activeSearchTarget,
+}: {
+  activeSession: SessionMeta
+  activeData: SessionData
+  selectedRoot: CodexThreadNode | null
+  selectionSummary: string
+  delegatedNodes: CodexThreadNode[]
+  loadingSubtree: boolean
+  subtreeError: string | null
+  loadedCount: number
+  totalCount: number
+  filter: FilterState
+  searchQuery: string
+  activeSearchTarget: SearchJumpTarget | null
+}) {
+  const title = selectedRoot?.session.firstPromptPreview || activeSession.firstPromptPreview
+  const visibleBranchCount = delegatedNodes.length
+  const readerFilter: FilterState = {
+    ...filter,
+    thinking: false,
+    toolCalls: false,
+    toolResults: false,
+    branches: false,
+    markers: false,
+    timeline: false,
+    aiText: true,
+    team: true,
+  }
+  const header = (
+    <div className="border-b border-stone-200 bg-white">
+      <div className="mx-auto max-w-5xl px-4 py-4 sm:px-6 sm:py-5">
+        <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-500">
+          <span className="rounded bg-stone-100 px-2 py-0.5 font-semibold text-stone-700">
+            {activeSession.threadKind === 'subagent' ? 'Delegated work' : 'Main task'}
+          </span>
+          <span>{activeSession.startDisplay}</span>
+          <span>{selectionSummary}</span>
+        </div>
+        <h2 className="mt-3 max-w-4xl text-2xl font-semibold leading-tight text-stone-950">
+          {title}
+        </h2>
+        <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-stone-600">
+          <span className="rounded bg-white px-2 py-1 ring-1 ring-stone-200">
+            {formatCount(activeData.prompts.length, 'prompt')}
+          </span>
+          {visibleBranchCount > 0 && (
+            <span className="rounded bg-white px-2 py-1 ring-1 ring-stone-200">
+              {formatCount(visibleBranchCount, 'delegated branch')}
+            </span>
+          )}
+          {loadingSubtree && totalCount > 0 && (
+            <span className="rounded bg-white px-2 py-1 ring-1 ring-stone-200">
+              Loading {loadedCount}/{totalCount}
+            </span>
+          )}
+        </div>
+        {subtreeError && (
+          <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+            {subtreeError}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-[#FAFAF8]">
+      <div className="flex min-h-0 flex-1">
+        <SessionView
+          data={activeData}
+          filter={readerFilter}
+          searchQuery={searchQuery}
+          activeSearchTarget={activeSearchTarget}
+          showTimeline={false}
+          showPromptIndex={false}
+          header={header}
+          readerMode
+        />
+      </div>
     </div>
   )
 }
@@ -375,52 +473,30 @@ function SelectedRootHero({
   totalCount: number
 }) {
   return (
-    <div className="rounded-2xl border border-emerald-100 bg-gradient-to-br from-emerald-50 via-white to-slate-50 px-5 py-5 shadow-sm shadow-slate-100">
+    <div className="rounded-lg border border-stone-200 bg-white px-5 py-5">
       <div className="flex flex-wrap items-center gap-2">
         <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusTone(insights?.statusLabel ?? 'In progress')}`}>
           {insights?.statusLabel ?? 'In progress'}
         </span>
-        <span className="rounded-full bg-white/90 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+        <span className="rounded bg-stone-100 px-2 py-0.5 text-[10px] font-medium text-stone-600">
           {node.hasMissingParent ? 'Unlinked delegated work' : 'Selected main task'}
         </span>
-        <span className="text-[11px] text-slate-400">{node.session.startDisplay}</span>
+        <span className="text-[11px] text-stone-400">{node.session.startDisplay}</span>
       </div>
-      <div className="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{node.session.firstPromptPreview}</div>
-      <div className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-600">
+      <div className="mt-3 text-2xl font-semibold tracking-tight text-stone-900">{node.session.firstPromptPreview}</div>
+      <div className="mt-2 max-w-3xl text-sm leading-relaxed text-stone-600">
         {insights?.objective ?? node.session.firstPromptPreview}
       </div>
-      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500">
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-stone-500">
         <span>{selectionSummary}</span>
         <span>{formatCount(node.descendantCount, 'delegated thread')}</span>
         <span>{loadingSubtree ? `Parsing subtree ${loadedCount}/${totalCount}` : `Loaded ${loadedCount}/${totalCount} threads`}</span>
       </div>
       {subtreeError && (
-        <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
           {subtreeError}
         </div>
       )}
-    </div>
-  )
-}
-
-function LearningGuide() {
-  return (
-    <div className="mt-6 rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm shadow-slate-100">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">How to read this task</div>
-      <div className="mt-3 grid gap-3 md:grid-cols-3">
-        <GuideStep title="1. Start with overview" detail="See every delegated branch in one screen before you open anything." />
-        <GuideStep title="2. Expand one branch" detail="Each branch opens inline, so you stay in context while reading its own messages." />
-        <GuideStep title="3. Open raw proof last" detail="Only drop into raw transcript when the summaries are not enough." />
-      </div>
-    </div>
-  )
-}
-
-function GuideStep({ title, detail }: { title: string; detail: string }) {
-  return (
-    <div className="rounded-xl bg-slate-50 px-4 py-3">
-      <div className="text-sm font-semibold text-slate-800">{title}</div>
-      <div className="mt-1 text-sm leading-relaxed text-slate-600">{detail}</div>
     </div>
   )
 }
@@ -435,8 +511,8 @@ function CurrentFocusSection({
   selectionSummary: string
 }) {
   return (
-    <section className="mt-6 rounded-2xl border border-slate-200 bg-white px-5 py-5 shadow-sm shadow-slate-100">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Current focus</div>
+    <section className="mt-6 rounded-lg border border-stone-200 bg-white px-5 py-5">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">Selected thread</div>
       <TaskDetailsPanel
         session={session}
         insights={insights}
@@ -454,17 +530,14 @@ function MainThreadNarrative({ insights }: { insights: CodexTaskInsights | null 
   ) : []
 
   return (
-    <section className="mt-6 rounded-2xl border border-slate-200 bg-white px-5 py-5 shadow-sm shadow-slate-100">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">What happened in the main task</div>
-      <div className="mt-1 text-sm text-slate-600">
-        Read this first. It explains the main storyline before you open any delegated branch.
-      </div>
+    <section className="mt-6 rounded-lg border border-stone-200 bg-white px-5 py-5">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">Main task timeline</div>
       <div className="mt-4 space-y-3">
         {beats.length > 0 ? beats.map((moment, index) => (
           <MomentRow key={`${moment.title}-${index}`} moment={moment} />
         )) : (
-          <div className="rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-500">
-            The selected main task does not have enough parsed events yet to build a storyline.
+          <div className="rounded-md bg-stone-50 px-4 py-3 text-sm text-stone-500">
+            No parsed timeline events for this task yet.
           </div>
         )}
       </div>
@@ -492,13 +565,10 @@ function DelegatedBranchesPanel({
   onToggleBranch: (sessionId: string) => void
 }) {
   return (
-    <section className="mt-6 rounded-2xl border border-slate-200 bg-white px-5 py-5 shadow-sm shadow-slate-100">
+    <section className="mt-6 rounded-lg border border-stone-200 bg-white px-5 py-5">
       <div className="flex flex-wrap items-center gap-2">
-        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Delegated branches</div>
-        <span className="text-[11px] text-slate-400">{formatCount(nodes.length, 'branch', 'branches')}</span>
-      </div>
-      <div className="mt-1 text-sm text-slate-600">
-        This is the one-screen overview. Every branch stays in one compact list, and each row expands inline so you do not have to jump away.
+        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">Delegated branches</div>
+        <span className="text-[11px] text-stone-400">{formatCount(nodes.length, 'branch', 'branches')}</span>
       </div>
       <div className="mt-4 max-h-[560px] space-y-3 overflow-y-auto pr-1">
         {nodes.map((node) => {
@@ -518,7 +588,7 @@ function DelegatedBranchesPanel({
           )
         })}
         {nodes.length === 0 && (
-          <div className="rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-500">
+          <div className="rounded-md bg-stone-50 px-4 py-3 text-sm text-stone-500">
             {loadingProjectSessions
               ? 'Loading the full delegated task map for this project...'
               : 'This task does not have delegated branches in the loaded history.'}
@@ -564,44 +634,52 @@ function BranchNarrativeCard({
     || (returnedLine ? 'Returned' : assignedLine ? 'Assigned' : insights ? 'Expand to inspect' : 'Loading')
 
   return (
-    <div className={`rounded-2xl border transition-colors ${
-      isActive ? 'border-amber-300 bg-amber-50/60' : 'border-slate-200 bg-white'
+    <div className={`rounded-lg border transition-colors ${
+      isActive ? 'border-amber-300 bg-amber-50/60' : 'border-stone-200 bg-white'
     }`}>
       <div className="px-4 py-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <button type="button" onClick={onSelect} className="min-w-0 flex-1 text-left">
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={onSelect}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') onSelect()
+            }}
+            className="min-w-0 flex-1 cursor-pointer text-left"
+          >
             <div className="flex flex-wrap items-center gap-2">
               <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusTone(status)}`}>
                 {status}
               </span>
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+              <span className="rounded bg-stone-100 px-2 py-0.5 text-[10px] font-medium text-stone-600">
                 {[node.session.agentName, node.session.agentRole].filter(Boolean).join(' · ') || 'Delegated work'}
               </span>
-              <span className="text-[11px] text-slate-400">{node.session.startDisplay}</span>
+              <span className="text-[11px] text-stone-400">{node.session.startDisplay}</span>
             </div>
-            <div className="mt-2 text-sm font-semibold leading-snug text-slate-900">{headline}</div>
-            <div className="mt-1 space-y-1 text-[11px] leading-relaxed text-slate-600">
+            <div className="mt-2 text-sm font-semibold leading-snug text-stone-900">{headline}</div>
+            <div className="mt-1 space-y-1 text-[11px] leading-relaxed text-stone-600">
               {assignedLine && (
                 <div>
-                  <span className="font-semibold text-slate-700">Assigned:</span>{' '}
+                  <span className="font-semibold text-stone-700">Assigned:</span>{' '}
                   <span>{assignedLine}</span>
                 </div>
               )}
               {returnedLine ? (
                 <div>
-                  <span className="font-semibold text-slate-700">Returned:</span>{' '}
+                  <span className="font-semibold text-stone-700">Returned:</span>{' '}
                   <span>{returnedLine}</span>
                 </div>
               ) : (
                 <div>{summaryLabel}</div>
               )}
             </div>
-          </button>
+          </div>
 
           <button
             type="button"
             onClick={onToggle}
-            className="rounded-full bg-slate-100 px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-200"
+            className="rounded-md bg-stone-100 px-3 py-1.5 text-[11px] font-semibold text-stone-700 hover:bg-stone-200"
           >
             {isExpanded ? 'Hide branch messages' : 'Show branch messages'}
           </button>
@@ -609,29 +687,27 @@ function BranchNarrativeCard({
 
         <div className="mt-3 flex flex-wrap gap-2">
           {primaryMoments.slice(0, 2).map((moment, index) => (
-            <span key={`${moment.title}-${index}`} className="rounded-full bg-slate-100 px-2 py-1 text-[11px] text-slate-600">
+            <span key={`${moment.title}-${index}`} className="rounded bg-stone-100 px-2 py-1 text-[11px] text-stone-600">
               {moment.title}
             </span>
           ))}
           {insights?.completionSummary && (
-            <span className="rounded-full bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">
+            <span className="rounded bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">
               {insights.completionSummary}
             </span>
           )}
         </div>
 
         {isExpanded && (
-          <div className="mt-4 space-y-4 border-t border-slate-200 pt-4">
+          <div className="mt-4 space-y-4 border-t border-stone-200 pt-4">
             <div>
-              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Messages from this branch</div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-stone-500">Messages from this branch</div>
               <div className="mt-3 space-y-3">
                 {primaryMoments.length > 0 ? primaryMoments.map((moment, index) => (
                   <MomentCard key={`${moment.title}-${index}`} moment={moment} />
                 )) : (
-                  <div className="rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-500">
-                    {insights
-                      ? 'This branch mostly contains low-signal execution details, so the overview keeps it collapsed.'
-                      : 'This branch is still being parsed.'}
+                  <div className="rounded-xl bg-stone-50 px-4 py-3 text-sm text-stone-500">
+                    {insights ? 'No branch events detected.' : 'Branch parsing is still in progress.'}
                   </div>
                 )}
               </div>
@@ -658,13 +734,13 @@ function DecisionSummary({
   const decisions = highlightMoments(insights?.decisionPoints ?? [], compact ? 3 : 5)
 
   return (
-    <section className={`rounded-2xl border border-slate-200 bg-white shadow-sm shadow-slate-100 ${compact ? 'px-4 py-4' : 'px-5 py-5'}`}>
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Decision points</div>
+    <section className={`rounded-lg border border-stone-200 bg-white ${compact ? 'px-4 py-4' : 'px-5 py-5'}`}>
+      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">Decision points</div>
       <div className="mt-3 space-y-3">
         {decisions.length > 0 ? decisions.map((moment, index) => (
           <MomentRow key={`${moment.title}-${index}`} moment={moment} />
         )) : (
-          <div className="rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-500">
+          <div className="rounded-md bg-stone-50 px-4 py-3 text-sm text-stone-500">
             No major decision point was detected for this level.
           </div>
         )}
@@ -681,19 +757,16 @@ function NoiseSummary({
   compact?: boolean
 }) {
   return (
-    <section className={`rounded-2xl border border-slate-200 bg-white shadow-sm shadow-slate-100 ${compact ? 'px-4 py-4' : 'px-5 py-5'}`}>
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Hidden by default</div>
-      <div className="mt-1 text-sm text-slate-600">
-        This is the information we intentionally keep out of the default path so you can learn without drowning in protocol noise.
-      </div>
+    <section className={`rounded-lg border border-stone-200 bg-white ${compact ? 'px-4 py-4' : 'px-5 py-5'}`}>
+      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">Diagnostics</div>
       <div className="mt-4 flex flex-wrap gap-2">
         {insights?.hiddenNoise.length ? insights.hiddenNoise.map((bucket) => (
-          <span key={bucket.label} className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600">
+          <span key={bucket.label} className="rounded bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
             {bucket.count} {bucket.label}
           </span>
         )) : (
-          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600">
-            This level was already concise.
+          <span className="rounded bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
+            No diagnostic buckets detected.
           </span>
         )}
       </div>
@@ -709,14 +782,44 @@ function StructureGuide({
   unlinkedCount: number
 }) {
   return (
-    <div className="mt-6 rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm shadow-slate-100">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Structure mode</div>
-      <div className="mt-1 text-sm text-slate-600">
-        Use structure mode when you need the exact parent-child layout. Overview remains the primary way to learn the task.
+    <div className="mt-6 rounded-lg border border-stone-200 bg-white px-5 py-4">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">Structure</div>
+      <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-stone-600">
+        <span className="rounded bg-stone-100 px-2.5 py-1">{formatCount(mainTaskCount, 'main task')}</span>
+        <span className="rounded bg-stone-100 px-2.5 py-1">{formatCount(unlinkedCount, 'unlinked branch')}</span>
       </div>
-      <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-600">
-        <span className="rounded-full bg-slate-100 px-2.5 py-1">{formatCount(mainTaskCount, 'main task')}</span>
-        <span className="rounded-full bg-slate-100 px-2.5 py-1">{formatCount(unlinkedCount, 'unlinked branch')}</span>
+    </div>
+  )
+}
+
+function TaskGraphSection({
+  node,
+  projectEncoded,
+  activeSessionId,
+  sessionDataFor,
+  onSelectSession,
+}: {
+  node: CodexThreadNode
+  projectEncoded: string
+  activeSessionId: string
+  sessionDataFor: Record<string, SessionData>
+  onSelectSession: (projectEncoded: string, sessionId: string) => void
+}) {
+  return (
+    <div className="mt-6 rounded-lg border border-stone-200 bg-white">
+      <div className="border-b border-stone-200 px-5 py-4">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">Task graph</div>
+      </div>
+      <div className="overflow-x-auto px-5 py-6">
+        <div className="min-w-[860px]">
+          <TaskGraphBranch
+            node={node}
+            projectEncoded={projectEncoded}
+            activeSessionId={activeSessionId}
+            sessionDataFor={sessionDataFor}
+            onSelectSession={onSelectSession}
+          />
+        </div>
       </div>
     </div>
   )
@@ -747,10 +850,10 @@ function TaskGraphBranch({
 
       {node.children.length > 0 && (
         <div className="relative min-w-0 flex-1 pl-8">
-          <div className="absolute bottom-6 left-0 top-6 w-px bg-emerald-200" />
+          <div className="absolute bottom-6 left-0 top-6 w-px bg-stone-200" />
           <div className="space-y-4">
             {node.children.map((child) => (
-              <div key={child.session.id} className="relative before:absolute before:left-[-32px] before:top-10 before:h-px before:w-8 before:bg-emerald-200">
+              <div key={child.session.id} className="relative before:absolute before:left-[-32px] before:top-10 before:h-px before:w-8 before:bg-stone-200">
                 <TaskGraphBranch
                   node={child}
                   projectEncoded={projectEncoded}
@@ -791,7 +894,7 @@ function TaskGraphCard({
       className={`w-[320px] rounded-2xl border px-4 py-4 text-left transition-colors ${
         isActive
           ? 'border-amber-300 bg-amber-50 shadow-sm shadow-amber-100'
-          : 'border-slate-200 bg-white hover:border-emerald-200 hover:bg-emerald-50/40'
+          : 'border-stone-200 bg-white hover:border-stone-300 hover:bg-stone-50'
       }`}
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -799,25 +902,23 @@ function TaskGraphCard({
           {node.depth === 0 ? 'Main task' : 'Delegated work'}
         </span>
         {(node.session.agentName || node.session.agentRole) && (
-          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+          <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-medium text-stone-600">
             {[node.session.agentName, node.session.agentRole].filter(Boolean).join(' · ')}
           </span>
         )}
       </div>
-      <div className="mt-3 text-base font-semibold leading-snug text-slate-900">{node.session.firstPromptPreview}</div>
-      <div className="mt-2 text-[11px] text-slate-500">Started {node.session.startDisplay}</div>
+      <div className="mt-3 text-base font-semibold leading-snug text-stone-900">{node.session.firstPromptPreview}</div>
+      <div className="mt-2 text-[11px] text-stone-500">Started {node.session.startDisplay}</div>
       <div className="mt-3 space-y-2">
         {leadingMoments.length > 0 ? leadingMoments.map((moment, index) => (
-          <div key={`${moment.title}-${index}`} className="rounded-lg bg-slate-50 px-3 py-2">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">{moment.title}</div>
-            <div className="mt-1 text-[11px] leading-relaxed text-slate-600">{moment.detail}</div>
-            {moment.timestamp && <div className="mt-1 text-[10px] text-slate-400">{moment.timestamp}</div>}
+          <div key={`${moment.title}-${index}`} className="rounded-lg bg-stone-50 px-3 py-2">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-stone-500">{moment.title}</div>
+            <div className="mt-1 text-[11px] leading-relaxed text-stone-600">{moment.detail}</div>
+            {moment.timestamp && <div className="mt-1 text-[10px] text-stone-400">{moment.timestamp}</div>}
           </div>
         )) : (
-          <div className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] leading-relaxed text-slate-500">
-            {data
-              ? 'This branch mostly contains low-signal execution details, so structure mode keeps it summarized.'
-              : 'Load in progress. The branch will fill in once the subtree is parsed.'}
+          <div className="rounded-md bg-stone-50 px-3 py-2 text-[11px] leading-relaxed text-stone-500">
+            {data ? 'No key events detected.' : 'Parsing branch.'}
           </div>
         )}
       </div>
@@ -843,24 +944,24 @@ function TaskDetailsPanel({
           <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusTone(insights.statusLabel)}`}>
             {insights.statusLabel}
           </span>
-          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+          <span className="rounded bg-stone-100 px-2 py-0.5 text-[10px] font-medium text-stone-600">
             {insights.roleLabel}
           </span>
         </div>
-        <div className="mt-3 text-lg font-semibold text-slate-900">{session.firstPromptPreview}</div>
-        <div className="mt-2 text-sm leading-relaxed text-slate-600">{insights.objective}</div>
-        <div className="mt-3 text-[11px] text-slate-500">{selectionSummary}</div>
+        <div className="mt-3 text-lg font-semibold text-stone-900">{session.firstPromptPreview}</div>
+        <div className="mt-2 text-sm leading-relaxed text-stone-600">{insights.objective}</div>
+        <div className="mt-3 text-[11px] text-stone-500">{selectionSummary}</div>
       </div>
 
       {insights.completionSummary && (
-        <div className="rounded-xl bg-emerald-50 px-4 py-3">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-emerald-700">Outcome</div>
+        <div className="rounded-md border border-emerald-100 bg-emerald-50 px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-emerald-700">Completion event</div>
           <div className="mt-1 text-sm leading-relaxed text-emerald-900">{insights.completionSummary}</div>
         </div>
       )}
 
       <div>
-        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">What mattered here</div>
+        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-stone-500">Key events</div>
         <div className="mt-3 space-y-3">
           {keyMoments.map((moment, index) => (
             <MomentCard key={`${moment.title}-${index}`} moment={moment} />
@@ -881,14 +982,14 @@ function MomentRow({ moment }: { moment: CodexKeyMoment }) {
             ? 'bg-amber-500'
             : moment.tone === 'rose'
               ? 'bg-rose-500'
-              : 'bg-slate-400'
+              : 'bg-stone-400'
       }`} />
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <div className="text-sm font-semibold text-slate-800">{moment.title}</div>
-          {moment.timestamp && <div className="text-[11px] text-slate-400">{moment.timestamp}</div>}
+          <div className="text-sm font-semibold text-stone-800">{moment.title}</div>
+          {moment.timestamp && <div className="text-[11px] text-stone-400">{moment.timestamp}</div>}
         </div>
-        <div className="mt-1 text-sm leading-relaxed text-slate-600">{moment.detail}</div>
+        <div className="mt-1 text-sm leading-relaxed text-stone-600">{moment.detail}</div>
       </div>
     </div>
   )
@@ -901,23 +1002,23 @@ function MomentCard({ moment }: { moment: CodexKeyMoment }) {
       ? 'border-amber-100 bg-amber-50/70'
       : moment.tone === 'rose'
         ? 'border-rose-100 bg-rose-50/70'
-        : 'border-slate-200 bg-slate-50'
+        : 'border-stone-200 bg-stone-50'
 
   return (
-    <div className={`rounded-xl border px-4 py-3 ${toneClass}`}>
+    <div className={`rounded-lg border px-4 py-3 ${toneClass}`}>
       <div className="flex flex-wrap items-center gap-2">
-        <div className="text-sm font-semibold text-slate-800">{moment.title}</div>
-        {moment.timestamp && <div className="text-[11px] text-slate-400">{moment.timestamp}</div>}
+        <div className="text-sm font-semibold text-stone-800">{moment.title}</div>
+        {moment.timestamp && <div className="text-[11px] text-stone-400">{moment.timestamp}</div>}
       </div>
-      <div className="mt-1.5 text-sm leading-relaxed text-slate-600">{moment.detail}</div>
+      <div className="mt-1.5 text-sm leading-relaxed text-stone-600">{moment.detail}</div>
     </div>
   )
 }
 
 function EmptyState() {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white px-6 py-10 text-center text-slate-500 shadow-sm shadow-slate-100">
-      Select a Codex task to build its overview.
+    <div className="rounded-lg border border-stone-200 bg-white px-6 py-10 text-center text-stone-500">
+      No Codex task selected.
     </div>
   )
 }
