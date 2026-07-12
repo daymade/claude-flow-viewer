@@ -25,7 +25,9 @@ npx vitest run src/components/sidebar/Sidebar.test.tsx
 ## Local Runtime
 
 - There is no separate backend process to start. `npm run dev` and `npm run preview` both run the frontend and the local Node-side API in one process.
+- Use the URL printed by Vite. The default dev port is `5173`, but Vite may move to `5174` or another free port when the default is occupied.
 - The local API is mounted by `vite-plugin-claude-data.ts`; it serves scan/session/tool-result endpoints and the SQLite-backed search endpoints.
+- Local export/share is not a separate renderer. `src/lib/export-html.ts` clones the current `[data-export-primary]` readable surface first, then falls back to `[data-export-live]`; older snapshot/app cloning paths are compatibility fallbacks, not the direction for new work. Do not use export-only CSS to hide viewer layout bugs; fix the shared renderer/viewer first.
 - Transcript search requires this local server mode. Opening static built files without the Vite/preview server will not provide `/api/search` or any other local API routes.
 - Browser-only file access mode is still supported for browsing Claude Code and Codex session files, but not for transcript search or Cherry Studio sessions. Cherry Studio support is currently local-server-only because the browser/manual store does not read the app's local user-data stores or recover Cherry regular chats; manual/browser loading must surface that boundary instead of pretending it is a normal folder scan.
 
@@ -49,6 +51,7 @@ providers/claude.ts | codex-parser.ts | providers/cherrystudio.ts → SessionDat
 useSessionStore (useReducer) → AppContext
     ↓
 AppShell → Sidebar (with marker filter) + SessionView + Timeline
+AppShell active session wrapper → [data-export-primary] / [data-export-live] → export-html.ts → HTML / Print-PDF / local share
 ```
 
 ### FileStore Abstraction (`src/lib/fs-access.ts`)
@@ -62,7 +65,10 @@ Three implementations behind one `FileStore` interface, tried in order:
 - `/api/scan` — Scan all projects, return `ProjectMeta[]` with session markers
 - `/api/scan-project/:source/:projectEncoded` — Scan all sessions for one project
 - `/api/session/:source/:project/:session` — Read full session content for parsing
+- `/api/resolve-session?id=` — Locate a session by identifier alone (a bare UUID, a `topic:` Cherry chat id, or a Cherry agent id `session_<epoch>_<random>`) across all source roots, bypassing the per-project 50-cap; returns `ResolvedSessionRef { source, projectEncoded, sessionId, meta }` or 404. A located file ALWAYS carries `meta` — a minimal fallback (keyed off the file mtime) is synthesized when the head-scan finds none — so the client can always derive `activeSession`. Server-side validation is authoritative (it never trusts the client detector): the id is reduced to a strict UUID, a separator-free `topic:` id, or a `session_…` agent id, and path-traversal is rejected with 400.
 - `/api/tool-result/:source/:project/:session/:path` — Read tool result overflow files (`claude` only)
+- `/api/share` — Persist the current standalone HTML snapshot under the local share root
+- `/share/:id/` — Serve a persisted local share snapshot by id
 - `/api/search/status` — Report local SQLite search availability and index stats
 - `/api/search` — Query the local SQLite-backed transcript index
 - `/api/skill-recommendations/status` — Report whether local Claude-backed skill analysis is ready to run
@@ -83,7 +89,7 @@ Three implementations behind one `FileStore` interface, tried in order:
 
 Provider details:
 - `src/lib/providers/claude.ts` keeps Claude-specific tree parsing, compaction, `/clear`, and marker logic
-- `src/lib/codex-parser.ts` handles Codex `response_item` / `event_msg` normalization, task lifecycle, tool calls/results, rollback markers, and thread metadata extraction (`primary` vs `subagent`)
+- `src/lib/codex-parser.ts` handles Codex `response_item` / `event_msg` normalization, including `event_msg.user_message`, `agent_message`, `mcp_tool_call_end`, `tool_search_*`, task lifecycle, tool calls/results, rollback markers, and thread metadata extraction (`primary` vs `subagent`)
 - `src/lib/providers/cherrystudio.ts` parses serialized Cherry Studio payloads for both `agents.db` agent sessions and recovered regular-chat topics
 
 **Exports from `parser.ts`**:
@@ -117,17 +123,17 @@ Counts of special events in a session: `{ compacts, plans, clears, forks }`.
 
 ### Shared UI Components (`src/components/shared/`)
 
-**HoverCard** (`HoverCard.tsx`): Reusable hover popover used by PromptIndex and Timeline.
+**HoverCard** (`HoverCard.tsx`): Reusable hover popover used by PromptOutline and Timeline.
 - `useHoverCard<T>()` hook — debounced show (300ms) / hide (150ms), tracks `hoveredId` + `anchorRect`
 - `HoverCard` component — rendered via `createPortal(document.body)` with `position: fixed` to escape `overflow` clipping
-- `placement: 'below' | 'left'` — PromptIndex uses `below`, Timeline uses `left`
+- `placement: 'below' | 'left'` — both PromptOutline and Timeline use `left` (they live in the right rail, so the card opens inward)
 - Dynamic width: `<80 chars → 240px`, `<200 chars → 360px`, `else → 480px`, `max-height: 400px` with scroll
 - Renders markdown via `react-markdown` + `remark-gfm`
 
 ### Supporting Modules
 
 - `src/lib/decision-detector.ts` — Classifies user prompt decisions: `'interrupt'` (contains `[Request interrupted by user]`), `'correction'` (promptNum > 1 + keywords like "no", "wrong", "stop", "instead"), or `'none'`
-- `src/lib/heatmap.ts` — Per-prompt intensity scoring (0–1) for sidebar heatmap. Weights: tool calls +1, errors +3, forks +5, thinking +length/1000, compact +2
+- `src/lib/heatmap.ts` — Per-prompt intensity scoring (0–1). Weights: tool calls +1, errors +3, forks +5, thinking +length/1000, compact +2. **It currently has NO renderer.** All three parsers still compute it into `SessionData.heatmap`, but the sidebar heat-bar it used to feed was deleted in the content-first pass (a blue gradient bar under every row was colour noise in the rail). The data is retained because it is cheap and a better home may exist (e.g. intensity shading on the right-rail outline). **Do not assume it is displayed anywhere — pick a consumer before relying on it, or retire the module.**
 - `src/lib/timeline.ts` — Extracts `TimelineEvent[]` from messages, computes time gaps, formats tokens/durations
 - `src/lib/codex-navigation.ts` — SSOT for the `Codex` sidebar task tree: builds root/delegated hierarchy, filters whole task paths, preserves active lineage, and selects the latest root tasks for scan-time display
 - `src/lib/codex-learning.ts` — Extracts learning-oriented `Codex` branch summaries: key moments, decision points, hidden-noise buckets, and role/status labels for the current active rollout
@@ -138,14 +144,22 @@ Counts of special events in a session: `{ compacts, plans, clears, forks }`.
 - `server/recommendations/claude-skill-recommendation-service.ts` — Runs an on-demand local Claude Code custom-agent team (`scout` → `skeptic` → `writer`) over recent session dossiers and returns structured skill ideas, launched through the user’s real shell environment (`zsh` / `bash` startup files) rather than a clean process env
 - `src/lib/search/` — Local chunk-based search core. `extract.ts` converts `SessionMeta + SessionData` into searchable chunks, `search-engine.ts` supports chunk hydration/replacement plus hybrid ranking hooks (`bm25` / `embedding` external signals), and `semantic.ts` keeps the lightweight corpus-driven scorer used alongside server signals
 - `server/search/` — Node-side SQLite search service. `session-catalog.ts` discovers session files + quick-scan metadata, `sqlite-search-service.ts` persists chunk rows to `~/.claude-flow-viewer/search.sqlite`, maintains the FTS5/BM25 and embedding tables, and incrementally refreshes them, while `embedding-provider.ts` provides the local model-backed embedding runtime
-- `server/scan/session-scan-cache.ts` — Persistent dev-server quick-scan cache for `~/.claude` and `~/.codex`. Reuses unchanged session metadata across server restarts so `/api/scan` stays fast on large local histories.
+- `server/scan/session-scan-cache.ts` — Persistent dev-server quick-scan cache for `~/.claude` and `~/.codex`. Reuses unchanged session metadata across server restarts so `/api/scan` stays fast on large local histories. Bump `CACHE_VERSION` whenever quick-scan semantics change; otherwise stale cached metadata can hide parser/scan fixes.
 
 ### Search Flow
 
-Search is now a two-layer system:
+The search box drives two independent lanes. Full-text search answers "where is this content mentioned"; the resolve lane answers "open this exact session by its id". They are separate on purpose — a UUID tokenizes into hex trigram noise inside FTS and can never be recalled that way, so identifier navigation must NOT be solved by tuning FTS ranking. Do not merge the lanes.
+
+**Resolve lane (known-item / identifier navigation):**
+- `src/lib/session-identifier.ts` `detectSessionIdentifier()` is the SSOT that decides whether the query IS an identifier: a bare UUID, a Cherry agent id (`session_<epoch>_<random>`), a `topic:` id, a `.jsonl` path, or a `#/…` hash. The bare-UUID and agent-id forms must be the ENTIRE trimmed input, so a normal phrase that merely embeds one never hijacks the lane.
+- On a match, `useSearchController` calls `FileStore.resolveSession()` in parallel with FTS (it never short-circuits FTS). Truth is "hits a real file": a resolved session surfaces a direct-open card ABOVE the FTS results; a content-embedded UUID that resolves to nothing simply leaves the lane idle and falls through to FTS.
+- `resolveSession` maps a bare id → `ResolvedSessionRef` by pure filesystem probe (`/api/resolve-session` for the API store; in-memory handle maps for the browser stores), bypassing the 50-cap. Browser stores return null for Cherry (needs the local server).
+- Opening a resolved session dispatches `UPSERT_SESSION_META` BEFORE `loadSession` so `AppShell` can derive `activeSession` even when the target is beyond the 50-cap (Codex would otherwise render through the wrong view).
+
+**Full-text lane** is a two-layer system:
 
 1. `useSessionStore` still owns the raw input string (`searchQuery`)
-2. `src/hooks/useSearchController.ts` owns the live search workflow: server availability check, ranked results, and the active jump target
+2. `src/hooks/useSearchController.ts` owns the live search workflow: server availability check, ranked results, the active jump target, and the resolve lane (independent of search-backend availability, so it still works in browser mode)
 
 When the user enters a non-empty query and the local server API is available:
 
@@ -166,9 +180,25 @@ Current behavior is intentionally local-only:
 - embedding failure mode: search degrades to lexical-only instead of crashing
 - browser-only file access mode: browsing still works, but transcript search is unavailable without the local server API
 
+### Right Rail: Prompt Outline + Timeline
+
+The right rail carries **two complementary navigators**. They are NOT redundant — keep both:
+
+- **`PromptOutline`** (in `SessionView.tsx`, `lg:` and up, 232px) — an Obsidian-style vertical table of contents. One row per user prompt: `#num` + time + a 2-line clamped preview. Click jumps to that prompt; hover opens a `HoverCard` (placement `left`) with the full text; prompts currently in the viewport are highlighted amber (from `activePromptNums`, driven by the `IntersectionObserver`).
+  - This **replaced the old sticky top `PromptIndex` strip**. Do not reintroduce a horizontal anchor bar above the transcript — it stole vertical space from the content, which is the thing users actually came to read.
+  - The preview uses `line-clamp-2`. Do **not** also apply `block` to that element: `block` overrides line-clamp's `display: -webkit-box` and the clamp silently stops working (previews then run 6+ lines).
+- **`Timeline`** (`md:` and up, 72px, at the far edge) — the *spatial* minimap: draggable viewport playhead, scroll position, and the **non-prompt structural events the outline has no row for** (compact / fork / plan / clear, each with a distinct marker shape).
+
+Rule of thumb: **outline = read & jump by text; timeline = where am I + what structural events exist.**
+
 ### Timeline Minimap (`src/components/session/Timeline.tsx`)
 
 The timeline is a **fixed-height minimap** that fills the viewport height and never scrolls itself. All events are absolutely positioned by their actual DOM location in the content area.
+
+> **CRITICAL INVARIANT — the Timeline root MUST have a real height (`h-full`).**
+> Every child inside it (track line, playhead, time anchors, all event markers) is `position: absolute`, so the root has **zero in-flow content**. Drop `h-full` and the root silently collapses to `height: 0` — every `top: X%` marker then resolves against 0 and the whole minimap piles into a garbled ~14px smear at the top. It fails *silently*: no error, no test failure, it just looks like a broken smudge. Its wrapper must also stretch (`hidden md:flex min-h-0`). This has already broken once.
+>
+> Marker time labels are suppressed inside `LABEL_SAFE_ZONE` (top/bottom 8.5%), because the first/last time anchors live there and would collide.
 
 **Data flow**: `SessionView` measures, `Timeline` renders.
 
@@ -185,6 +215,7 @@ The timeline is a **fixed-height minimap** that fills the viewport height and ne
 2. `ResizeObserver` on scroll container → re-measure on resize
 3. Prompt position measurement after render (`[data-prompt]` elements via `getBoundingClientRect`)
 4. `IntersectionObserver` → `activePromptNums` (which prompts are currently visible)
+5. The transcript scroll owner must be the `[data-primary-scroll]` element. Keep its ancestors as flex + `min-h-0`, keep the scroll owner focusable, and let `AppShell` forward wheel/keyboard paging to it so the visible page never becomes a non-scrolling shell.
 
 **Timeline rendering**:
 - **Coordinate mapping**: `toPercent(fraction)` applies 1.2% edge padding to prevent dot clipping at extremes
@@ -212,12 +243,21 @@ Single `useReducer` with `AppContext`. Key actions:
 
 ### Sidebar UX
 
+**The rail is content-first: the conversation list is the product, everything else is chrome.** Chrome above the list is capped at *search + one compact control row*; secondary tools (`SkillRecommendationsPanel`, global stats) are pinned to a **bottom** footer, out of the content path. Do not stack new labelled blocks above the list — that is exactly what made it read as cluttered before.
+
+- **Session rows are one line: preview (the first sentence) + a VISIBLE timestamp**, and the list is **sorted newest-first** (`startTime` desc).
+  - Time is *core signal* ("when did this happen") — it must **not** be hover-only. Size / token counts / tool counts / markers live in the row's `title` tooltip instead of stacking a badge pile under every row. Restraint means removing **noise**, never hiding **signal**.
+  - `formatWhen()` renders it smartly: today → `HH:MM`, this year → `Jul 11`, older → year.
+- **Controls must stay legible** (grouping + labelling + affordance):
+  - Source pills have a real fill (selected = dark stone, unselected = light stone) so they read as *buttons*, not bare grey text.
+  - The **marker filter is hidden behind a funnel icon** (progressive disclosure) and only expands on demand, where it gets a `Show only:` label and bordered toggle chips. An advanced filter must not permanently occupy the rail — but when shown, it must say what it does.
 - Sidebar is source-aware and split into `Claude conversations` / `Codex tasks` / `Cherry Studio sessions`
 - Source filter chips (`All sources`, `Claude`, `Codex`, `Cherry Studio`) are the primary way to narrow navigation
+- In `All sources`, the active project's source section appears first so deep-linked `Codex` sessions keep task navigation in view instead of starting with unrelated sources.
 - Codex projects render a task map summary plus `Main tasks` and `Unlinked delegated work` sections
 - `Codex` delegated runs are nested under their parent task rather than dumped flat, and filters keep the full parent-child path visible
 - Search results now come from the server-backed SQLite index in `SearchResultsPanel`; sidebar tree filtering remains metadata-driven when used on its own
-- When the search box is empty, `AppShell` shows `src/components/recommendations/SkillRecommendationsPanel.tsx`, driven by `src/hooks/useClaudeSkillRecommendations.ts`; it uses the local Node/Vite API to run an on-demand local Claude Code analysis instead of heuristic matching, with user-selectable scopes (`Smart`, `This project`, `Recent all`) so cost and breadth stay explicit
+- When the search box is empty and the active project is not `Codex`, `AppShell` shows `src/components/recommendations/SkillRecommendationsPanel.tsx`, driven by `src/hooks/useClaudeSkillRecommendations.ts`; it uses the local Node/Vite API to run an on-demand local Claude Code analysis instead of heuristic matching, with user-selectable scopes (`Smart`, `This project`, `Recent all`) so cost and breadth stay explicit. Keep this panel hidden for active `Codex` sessions so the sidebar stays focused on task navigation.
 - Marker filters still auto-expand matching `Codex` delegated chains so users do not have to re-open branches just to see a hit
 - The currently active project may be manually collapsed; it should stay collapsed until the user deliberately selects a session in another project
 
@@ -229,22 +269,31 @@ Single `useReducer` with `AppContext`. Key actions:
 
 ### Codex Workspace View
 
-- `Codex` no longer opens straight into the raw transcript in the main content area
-- `src/components/codex/CodexWorkspaceView.tsx` is the progressive-disclosure learning surface for `Codex`
+- `Codex` opens into a conversation-first reading surface, not a diagnostic dashboard
+- `src/components/codex/CodexWorkspaceView.tsx` owns the `Conversation` / `Structure` / `Diagnostics` workspace for `Codex`
 - `src/lib/codex-navigation.ts` is the SSOT for project-level thread structure
 - `src/lib/codex-learning.ts` is the SSOT for task summaries, key moments, and hidden-noise counts
 - Initial `Codex` project lists are root-first for faster startup. `AppShell` hydrates the full project session list after the first screen is already visible.
 - Default reading order is:
-  `Overview` first,
+  `Conversation` first,
   `Structure` second,
-  `Raw transcript` last
-- `Overview` must show all delegated branches in one screen before any branch is expanded
-- Expanding a delegated branch must reveal that branch's own key messages inline, without forcing the user to jump to another panel
-- `Raw transcript` still uses the shared `SessionView`; the overview/structure panels are `Codex`-specific and must stay driven by `src/lib/codex-learning.ts`
+  `Diagnostics` last
+- `Conversation` must use the shared `SessionView` renderer so local export/share stays WYSIWYG with the main viewer
+- `Conversation` uses a Codex reader preset over `SessionView`: keep user prompts, assistant prose, and meaningful team/delegation status visible; hide thinking/tool streams, raw task lifecycle events, markers, prompt-index chrome, and timeline minimap from the default reading surface.
+- `Structure` is the place for delegated branch maps, inline branch expansion, and key-event summaries
+- `Diagnostics` is the place for parser-derived decision/noise buckets; do not put diagnostic buckets into the default reading path
+
+### Export and Local Share
+
+- `SessionView` marks the readable transcript scroller with `[data-export-primary]`; `AppShell` keeps `[data-export-live]` as the fallback app-surface boundary. Do not add provider-specific hidden export snapshots.
+- `src/lib/export-html.ts` must clone the viewer/rendering structure first and inline same-origin built CSS for standalone output. Fix parser/rendering problems in the main viewer before changing export CSS.
+- `HTML` downloads a standalone file, `Print/PDF` opens browser print preview, and `Share` POSTs the same HTML to `/api/share`.
+- The local share root is owned by `vite-plugin-claude-data.ts`. `/share/:id/` is unauthenticated local-server hosting only, not an online publishing platform; anyone who can reach the dev/preview server and has the URL can view the snapshot. Do not expose private shares through `--host`, tunnels, or reverse proxies.
+- Manual import accepts raw `.jsonl` / `.json` session files. Do not add Markdown import as a source; Markdown exports are lossy and cannot preserve the original role/tool/thread structure.
 
 ### URL Routing
 
-Hash-based: `#/{projectEncoded}/{sessionId}`. No react-router — just `encodeHash`/`decodeHash` helpers in `useFileLoader.ts`. On initial load, tries URL hash first; for `Codex` it falls back to the root session of the latest task, not the newest delegated child rollout.
+Hash-based: `#/{projectEncoded}/{sessionId}`. No react-router — just `encodeHash`/`decodeHash` helpers in `useFileLoader.ts`. On initial load, `src/lib/initial-navigation.ts` `planInitialNavigation()` (pure, unit-tested) decides the target: a hash pointing to a scanned session opens it directly; a hash pointing to a session NOT in the scanned list (e.g. beyond the 50-cap) becomes a `deep-link` plan that resolves the session by id and upserts its meta — it must NOT silently fall back to the most recent session. Only a genuinely unresolvable hash (or no hash) falls back to most recent; for `Codex` that fallback is the root session of the latest task, not the newest delegated child rollout.
 
 ### Message Types (`src/types/session.ts`)
 
@@ -266,11 +315,17 @@ FilterState    — Toggle visibility of message types + timeline
 
 - **Light theme only** — background `#FAFAF8`, no dark mode
 - **Typography**: IBM Plex Sans (body) + JetBrains Mono (code/timestamps), loaded via Google Fonts in `index.html`, configured in `@theme` block in `index.css`
-- **Accent color**: Amber (logo gradient, focus rings, active states, loading spinners, sidebar highlights). No violet/purple in UI chrome.
-- **Neutral color**: Stone (filter toggles, inactive text, timeline track, event marker labels)
-- **Functional colors**: Blue=prompts, Teal=compact, Amber=forks, Gray=clear/auto-retry, Indigo=plan, Rose=interrupts
-- **Team messages**: Emerald/Sky/Purple assigned per team member (data-driven, in `TEAM_COLORS` in MessageRenderers.tsx)
-- **User prompts**: Rendered as right-aligned chat bubbles (not left-border cards)
+- **Color system (SSOT — apply to every new surface)**: exactly **one neutral (`stone`) + one accent (`amber`)**.
+  - The old six-colour "functional" system (Blue=prompts, Teal=compact, Indigo=plan, Gray=clear …) is **RETIRED**. It was the single biggest source of the AI-slop look: it forced every feature to grab a hue, so colour stopped meaning anything (blue alone was used for 7 unrelated things).
+  - **Never introduce `slate` / `gray` / `blue` / `teal` / `indigo` / `sky` / `purple`.** Three neutral families (stone + slate + gray) used to coexist; there is now exactly one: **stone**.
+  - **Accent (`amber`)** — sparingly: active/selected state, links, focus rings, logo. It is what the eye should land on.
+  - **Neutral (`stone`)** — everything else: text, borders, dividers, inactive controls, timeline track, marker labels.
+  - **Semantic colours — the ONLY allowed exceptions, because they carry meaning a text label cannot:**
+    - `rose` = interrupt / correction (user cut the agent off)
+    - `emerald` = completed / success (Codex `statusTone`, "Completion event", `moment.tone`)
+    - `TEAM_COLORS` (emerald/sky/purple, `MessageRenderers.tsx`) = **categorical identity** — which agent spoke. That is data encoding (like chart series), not decoration.
+  - **Gate before adding ANY colour**: *"Does this carry meaning the visible text label doesn't already carry?"* If no → use stone. A "Compact" divider does not need to be teal; the word "Compact" is right there.
+- **User prompts**: right-aligned chat bubbles, warm neutral (`bg-stone-100`) — not blue, not left-border cards.
 - **CSS Requirements**: `min-h-0` on flex column children for scroll; `whitespace-nowrap` on `<summary>` with flex
 - **Animations**: `promptSlideIn` (slide-in for prompt bubbles), `detailsReveal` (expand for `<details>`), `branchReveal` (fork branch expand)
 
@@ -331,6 +386,7 @@ The scan pipeline has **two separate implementations** that must stay in sync, a
 
 - No dark mode (design constraint)
 - No virtualization for large sessions
+- Local share links require the dev/preview server that created or can serve the snapshot; there is no public hosted share backend yet
 - Vite plugin duplicates some helper functions from parser.ts (intentional: plugin is self-contained server module)
 
 ## Correct Steps
@@ -343,7 +399,7 @@ When changing scan, parse, sidebar, or routing behavior, follow this order:
 4. Run `npx tsc --noEmit`.
 5. Run `npx vitest run`.
 6. Run `npm run build`.
-7. If you changed source navigation or scan behavior, smoke the app with `npm run dev` and confirm:
+7. If you changed source navigation, scan behavior, rendering, or export/share behavior, smoke the app with `npm run dev` and confirm:
    both `Claude` and `Codex` load,
    the first boot path only issues one `/api/scan`,
    session switching updates the URL hash,
@@ -351,7 +407,10 @@ When changing scan, parse, sidebar, or routing behavior, follow this order:
    `Codex` delegated runs remain nested instead of flat,
    search/filter keeps the full `Codex` task path visible,
    first-load selection for a `Codex` project lands on the main task root instead of a delegated child rollout,
-   and a large local history still reaches the first screen quickly because the root-first list appears before full `Codex` hydration.
+   a large local history still reaches the first screen quickly because the root-first list appears before full `Codex` hydration,
+   the current readable session surface exports through `[data-export-primary]` with `[data-export-live]` only as fallback,
+   pasting a session id (a UUID or a `session_…` Cherry agent id) into the search box surfaces a direct-open card above the full-text results and opens that session — including one beyond the per-project 50-cap — while a normal phrase that merely embeds a UUID does not trigger it,
+   and local `/share/:id/` renders the same viewer structure on desktop and mobile widths.
 
 ## Git Workflow
 
