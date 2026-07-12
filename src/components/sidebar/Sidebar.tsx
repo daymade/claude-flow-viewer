@@ -16,6 +16,21 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
 }
 
+// Visible "when" for each session row. Time is core signal, not hover-only noise:
+// today -> HH:MM, this year -> "Jul 11", older -> year.
+function formatWhen(iso: string, fallback: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return fallback.slice(5, 10)
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+  if (d.getFullYear() === now.getFullYear()) {
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  }
+  return String(d.getFullYear())
+}
+
 function formatCount(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`
 }
@@ -30,18 +45,18 @@ function codexDelegatedPreviewLabel(delegatedCount: number, isTruncated: boolean
 type MarkerFilterKey = keyof SessionMarkers
 type SourceFilter = 'all' | SessionSource
 
-const MARKER_FILTERS: { key: MarkerFilterKey; label: string; color: string; activeColor: string }[] = [
-  { key: 'forks', label: 'Forks', color: 'text-amber-500', activeColor: 'bg-amber-100 text-amber-700' },
-  { key: 'compacts', label: 'Compacts', color: 'text-teal-500', activeColor: 'bg-teal-100 text-teal-700' },
-  { key: 'clears', label: 'Clears', color: 'text-gray-500', activeColor: 'bg-gray-200 text-gray-700' },
-  { key: 'plans', label: 'Plans', color: 'text-indigo-500', activeColor: 'bg-indigo-100 text-indigo-700' },
+const MARKER_FILTERS: { key: MarkerFilterKey; label: string }[] = [
+  { key: 'forks', label: 'Forks' },
+  { key: 'compacts', label: 'Compacts' },
+  { key: 'clears', label: 'Clears' },
+  { key: 'plans', label: 'Plans' },
 ]
 
-const SOURCE_FILTERS: Array<{ key: SourceFilter; label: string; activeClass: string }> = [
-  { key: 'all', label: 'All sources', activeClass: 'bg-slate-200 text-slate-800' },
-  { key: 'claude', label: 'Claude', activeClass: 'bg-sky-100 text-sky-800' },
-  { key: 'codex', label: 'Codex', activeClass: 'bg-emerald-100 text-emerald-800' },
-  { key: 'cherrystudio', label: 'Cherry Studio', activeClass: 'bg-orange-100 text-orange-800' },
+const SOURCE_FILTERS: Array<{ key: SourceFilter; label: string }> = [
+  { key: 'all', label: 'All sources' },
+  { key: 'claude', label: 'Claude' },
+  { key: 'codex', label: 'Codex' },
+  { key: 'cherrystudio', label: 'Cherry Studio' },
 ]
 
 interface SidebarProps {
@@ -49,7 +64,6 @@ interface SidebarProps {
   activeSessionId: string | null
   activeProjectEncoded: string | null
   searchQuery: string
-  activeHeatmap: number[] | null
   onSelectSession: (projectEncoded: string, sessionId: string) => void
   onLoadAllSessions: (projectEncoded: string) => void
 }
@@ -59,17 +73,28 @@ export function Sidebar({
   activeSessionId,
   activeProjectEncoded,
   searchQuery,
-  activeHeatmap,
   onSelectSession,
   onLoadAllSessions,
 }: SidebarProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set<string>())
   const [markerFilter, setMarkerFilter] = useState<MarkerFilterKey | null>(null)
+  const [showMarkerFilter, setShowMarkerFilter] = useState(false)
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
   const [manuallyCollapsedActiveProjects, setManuallyCollapsedActiveProjects] = useState<Set<string>>(() => new Set<string>())
 
   const normalizedSearch = searchQuery.trim().toLowerCase()
   const hasTreeFilter = Boolean(normalizedSearch) || Boolean(markerFilter)
+  const activeProjectSource = useMemo(
+    () => projects.find((project) => project.encodedName === activeProjectEncoded)?.source ?? null,
+    [activeProjectEncoded, projects],
+  )
+  const sourceOrder = useMemo(() => {
+    if (sourceFilter !== 'all' || !activeProjectSource) return SOURCE_ORDER
+    return [
+      activeProjectSource,
+      ...SOURCE_ORDER.filter((source) => source !== activeProjectSource),
+    ]
+  }, [activeProjectSource, sourceFilter])
 
   const expandedProjects = useMemo(() => {
     const next = new Set(expanded)
@@ -164,53 +189,74 @@ export function Sidebar({
 
   return (
     <div className="flex flex-col">
-      <div className="px-3 py-2 border-b border-slate-100">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {SOURCE_FILTERS.map(({ key, label, activeClass }) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setSourceFilter(key)}
-              className={`px-2 py-1 rounded-md text-[10px] font-semibold cursor-pointer transition-colors ${
-                sourceFilter === key
-                  ? activeClass
-                  : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="flex items-center gap-1 px-3 py-1.5 border-b border-slate-100">
-        <span className="text-[10px] text-slate-400 mr-0.5 shrink-0">Markers:</span>
-        {MARKER_FILTERS.map(({ key, label, activeColor }) => (
+      <div className="px-3 py-2 border-b border-stone-200/70">
+        <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
+            {SOURCE_FILTERS.map(({ key, label }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setSourceFilter(key)}
+                className={`rounded-md px-2 py-1 text-[11px] cursor-pointer transition-colors ${
+                  sourceFilter === key
+                    ? 'bg-stone-800 text-white font-medium'
+                    : 'bg-stone-100 text-stone-500 hover:bg-stone-200 hover:text-stone-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <button
-            key={key}
             type="button"
-            onClick={() => toggleMarkerFilter(key)}
-            className={`px-1.5 py-0.5 rounded text-[9px] font-bold cursor-pointer transition-colors ${
-              markerFilter === key
-                ? activeColor
-                : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'
+            onClick={() => setShowMarkerFilter((v) => !v)}
+            title="Filter conversations by marker (forks, compacts, clears, plans)"
+            aria-label="Filter by marker"
+            aria-expanded={showMarkerFilter}
+            className={`ml-auto flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] cursor-pointer transition-colors ${
+              markerFilter || showMarkerFilter
+                ? 'bg-amber-50 text-amber-700'
+                : 'text-stone-400 hover:bg-stone-100 hover:text-stone-600'
             }`}
           >
-            {label}
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z" />
+            </svg>
+            {markerFilter && <span className="font-medium tabular-nums">1</span>}
           </button>
-        ))}
-        {markerFilter && (
-          <button
-            type="button"
-            onClick={() => setMarkerFilter(null)}
-            className="ml-auto text-[9px] text-slate-400 hover:text-slate-600 cursor-pointer"
-          >
-            Clear
-          </button>
+        </div>
+        {showMarkerFilter && (
+          <div className="mt-2 flex flex-wrap items-center gap-1">
+            <span className="mr-0.5 text-[10px] text-stone-400">Show only:</span>
+            {MARKER_FILTERS.map(({ key, label }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => toggleMarkerFilter(key)}
+                title={`Show only sessions containing ${label.toLowerCase()}`}
+                className={`rounded-full border px-2 py-0.5 text-[11px] cursor-pointer transition-colors ${
+                  markerFilter === key
+                    ? 'border-amber-300 bg-amber-50 text-amber-800 font-medium'
+                    : 'border-stone-200 text-stone-500 hover:border-stone-300 hover:text-stone-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+            {markerFilter && (
+              <button
+                type="button"
+                onClick={() => setMarkerFilter(null)}
+                className="text-[10px] font-medium text-amber-700 hover:underline cursor-pointer"
+              >
+                Clear
+              </button>
+            )}
+          </div>
         )}
       </div>
 
-      {SOURCE_ORDER.map((source) => {
+      {sourceOrder.map((source) => {
         const sectionProjects = filteredProjects.filter((project) => project.source === source)
         if (sectionProjects.length === 0) return null
 
@@ -255,7 +301,7 @@ export function Sidebar({
                 const unlinkedTasks = visibleForest.filter((node) => node.hasMissingParent)
 
                 return (
-                  <div key={project.encodedName} className="border-b border-slate-100">
+                  <div key={project.encodedName} className="border-b border-stone-200/50">
                     <ProjectHeader
                       project={project}
                       isActiveProject={isActiveProject}
@@ -283,7 +329,7 @@ export function Sidebar({
 
                         {mainTasks.length > 0 && (
                           <div className="px-2 pt-1">
-                            <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-emerald-700">
+                            <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-stone-400">
                               Main tasks
                             </div>
                             {mainTasks.map((node) => (
@@ -302,10 +348,10 @@ export function Sidebar({
 
                         {unlinkedTasks.length > 0 && (
                           <div className="px-2 pt-2">
-                            <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
+                            <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-stone-400">
                               Unlinked delegated work
                             </div>
-                            <div className="mx-2 mb-2 rounded-lg bg-slate-50 px-3 py-2 text-[11px] leading-relaxed text-slate-500">
+                            <div className="mx-2 mb-2 rounded-lg bg-stone-50 px-3 py-2 text-[11px] leading-relaxed text-stone-500">
                               These delegated threads do not have their parent task in the currently loaded sessions.
                               {isTruncated && ' Load all sessions to restore missing parent context when that parent exists in older history.'}
                             </div>
@@ -329,7 +375,7 @@ export function Sidebar({
                               event.stopPropagation()
                               onLoadAllSessions(project.encodedName)
                             }}
-                            className="mx-3 mt-1 px-2.5 py-2 w-[calc(100%-24px)] text-center text-[11px] text-emerald-700 hover:bg-emerald-50 rounded-lg cursor-pointer transition-colors font-medium"
+                            className="mx-3 mt-1 px-2.5 py-2 w-[calc(100%-24px)] text-center text-[11px] text-amber-700 hover:bg-amber-50 rounded-lg cursor-pointer transition-colors font-medium"
                           >
                             Load all {totalCount} entries (+{totalCount - sessionCount} more)
                           </button>
@@ -341,7 +387,7 @@ export function Sidebar({
               }
 
               return (
-                <div key={project.encodedName} className="border-b border-slate-100">
+                <div key={project.encodedName} className="border-b border-stone-200/50">
                   <ProjectHeader
                     project={project}
                     isActiveProject={isActiveProject}
@@ -355,13 +401,13 @@ export function Sidebar({
 
                   {isExpanded && (
                     <div className="pb-1">
-                      {project.sessions.map((session) => (
+                      {[...project.sessions]
+                        .sort((a, b) => (b.startTime || '').localeCompare(a.startTime || ''))
+                        .map((session) => (
                         <SessionCard
                           key={session.id}
-                          projectSource={project.source}
                           session={session}
                           activeSessionId={activeSessionId}
-                          activeHeatmap={activeHeatmap}
                           onClick={() => selectSession(project.encodedName, session.id)}
                         />
                       ))}
@@ -414,39 +460,36 @@ function ProjectHeader({
 
   return (
     <div
-      className={`px-3 py-2.5 text-xs font-semibold cursor-pointer flex items-start gap-2 transition-colors ${
-        isActiveProject
-          ? 'bg-amber-50/80'
-          : SOURCE_METADATA[project.source].projectHoverClass
+      className={`px-3 py-2.5 text-xs cursor-pointer flex items-start gap-2 transition-colors ${
+        isActiveProject ? 'bg-amber-50/70' : 'hover:bg-stone-100/70'
       }`}
       onClick={onToggle}
       title={`${project.decodedName}\n${loadedCount}/${totalCount} entries loaded`}
     >
       <svg
-        width="10"
-        height="10"
+        width="9"
+        height="9"
         viewBox="0 0 10 10"
         fill="currentColor"
-        className={`text-slate-400 shrink-0 mt-0.5 transition-transform duration-150 ${isExpanded ? 'rotate-90' : ''}`}
+        className={`text-stone-400 shrink-0 mt-1 transition-transform duration-150 ${isExpanded ? 'rotate-90' : ''}`}
       >
         <path d="M3 1l5 4-5 4V1z" />
       </svg>
 
-      <span className={`mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${SOURCE_METADATA[project.source].badgeClass}`}>
-        {SOURCE_METADATA[project.source].label}
-      </span>
-
       <div className="min-w-0 flex-1">
-        <div className="truncate text-slate-700">{project.shortName}</div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] font-medium text-slate-400">
+        <div className={`truncate font-medium ${isActiveProject ? 'text-stone-900' : 'text-stone-600'}`}>{project.shortName}</div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-stone-400">
           <span>{summaryLabel}</span>
-          {detailLabel && <span>{detailLabel}</span>}
+          {detailLabel && (
+            <>
+              <span aria-hidden className="text-stone-300">·</span>
+              <span>{detailLabel}</span>
+            </>
+          )}
         </div>
       </div>
 
-      <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold shrink-0 tabular-nums ${
-        isActiveProject ? 'bg-amber-200 text-amber-700' : 'bg-slate-200 text-slate-500'
-      }`}>
+      <span className={`text-[11px] shrink-0 tabular-nums mt-0.5 ${isActiveProject ? 'text-amber-700' : 'text-stone-400'}`}>
         {isTruncated ? `${loadedCount}/${totalCount}` : loadedCount}
       </span>
     </div>
@@ -464,27 +507,27 @@ function TaskMapSummary({ summary, hasTreeFilter, isTruncated, hasUnlinkedTasks 
   const delegatedPreview = codexDelegatedPreviewLabel(summary.delegatedCount, isTruncated)
 
   return (
-    <div className="mx-3 mt-2 rounded-xl border border-emerald-100 bg-emerald-50/70 px-3 py-2.5">
+    <div className="mx-3 mt-2 rounded-xl border border-stone-200/70 bg-stone-50 px-3 py-2.5">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-emerald-700">Task map</div>
+        <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-stone-500">Task map</div>
         {hasTreeFilter && (
-          <span className="rounded-full bg-white/80 px-2 py-0.5 text-[9px] font-semibold text-emerald-700">
+          <span className="rounded-full bg-white px-2 py-0.5 text-[9px] font-semibold text-stone-500 ring-1 ring-stone-200">
             Filtered view
           </span>
         )}
       </div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-emerald-900">
-        <span><strong className="font-semibold">{summary.mainTaskCount}</strong> main task{summary.mainTaskCount === 1 ? '' : 's'}</span>
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-stone-600">
+        <span><strong className="font-semibold text-stone-800">{summary.mainTaskCount}</strong> main task{summary.mainTaskCount === 1 ? '' : 's'}</span>
         <span>{summary.delegatedCount > 0
-          ? <><strong className="font-semibold">{summary.delegatedCount}</strong> delegated work item{summary.delegatedCount === 1 ? '' : 's'}</>
+          ? <><strong className="font-semibold text-stone-800">{summary.delegatedCount}</strong> delegated work item{summary.delegatedCount === 1 ? '' : 's'}</>
           : delegatedPreview}
         </span>
         {summary.unlinkedCount > 0 && (
-          <span><strong className="font-semibold">{summary.unlinkedCount}</strong> unlinked item{summary.unlinkedCount === 1 ? '' : 's'}</span>
+          <span><strong className="font-semibold text-stone-800">{summary.unlinkedCount}</strong> unlinked item{summary.unlinkedCount === 1 ? '' : 's'}</span>
         )}
       </div>
       {(isTruncated || hasUnlinkedTasks) && (
-        <div className="mt-1.5 text-[11px] leading-relaxed text-emerald-800/80">
+        <div className="mt-1.5 text-[11px] leading-relaxed text-stone-500">
           {isTruncated
             ? 'Root tasks load first so the first screen stays fast. Open a task or load the full history to hydrate delegated work.'
             : hasUnlinkedTasks
@@ -515,8 +558,8 @@ function CodexTaskNavCard({
 }: CodexTaskNavCardProps) {
   const label = node.hasMissingParent ? 'Unlinked delegated work' : 'Main task'
   const borderClass = isActive
-    ? 'bg-amber-50 border-l-amber-600 shadow-sm shadow-amber-100'
-    : 'bg-white border-l-emerald-500 hover:bg-emerald-50/40'
+    ? 'bg-amber-50 border-l-amber-600'
+    : 'bg-white border-l-stone-300 hover:bg-stone-100/60'
   const headline = node.session.firstPromptPreview
   const secondary = node.children.length > 0
     ? `${formatCount(node.children.length, 'delegated branch', 'delegated branches')} under this task`
@@ -538,27 +581,27 @@ function CodexTaskNavCard({
             <div className="flex flex-wrap items-center gap-1.5">
               <span className={`rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em] ${
                 label === 'Main task'
-                  ? 'bg-emerald-100 text-emerald-800'
-                  : 'bg-slate-100 text-slate-600'
+                  ? 'bg-stone-200 text-stone-700'
+                  : 'bg-stone-100 text-stone-500'
               }`}>
                 {label}
               </span>
               {showMatchHint && (
-                <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700">
+                <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700">
                   Contains a matching branch
                 </span>
               )}
             </div>
-            <div className="mt-1 text-[12px] font-semibold leading-snug text-slate-800">
+            <div className="mt-1 text-[12px] font-semibold leading-snug text-stone-800">
               {headline}
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-400">
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-stone-400">
               <span>{node.session.startDisplay}</span>
               <span>{secondary}</span>
             </div>
           </div>
           {node.session.fileSize > 0 && (
-            <div className="text-[10px] text-slate-400 tabular-nums shrink-0">
+            <div className="text-[10px] text-stone-400 tabular-nums shrink-0">
               {formatFileSize(node.session.fileSize)}
             </div>
           )}
@@ -569,107 +612,50 @@ function CodexTaskNavCard({
 }
 
 interface SessionCardProps {
-  projectSource: SessionSource
   session: SessionMeta
   activeSessionId: string | null
-  activeHeatmap: number[] | null
   onClick: () => void
 }
 
-function SessionCard({ projectSource, session, activeSessionId, activeHeatmap, onClick }: SessionCardProps) {
+function SessionCard({ session, activeSessionId, onClick }: SessionCardProps) {
   const isActive = session.id === activeSessionId
-  const stateClass = isActive
-    ? 'bg-amber-50 border-l-amber-600 shadow-sm shadow-amber-100'
-    : SOURCE_METADATA[projectSource].sessionClass
+  const title = session.firstPromptPreview?.trim() || session.startDisplay
+  // Size / counts / markers / heatmap move into the hover tooltip instead of
+  // stacking a colored badge pile under every row. The rail stays a list of titles.
+  const meta = [
+    session.startDisplay,
+    session.fileSize ? formatFileSize(session.fileSize) : null,
+    session.promptCount ? formatCount(session.promptCount, 'prompt') : null,
+    session.toolCount ? formatCount(session.toolCount, 'tool') : null,
+    markerSummary(session.markers),
+  ].filter(Boolean).join(' · ')
 
   return (
     <div
-      className={`mx-1.5 mb-0.5 px-2.5 py-2 cursor-pointer rounded-lg border-l-[3px] transition-all duration-100 ${stateClass}`}
+      className={`group relative mx-1.5 mb-px flex items-center gap-2 rounded-lg px-2.5 py-[7px] cursor-pointer transition-colors ${
+        isActive ? 'bg-amber-50 text-stone-900' : 'text-stone-600 hover:bg-stone-100/60'
+      }`}
       onClick={onClick}
-      title={`Session: ${session.id}\nFile: ${session.fileSize ? formatFileSize(session.fileSize) : '?'}\nRecords: ${session.recordCount || '?'}`}
+      title={`${meta}\n${session.id}`}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-[11px] font-semibold text-slate-700">{session.startDisplay}</div>
-        </div>
-        {session.fileSize > 0 && (
-          <div className="text-[10px] text-slate-400 tabular-nums shrink-0">
-            {formatFileSize(session.fileSize)}
-          </div>
-        )}
-      </div>
-      <div className="text-[11px] text-slate-500 truncate mt-0.5 leading-snug">{session.firstPromptPreview}</div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[10px] text-slate-400">
-        {session.promptCount > 0 && <span>{formatCount(session.promptCount, 'prompt')}</span>}
-        {session.toolCount > 0 && <span>{formatCount(session.toolCount, 'tool')}</span>}
-        {session.recordCount > 0 && <span>{formatCount(session.recordCount, 'record')}</span>}
-      </div>
-      <MarkerBadgeRow markers={session.markers} />
-      {isActive && activeHeatmap && activeHeatmap.length > 0 && (
-        <HeatmapBar values={activeHeatmap} />
-      )}
+      {isActive && <span className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-amber-600" />}
+      <span className={`min-w-0 flex-1 truncate text-[13px] leading-snug ${isActive ? 'font-medium' : ''}`}>
+        {title}
+      </span>
+      <span className="shrink-0 text-[10px] tabular-nums text-stone-400">
+        {formatWhen(session.startTime, session.startDisplay)}
+      </span>
     </div>
   )
 }
 
-function MarkerBadgeRow({ markers }: { markers?: SessionMarkers }) {
-  if (!markers || (markers.compacts === 0 && markers.plans === 0 && markers.clears === 0 && markers.forks === 0)) {
-    return null
-  }
-
-  return (
-    <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-      {markers.forks > 0 && (
-        <span className="text-[9px] font-bold px-1.5 py-px rounded bg-amber-50 text-amber-600">
-          {formatCount(markers.forks, 'fork')}
-        </span>
-      )}
-      {markers.compacts > 0 && (
-        <span className="text-[9px] font-bold px-1.5 py-px rounded bg-teal-50 text-teal-600">
-          {formatCount(markers.compacts, 'compact')}
-        </span>
-      )}
-      {markers.clears > 0 && (
-        <span className="text-[9px] font-bold px-1.5 py-px rounded bg-gray-100 text-gray-500">
-          {formatCount(markers.clears, 'clear')}
-        </span>
-      )}
-      {markers.plans > 0 && (
-        <span className="text-[9px] font-bold px-1.5 py-px rounded bg-indigo-50 text-indigo-500">
-          {formatCount(markers.plans, 'plan')}
-        </span>
-      )}
-    </div>
-  )
-}
-
-function HeatmapBar({ values }: { values: number[] }) {
-  const w = 100
-  const h = 6
-  const barWidth = Math.max(1, w / values.length)
-
-  return (
-    <svg width={w} height={h} className="mt-1.5 rounded-sm overflow-hidden" viewBox={`0 0 ${w} ${h}`}>
-      <rect width={w} height={h} fill="#f1f5f9" />
-      {values.map((value, index) => (
-        <rect
-          key={index}
-          x={index * barWidth}
-          y={0}
-          width={barWidth}
-          height={h}
-          fill={heatColor(value)}
-        />
-      ))}
-    </svg>
-  )
-}
-
-function heatColor(intensity: number): string {
-  if (intensity < 0.1) return '#f1f5f9'
-  if (intensity < 0.3) return '#bfdbfe'
-  if (intensity < 0.5) return '#93c5fd'
-  if (intensity < 0.7) return '#60a5fa'
-  if (intensity < 0.9) return '#3b82f6'
-  return '#2563eb'
+function markerSummary(markers?: SessionMarkers): string | null {
+  if (!markers) return null
+  const parts = [
+    markers.forks > 0 ? formatCount(markers.forks, 'fork') : null,
+    markers.compacts > 0 ? formatCount(markers.compacts, 'compact') : null,
+    markers.clears > 0 ? formatCount(markers.clears, 'clear') : null,
+    markers.plans > 0 ? formatCount(markers.plans, 'plan') : null,
+  ].filter(Boolean)
+  return parts.length > 0 ? parts.join(', ') : null
 }

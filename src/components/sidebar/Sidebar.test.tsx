@@ -100,9 +100,7 @@ describe('Sidebar', () => {
         projects={[claudeProject(), codexProject(), cherryStudioProject()]}
         activeSessionId={null}
         activeProjectEncoded={null}
-        searchQuery=""
-        activeHeatmap={null}
-        onSelectSession={vi.fn()}
+        searchQuery=""        onSelectSession={vi.fn()}
         onLoadAllSessions={vi.fn()}
       />,
     )
@@ -117,15 +115,29 @@ describe('Sidebar', () => {
     expect(screen.queryByText('CDX')).toBeNull()
   })
 
+  it('prioritizes the active source section while showing all sources', () => {
+    render(
+      <Sidebar
+        projects={[claudeProject(), codexProject(), cherryStudioProject()]}
+        activeSessionId="main-task"
+        activeProjectEncoded="codex:/Users/test/codex-app"
+        searchQuery=""        onSelectSession={vi.fn()}
+        onLoadAllSessions={vi.fn()}
+      />,
+    )
+
+    const codexSection = screen.getByText('Codex tasks')
+    const claudeSection = screen.getByText('Claude conversations')
+    expect(codexSection.compareDocumentPosition(claudeSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   it('renders Codex as compact main-task navigation without flattening delegated work into the sidebar', () => {
     render(
       <Sidebar
         projects={[codexProject()]}
         activeSessionId={null}
         activeProjectEncoded={null}
-        searchQuery=""
-        activeHeatmap={null}
-        onSelectSession={vi.fn()}
+        searchQuery=""        onSelectSession={vi.fn()}
         onLoadAllSessions={vi.fn()}
       />,
     )
@@ -151,9 +163,7 @@ describe('Sidebar', () => {
         projects={[codexProject()]}
         activeSessionId={null}
         activeProjectEncoded={null}
-        searchQuery="Review the patch"
-        activeHeatmap={null}
-        onSelectSession={vi.fn()}
+        searchQuery="Review the patch"        onSelectSession={vi.fn()}
         onLoadAllSessions={vi.fn()}
       />,
     )
@@ -173,9 +183,7 @@ describe('Sidebar', () => {
         }]}
         activeSessionId={null}
         activeProjectEncoded={null}
-        searchQuery=""
-        activeHeatmap={null}
-        onSelectSession={vi.fn()}
+        searchQuery=""        onSelectSession={vi.fn()}
         onLoadAllSessions={vi.fn()}
       />,
     )
@@ -195,9 +203,7 @@ describe('Sidebar', () => {
         projects={[claudeProject(), codexProject()]}
         activeSessionId="claude-session"
         activeProjectEncoded="-Users-test-claude-app"
-        searchQuery=""
-        activeHeatmap={null}
-        onSelectSession={onSelectSession}
+        searchQuery=""        onSelectSession={onSelectSession}
         onLoadAllSessions={vi.fn()}
       />,
     )
@@ -212,9 +218,7 @@ describe('Sidebar', () => {
         projects={[claudeProject(), codexProject()]}
         activeSessionId="claude-session"
         activeProjectEncoded="-Users-test-claude-app"
-        searchQuery=""
-        activeHeatmap={null}
-        onSelectSession={onSelectSession}
+        searchQuery=""        onSelectSession={onSelectSession}
         onLoadAllSessions={vi.fn()}
       />,
     )

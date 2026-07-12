@@ -125,11 +125,14 @@ describe('AppShell', () => {
       },
     })
 
-    expect(screen.getByText('Learning map')).toBeTruthy()
+    expect(screen.getByText('Task workspace')).toBeTruthy()
     expect(screen.getAllByText('Plan the parser migration').length).toBeGreaterThan(0)
     expect(screen.getByText('Viewing delegated work')).toBeTruthy()
     expect(screen.getAllByText('Inspect the current tree model').length).toBeGreaterThan(0)
     expect(screen.getByText('Zeno · research')).toBeTruthy()
+    expect(screen.getByTitle('Export current session as standalone HTML')).toBeTruthy()
+    expect(screen.getByTitle('Open print preview for the current session snapshot')).toBeTruthy()
+    expect(screen.getByTitle('Create a read-only share link from this snapshot')).toBeTruthy()
   })
 
   it('shows Cherry Studio as a session source in the header copy', () => {
@@ -233,18 +236,18 @@ describe('AppShell', () => {
     expect(mockedLoadAllProjectSessions).toHaveBeenCalledWith('codex:/Users/test/codex-agent-app')
   })
 
-  it('resets scope selection when the store changes even if the active project key stays the same', () => {
-    const state = {
+  it('keeps keyboard paging active after a Codex tab button receives focus', () => {
+    renderShell({
       projects: [
         {
-          source: 'codex' as const,
+          source: 'codex',
           encodedName: 'codex:/Users/test/codex-agent-app',
           decodedName: '/Users/test/codex-agent-app',
           shortName: 'codex-agent-app',
           totalSessionCount: 1,
           sessions: [
             {
-              source: 'codex' as const,
+              source: 'codex',
               id: 'root-session',
               startTime: '2026-03-10T00:00:00.000Z',
               startDisplay: '2026-03-10 08:00',
@@ -253,7 +256,7 @@ describe('AppShell', () => {
               firstPromptPreview: 'Plan the parser migration',
               fileSize: 128,
               recordCount: 4,
-              threadKind: 'primary' as const,
+              threadKind: 'primary',
             },
           ],
         },
@@ -261,7 +264,87 @@ describe('AppShell', () => {
       activeSessionId: 'root-session',
       activeProjectEncoded: 'codex:/Users/test/codex-agent-app',
       activeSessionData: {
-        source: 'codex' as const,
+        source: 'codex',
+        prompts: [
+          {
+            num: 1,
+            preview: 'Plan the parser migration',
+            fullText: 'Plan the parser migration',
+            time: '08:00:00',
+            decision: 'none',
+          },
+        ],
+        messages: [
+          {
+            kind: 'user-prompt',
+            promptNum: 1,
+            text: 'Plan the parser migration',
+            images: [],
+            time: '08:00:00',
+            decision: 'none',
+          },
+        ],
+        heatmap: [],
+        markers: { compacts: 0, plans: 0, clears: 0, forks: 0 },
+      },
+      loading: false,
+      error: null,
+      searchQuery: '',
+      fileStore: null,
+      filter: {
+        thinking: true,
+        toolCalls: true,
+        toolResults: true,
+        aiText: true,
+        team: true,
+        branches: true,
+        markers: true,
+        timeline: true,
+      },
+    })
+
+    const structureButton = screen.getByRole('button', { name: 'Structure' })
+    fireEvent.click(structureButton)
+
+    const scroller = document.querySelector('[data-primary-scroll]') as HTMLElement
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    const scrollTo = vi.fn()
+    scroller.scrollTo = scrollTo
+
+    fireEvent.keyDown(structureButton, { key: 'PageDown' })
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 340, behavior: 'smooth' })
+  })
+
+  it('resets scope selection when the store changes even if the active project key stays the same', () => {
+    const state = {
+      projects: [
+        {
+          source: 'claude' as const,
+          encodedName: '-Users-test-claude-project',
+          decodedName: '/Users/test/claude-project',
+          shortName: 'claude-project',
+          totalSessionCount: 1,
+          sessions: [
+            {
+              source: 'claude' as const,
+              id: 'root-session',
+              startTime: '2026-03-10T00:00:00.000Z',
+              startDisplay: '2026-03-10 08:00',
+              promptCount: 1,
+              toolCount: 0,
+              firstPromptPreview: 'Plan the parser migration',
+              fileSize: 128,
+              recordCount: 4,
+            },
+          ],
+        },
+      ],
+      activeSessionId: 'root-session',
+      activeProjectEncoded: '-Users-test-claude-project',
+      activeSessionData: {
+        source: 'claude' as const,
         messages: [],
         prompts: [],
         heatmap: [],
@@ -288,12 +371,14 @@ describe('AppShell', () => {
       </AppContext.Provider>,
     )
 
+    // The idle Skill ideas promo starts collapsed; expand it before choosing a scope.
+    fireEvent.click(screen.getByRole('button', { name: /skill ideas/i }))
     fireEvent.click(screen.getByRole('button', { name: /this project/i }))
     fireEvent.click(screen.getByRole('button', { name: /analyze with local claude/i }))
 
     expect(mockedAnalyze).toHaveBeenLastCalledWith({
       scope: 'project',
-      projectEncoded: 'codex:/Users/test/codex-agent-app',
+      projectEncoded: '-Users-test-claude-project',
     })
 
     rerender(
@@ -302,11 +387,14 @@ describe('AppShell', () => {
       </AppContext.Provider>,
     )
 
+    // The store change remounts the panel (resetting scope to smart and re-collapsing it),
+    // so expand again before re-triggering analysis.
+    fireEvent.click(screen.getByRole('button', { name: /skill ideas/i }))
     fireEvent.click(screen.getByRole('button', { name: /analyze with local claude/i }))
 
     expect(mockedAnalyze).toHaveBeenLastCalledWith({
       scope: 'smart',
-      projectEncoded: 'codex:/Users/test/codex-agent-app',
+      projectEncoded: '-Users-test-claude-project',
     })
   })
 })

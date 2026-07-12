@@ -89,6 +89,26 @@ describe('SkillRecommendationsPanel', () => {
     expect(screen.getByText(/Scout, skeptic, and writer agents/i)).toBeTruthy()
   })
 
+  it('collapses the fresh idle promo by default and expands on demand', () => {
+    render(
+      <SkillRecommendationsPanel
+        recommendations={makeState({ analysis: null })}
+        activeProject={{ encodedName: 'codex:/Users/test/bb-browser', shortName: 'bb-browser' }}
+        onAnalyze={() => {}}
+        onRecheck={() => {}}
+      />,
+    )
+
+    // Collapsed by default: the heavy promo body (scope cards + CTA) is not rendered yet,
+    // so the idle panel does not dominate the sidebar rail.
+    expect(screen.getByText('No strong pattern yet')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /analyze with local claude/i })).toBeNull()
+
+    // Expanding the one-line header reveals the scope selector and CTA.
+    fireEvent.click(screen.getByRole('button', { name: /skill ideas/i }))
+    expect(screen.getByRole('button', { name: /analyze with local claude/i })).toBeTruthy()
+  })
+
   it('lets the user choose a scope before triggering analysis', () => {
     const onAnalyze = vi.fn()
     render(
@@ -100,6 +120,8 @@ describe('SkillRecommendationsPanel', () => {
       />,
     )
 
+    // The idle promo starts collapsed, so expand it before choosing a scope.
+    fireEvent.click(screen.getByRole('button', { name: /skill ideas/i }))
     fireEvent.click(screen.getByRole('button', { name: /this project/i }))
     fireEvent.click(screen.getByRole('button', { name: /analyze with local claude/i }))
 
