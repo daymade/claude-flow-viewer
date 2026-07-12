@@ -69,12 +69,13 @@ async function setupPlugin() {
 
   if (!middleware) throw new Error('Plugin middleware was not registered')
 
-  return async function request(url: string, init: { method?: string; body?: string } = {}) {
+  return async function request(url: string, init: { method?: string; body?: string; headers?: Record<string, string> } = {}) {
     return new Promise<{ statusCode: number; body: string; headers: Map<string, string>; nextCalled: boolean }>((resolve) => {
       const res = new FakeResponse(resolve)
-      const req = Readable.from(init.body ? [init.body] : []) as Readable & { url?: string; method?: string }
+      const req = Readable.from(init.body ? [init.body] : []) as Readable & { url?: string; method?: string; headers?: Record<string, string> }
       req.url = url
       req.method = init.method ?? 'GET'
+      req.headers = init.headers ?? {}
       middleware!(req as never, res, () => res.markNext())
     })
   }
@@ -711,6 +712,138 @@ describe('vite-plugin-claude-data', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toContain('"type":"session_meta"')
     expect(res.body).toContain('"cwd":"/Users/test/workspace/codex-app"')
+  })
+
+  it('resolves a Codex session by bare id, bypassing the scanned list', async () => {
+    const request = await setupPlugin()
+    const res = await request('/api/resolve-session?id=019cd000-0000-7000-8000-000000000001')
+    expect(res.statusCode).toBe(200)
+    const ref = JSON.parse(res.body) as { source: string; projectEncoded: string; sessionId: string; meta?: { id: string } }
+    expect(ref.source).toBe('codex')
+    expect(ref.projectEncoded).toBe('codex:/Users/test/workspace/codex-app')
+    expect(ref.sessionId).toBe('019cd000-0000-7000-8000-000000000001')
+    expect(ref.meta?.id).toBe('019cd000-0000-7000-8000-000000000001')
+  })
+
+  it('resolves a Claude session by bare id whose filename is a UUID', async () => {
+    const claudeUuid = '04207f06-471e-4983-b97a-029d611b56c5'
+    await writeJsonl(
+      path.join(tempRoot, '.claude', 'projects', 'demo-project', `${claudeUuid}.jsonl`),
+      [{ type: 'user', timestamp: '2026-03-10T00:00:00.000Z', message: { role: 'user', content: 'resolve me' } }],
+    )
+    const request = await setupPlugin()
+    const res = await request(`/api/resolve-session?id=${claudeUuid}`)
+    expect(res.statusCode).toBe(200)
+    const ref = JSON.parse(res.body) as { source: string; projectEncoded: string; sessionId: string }
+    expect(ref.source).toBe('claude')
+    expect(ref.projectEncoded).toBe('demo-project')
+    expect(ref.sessionId).toBe(claudeUuid)
+  })
+
+  it('normalizes an uppercase / .jsonl-suffixed id before resolving', async () => {
+    const request = await setupPlugin()
+    const res = await request('/api/resolve-session?id=' + encodeURIComponent('019CD000-0000-7000-8000-000000000001.jsonl'))
+    expect(res.statusCode).toBe(200)
+    const ref = JSON.parse(res.body) as { source: string; sessionId: string }
+    expect(ref.source).toBe('codex')
+    expect(ref.sessionId).toBe('019cd000-0000-7000-8000-000000000001')
+  })
+
+  it('returns 404 when the id names no session', async () => {
+    const request = await setupPlugin()
+    const res = await request('/api/resolve-session?id=00000000-0000-4000-8000-000000000000')
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('rejects a path-traversal id with 400 (server validates, never trusts the client detector)', async () => {
+    const request = await setupPlugin()
+    const res = await request('/api/resolve-session?id=' + encodeURIComponent('../../../etc/passwd'))
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('rejects a non-identifier query and a missing id with 400', async () => {
+    const request = await setupPlugin()
+    expect((await request('/api/resolve-session?id=not-a-session-id')).statusCode).toBe(400)
+    expect((await request('/api/resolve-session')).statusCode).toBe(400)
+  })
+
+  it('accepts a Cherry agent-session id shape and probes Cherry instead of rejecting it', async () => {
+    const request = await setupPlugin()
+    // A well-formed agent id (session_<epoch>_<rand>) that does not exist → 404 (validated, probed
+    // Cherry, missed) rather than 400 (which would mean the id shape was rejected before any probe).
+    const res = await request('/api/resolve-session?id=session_9999999999999_nope')
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('resolves a Claude session to a hit with meta even when the head has no scannable prompt', async () => {
+    const uuid = '11111111-2222-4333-8444-555555555555'
+    // A session led by a non-prompt record: quickScanMetadata cannot extract meta from the head,
+    // yet the located file must still resolve WITH meta so the client can derive activeSession.
+    await writeJsonl(
+      path.join(tempRoot, '.claude', 'projects', 'demo-project', `${uuid}.jsonl`),
+      [{ type: 'file-history-snapshot', messageId: 'm1', snapshot: {} }],
+    )
+    const request = await setupPlugin()
+    const res = await request(`/api/resolve-session?id=${uuid}`)
+    expect(res.statusCode).toBe(200)
+    const ref = JSON.parse(res.body) as { source: string; sessionId: string; meta?: { id: string } }
+    expect(ref.source).toBe('claude')
+    expect(ref.sessionId).toBe(uuid)
+    expect(ref.meta).toBeTruthy()
+    expect(ref.meta?.id).toBe(uuid)
+  })
+
+  it('persists standalone share snapshots and serves them by id', async () => {
+    const request = await setupPlugin()
+    const html = '<!doctype html><html><head><title>Demo</title></head><body><h1>Readable snapshot</h1></body></html>'
+
+    const res = await request('/api/share', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Demo snapshot', html }),
+    })
+
+    expect(res.statusCode).toBe(200)
+    const payload = JSON.parse(res.body) as { id: string; url: string }
+    expect(payload.id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(payload.url).toBe(`/share/${payload.id}/`)
+
+    const served = await request(payload.url)
+    expect(served.statusCode).toBe(200)
+    expect(served.headers.get('Content-Type')).toBe('text/html; charset=utf-8')
+    expect(served.body).toBe(html)
+
+    const meta = JSON.parse(await fs.readFile(path.join(tempRoot, '.claude-flow-viewer', 'shares', payload.id, 'meta.json'), 'utf-8')) as { title: string }
+    expect(meta.title).toBe('Demo snapshot')
+  })
+
+  it('serves share snapshots sandboxed so injected JS cannot reach the viewer origin', async () => {
+    const request = await setupPlugin()
+    const post = await request('/api/share', {
+      method: 'POST',
+      body: JSON.stringify({ html: '<!doctype html><html><body>x</body></html>' }),
+    })
+    const { url } = JSON.parse(post.body) as { url: string }
+    const served = await request(url)
+    // sandbox (opaque origin) neutralizes a stored-XSS payload; nosniff prevents content-type games.
+    expect(served.headers.get('Content-Security-Policy')).toContain('sandbox')
+    expect(served.headers.get('X-Content-Type-Options')).toBe('nosniff')
+  })
+
+  it('rejects a cross-origin POST /api/share (CSRF) but allows same-origin', async () => {
+    const request = await setupPlugin()
+    const body = JSON.stringify({ html: '<!doctype html><html><body>x</body></html>' })
+    const cross = await request('/api/share', {
+      method: 'POST',
+      body,
+      headers: { origin: 'http://evil.example.com', host: 'localhost:5173' },
+    })
+    expect(cross.statusCode).toBe(403)
+    const same = await request('/api/share', {
+      method: 'POST',
+      body,
+      headers: { origin: 'http://localhost:5173', host: 'localhost:5173' },
+    })
+    expect(same.statusCode).toBe(200)
   })
 
   it('reads a Cherry Studio session through the source-aware session route', async () => {

@@ -167,6 +167,186 @@ describe('codex parsing', () => {
       summary: 'done',
     })
   })
+
+  it('parses current Codex event messages and object-shaped tool outputs', () => {
+    const content = jsonl(
+      {
+        timestamp: '2026-06-29T04:00:29.000Z',
+        type: 'session_meta',
+        payload: {
+          id: '019f1189-2820-7371-99ea-d0fb51025384',
+          timestamp: '2026-06-29T04:00:29.000Z',
+          cwd: '/Users/test/workspace/research',
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:30.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'user_message',
+          message: '打开 Kimi 查询仙工智能报告',
+          images: [],
+          local_images: [],
+          text_elements: [],
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:31.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'agent_message',
+          message: '我会先读取工具说明，再打开 Kimi。',
+          phase: 'commentary',
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:32.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'tool_search_call',
+          arguments: { query: 'computer use', limit: 8 },
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:33.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'tool_search_output',
+          status: 'completed',
+          tools: [
+            {
+              type: 'namespace',
+              name: 'mcp__computer_use',
+              tools: [{ type: 'function', name: 'get_app_state' }],
+            },
+          ],
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:34.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'mcp_tool_call_end',
+          invocation: {
+            server: 'computer-use',
+            tool: 'get_app_state',
+            arguments: { app: 'Kimi' },
+          },
+          result: {
+            Ok: {
+              content: [
+                { type: 'text', text: 'Window: Kimi' },
+              ],
+            },
+          },
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:35.000Z',
+        type: 'compacted',
+        payload: {},
+      },
+    )
+
+    const result = parseSessionContent(content, 'codex')
+    const promptMessages = result.messages.filter((message) => message.kind === 'user-prompt')
+    const toolCalls = result.messages.filter((message) => message.kind === 'ai-tool-use')
+    const toolResults = result.messages.filter((message) => message.kind === 'tool-result')
+
+    expect(promptMessages).toHaveLength(1)
+    expect(promptMessages[0]).toMatchObject({ text: '打开 Kimi 查询仙工智能报告' })
+    expect(result.messages.some((message) => message.kind === 'ai-text' && message.text.includes('读取工具说明'))).toBe(true)
+    expect(toolCalls).toHaveLength(2)
+    expect(toolResults.some((message) => message.content.includes('mcp__computer_use.get_app_state'))).toBe(true)
+    expect(toolResults.some((message) => message.content.includes('Window: Kimi'))).toBe(true)
+    expect(toolResults.every((message) => !message.content.includes('[object Object]'))).toBe(true)
+    expect(result.markers.compacts).toBe(1)
+  })
+
+  it('preserves MCP Ok error status on current Codex tool events', () => {
+    const content = jsonl(
+      {
+        timestamp: '2026-06-29T04:00:29.000Z',
+        type: 'session_meta',
+        payload: {
+          id: '019f1189-2820-7371-99ea-d0fb51025384',
+          timestamp: '2026-06-29T04:00:29.000Z',
+          cwd: '/Users/test/workspace/research',
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:34.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'mcp_tool_call_end',
+          invocation: {
+            server: 'computer-use',
+            tool: 'click',
+            arguments: { x: 10, y: 20 },
+          },
+          result: {
+            Ok: {
+              isError: true,
+              content: [
+                { type: 'text', text: 'Element not found' },
+              ],
+            },
+          },
+        },
+      },
+    )
+
+    const result = parseSessionContent(content, 'codex')
+    const toolResult = result.messages.find((message) => message.kind === 'tool-result')
+
+    expect(toolResult).toMatchObject({
+      kind: 'tool-result',
+      content: 'Element not found',
+      isError: true,
+    })
+  })
+
+  it('deduplicates mixed event_msg and response_item user prompt shapes', () => {
+    const content = jsonl(
+      {
+        timestamp: '2026-06-29T04:00:29.000Z',
+        type: 'session_meta',
+        payload: {
+          id: '019f1189-2820-7371-99ea-d0fb51025384',
+          timestamp: '2026-06-29T04:00:29.000Z',
+          cwd: '/Users/test/workspace/research',
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:30.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'user_message',
+          message: '打开 Kimi 查询仙工智能报告',
+          text_elements: [{ type: 'text', text: '打开 Kimi 查询仙工智能报告' }],
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:30.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '打开 Kimi 查询仙工智能报告' }],
+        },
+      },
+    )
+
+    const result = parseSessionContent(content, 'codex')
+    const promptMessages = result.messages.filter((message) => message.kind === 'user-prompt')
+
+    expect(promptMessages).toHaveLength(1)
+    expect(promptMessages[0]).toMatchObject({
+      promptNum: 1,
+      text: '打开 Kimi 查询仙工智能报告',
+    })
+    expect(result.prompts).toHaveLength(1)
+  })
 })
 
 describe('codex quick scan', () => {
@@ -219,5 +399,83 @@ describe('codex quick scan', () => {
         agentRole: 'worker',
       },
     })
+  })
+
+  it('counts prompts and tool calls from the head when Codex writes event_msg records', () => {
+    const head = jsonl(
+      {
+        timestamp: '2026-06-29T04:00:29.000Z',
+        type: 'session_meta',
+        payload: {
+          id: '019f1189-2820-7371-99ea-d0fb51025384',
+          timestamp: '2026-06-29T04:00:29.000Z',
+          cwd: '/Users/test/workspace/research',
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:30.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'user_message',
+          message: '打开 Kimi 查询仙工智能报告',
+          images: [],
+          local_images: [],
+          text_elements: [],
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:32.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'tool_search_call',
+          arguments: { query: 'computer use' },
+        },
+      },
+    )
+
+    const result = quickScanCodexMetadata(head, '019f1189-2820-7371-99ea-d0fb51025384', 2048)
+
+    expect(result?.meta.firstPromptPreview).toBe('打开 Kimi 查询仙工智能报告')
+    expect(result?.meta.promptCount).toBe(1)
+    expect(result?.meta.toolCount).toBe(1)
+    expect(result?.meta.recordCount).toBe(3)
+  })
+
+  it('deduplicates mixed prompt shapes during quick scan', () => {
+    const head = jsonl(
+      {
+        timestamp: '2026-06-29T04:00:29.000Z',
+        type: 'session_meta',
+        payload: {
+          id: '019f1189-2820-7371-99ea-d0fb51025384',
+          timestamp: '2026-06-29T04:00:29.000Z',
+          cwd: '/Users/test/workspace/research',
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:30.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'user_message',
+          message: '打开 Kimi 查询仙工智能报告',
+          text_elements: [{ type: 'text', text: '打开 Kimi 查询仙工智能报告' }],
+        },
+      },
+      {
+        timestamp: '2026-06-29T04:00:30.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '打开 Kimi 查询仙工智能报告' }],
+        },
+      },
+    )
+
+    const result = quickScanCodexMetadata(head, '019f1189-2820-7371-99ea-d0fb51025384', 2048)
+
+    expect(result?.meta.firstPromptPreview).toBe('打开 Kimi 查询仙工智能报告')
+    expect(result?.meta.promptCount).toBe(1)
+    expect(result?.meta.recordCount).toBe(3)
   })
 })

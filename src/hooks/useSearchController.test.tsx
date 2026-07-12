@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { SearchBackendStatus } from '../lib/fs-access'
 import type { SearchResult } from '../lib/search'
+import type { ResolvedSessionRef, SessionMeta } from '../types/session'
 import { useSearchController } from './useSearchController'
 
 afterEach(() => {
@@ -30,6 +31,8 @@ const UNAVAILABLE_BACKEND: SearchBackendStatus = {
   reason: 'server-required',
   message: 'Search requires the local Node/Vite server API and is unavailable in browser-only file access mode.',
 }
+
+const BARE_ID = '04207f06-471e-4983-b97a-029d611b56c5'
 
 function makeResult(): SearchResult {
   return {
@@ -60,24 +63,44 @@ function makeResult(): SearchResult {
   }
 }
 
+function makeMeta(id: string): SessionMeta {
+  return {
+    source: 'claude',
+    id,
+    startTime: '2026-03-10T00:00:00.000Z',
+    startDisplay: '2026-03-10 00:00',
+    promptCount: 3,
+    toolCount: 1,
+    firstPromptPreview: 'Resolve me',
+    fileSize: 1024,
+    recordCount: 10,
+  }
+}
+
+function makeStore(overrides: Record<string, unknown> = {}) {
+  return {
+    scanProjects: vi.fn(),
+    readSessionContent: vi.fn(),
+    scanAllProjectSessions: vi.fn(),
+    readToolResult: vi.fn(),
+    getSearchBackendStatus: vi.fn().mockResolvedValue(READY_BACKEND),
+    searchSessions: vi.fn().mockResolvedValue([]),
+    analyzeSkillRecommendations: vi.fn(),
+    getSkillRecommendationBackendStatus: vi.fn(),
+    ...overrides,
+  }
+}
+
 describe('useSearchController', () => {
   it('uses the server search backend and turns a selected result into a jump target', async () => {
-    const fileStore = {
-      scanProjects: vi.fn(),
-      readSessionContent: vi.fn(),
-      scanAllProjectSessions: vi.fn(),
-      readToolResult: vi.fn(),
-      getSearchBackendStatus: vi.fn().mockResolvedValue(READY_BACKEND),
-      searchSessions: vi.fn().mockResolvedValue([makeResult()]),
-      analyzeSkillRecommendations: vi.fn(),
-      getSkillRecommendationBackendStatus: vi.fn(),
-    }
+    const fileStore = makeStore({ searchSessions: vi.fn().mockResolvedValue([makeResult()]) })
     const loadSession = vi.fn().mockResolvedValue(undefined)
 
     const { result } = renderHook(() => useSearchController({
       query: 'neon skyline',
       fileStore,
       loadSession,
+      upsertSessionMeta: vi.fn(),
     }))
 
     await waitFor(() => {
@@ -105,21 +128,16 @@ describe('useSearchController', () => {
   })
 
   it('surfaces an explicit unavailable state and does not query searchSessions without the server', async () => {
-    const fileStore = {
-      scanProjects: vi.fn(),
-      readSessionContent: vi.fn(),
-      scanAllProjectSessions: vi.fn(),
-      readToolResult: vi.fn(),
+    const fileStore = makeStore({
       getSearchBackendStatus: vi.fn().mockResolvedValue(UNAVAILABLE_BACKEND),
       searchSessions: vi.fn(),
-      analyzeSkillRecommendations: vi.fn(),
-      getSkillRecommendationBackendStatus: vi.fn(),
-    }
+    })
 
     const { result } = renderHook(() => useSearchController({
       query: 'neon skyline',
       fileStore,
       loadSession: vi.fn().mockResolvedValue(undefined),
+      upsertSessionMeta: vi.fn(),
     }))
 
     await waitFor(() => {
@@ -128,5 +146,107 @@ describe('useSearchController', () => {
 
     expect(result.current.search.error).toContain('local Node/Vite server API')
     expect(fileStore.searchSessions).not.toHaveBeenCalled()
+  })
+
+  it('resolves a bare session id through the resolve lane and opens it with a meta upsert', async () => {
+    const resolvedRef: ResolvedSessionRef = {
+      source: 'claude',
+      projectEncoded: 'demo-project',
+      sessionId: BARE_ID,
+      meta: makeMeta(BARE_ID),
+    }
+    const resolveSession = vi.fn().mockResolvedValue(resolvedRef)
+    const fileStore = makeStore({ resolveSession })
+    const loadSession = vi.fn().mockResolvedValue(undefined)
+    const upsertSessionMeta = vi.fn()
+
+    const { result } = renderHook(() => useSearchController({
+      query: BARE_ID,
+      fileStore,
+      loadSession,
+      upsertSessionMeta,
+    }))
+
+    await waitFor(() => {
+      expect(result.current.search.resolvedStatus).toBe('hit')
+      expect(result.current.search.resolved).toEqual(resolvedRef)
+    })
+    expect(resolveSession).toHaveBeenCalledWith(BARE_ID)
+
+    await act(async () => {
+      await result.current.openResolved()
+    })
+    // Meta is injected BEFORE loadSession so AppShell can derive activeSession, and the authoritative
+    // source is threaded so parsing does not re-derive it from a not-yet-listed project.
+    expect(upsertSessionMeta).toHaveBeenCalledWith(resolvedRef)
+    expect(loadSession).toHaveBeenCalledWith('demo-project', BARE_ID, 'claude')
+  })
+
+  it('never touches the resolve lane for a normal phrase that merely embeds a UUID', async () => {
+    const resolveSession = vi.fn()
+    const fileStore = makeStore({
+      searchSessions: vi.fn().mockResolvedValue([makeResult()]),
+      resolveSession,
+    })
+
+    const { result } = renderHook(() => useSearchController({
+      query: `why did ${BARE_ID} crash`,
+      fileStore,
+      loadSession: vi.fn(),
+      upsertSessionMeta: vi.fn(),
+    }))
+
+    await waitFor(() => {
+      expect(result.current.search.status).toBe('ready')
+    })
+    expect(resolveSession).not.toHaveBeenCalled()
+    expect(result.current.search.resolvedStatus).toBe('idle')
+  })
+
+  it('resolves independently of the search backend (browser mode: available=false)', async () => {
+    const resolvedRef: ResolvedSessionRef = {
+      source: 'claude',
+      projectEncoded: 'demo-project',
+      sessionId: BARE_ID,
+      meta: makeMeta(BARE_ID),
+    }
+    const resolveSession = vi.fn().mockResolvedValue(resolvedRef)
+    const searchSessions = vi.fn()
+    const fileStore = makeStore({
+      getSearchBackendStatus: vi.fn().mockResolvedValue(UNAVAILABLE_BACKEND),
+      searchSessions,
+      resolveSession,
+    })
+
+    const { result } = renderHook(() => useSearchController({
+      query: BARE_ID,
+      fileStore,
+      loadSession: vi.fn(),
+      upsertSessionMeta: vi.fn(),
+    }))
+
+    await waitFor(() => {
+      expect(result.current.search.resolvedStatus).toBe('hit')
+    })
+    expect(resolveSession).toHaveBeenCalled()
+    expect(result.current.search.resolved).toEqual(resolvedRef)
+    // The full-text search itself stays unavailable — the two lanes are independent.
+    expect(searchSessions).not.toHaveBeenCalled()
+  })
+
+  it('marks resolvedStatus "miss" when a bare id resolves to nothing', async () => {
+    const fileStore = makeStore({ resolveSession: vi.fn().mockResolvedValue(null) })
+
+    const { result } = renderHook(() => useSearchController({
+      query: '00000000-0000-4000-8000-000000000000',
+      fileStore,
+      loadSession: vi.fn(),
+      upsertSessionMeta: vi.fn(),
+    }))
+
+    await waitFor(() => {
+      expect(result.current.search.resolvedStatus).toBe('miss')
+    })
+    expect(result.current.search.resolved).toBeNull()
   })
 })

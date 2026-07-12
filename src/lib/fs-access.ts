@@ -1,4 +1,5 @@
-import type { ProjectMeta, SessionMeta, SessionSource } from '../types/session'
+import { createMinimalSessionMeta } from '../types/session'
+import type { ProjectMeta, SessionMeta, SessionSource, ResolvedSessionRef } from '../types/session'
 import type { SearchQueryOptions, SearchResult, SearchStats } from './search'
 import type {
   SkillRecommendationAnalysis,
@@ -20,6 +21,9 @@ import { selectCodexRootSessions } from './codex-navigation'
 const MAX_CLAUDE_SESSIONS_PER_PROJECT = 50
 const MAX_CODEX_GROUPS_PER_PROJECT = 50
 const CLAUDE_PREVIEW_BYTES = 4096
+// Resolve reads a larger head than the scan preview (parity with the server RESOLVE_HEAD_BYTES) so
+// CJK Claude sessions, which pack ~3 bytes/char, still yield meta in browser mode.
+const RESOLVE_HEAD_BYTES = CLAUDE_PREVIEW_BYTES * 4
 const CODEX_SCAN_CONCURRENCY = 24
 
 type ScanSummary = {
@@ -47,10 +51,38 @@ export interface FileStore {
   getSkillRecommendationBackendStatus(): Promise<SkillRecommendationBackendStatus>
   /** Optional browser/manual-mode notice for unsupported source layouts. */
   getBrowserModeNotice?(): Promise<string | null>
+  /**
+   * Resolve a session by identifier alone (bare id / `topic:` id), independent of the scanned
+   * project list. Returns null when the id names no locatable session in this store. Optional
+   * because browser/manual stores can only resolve claude/codex (never Cherry, which needs the
+   * local server). SSOT for the "known-item" resolve lane.
+   */
+  resolveSession?(input: string): Promise<ResolvedSessionRef | null>
 }
 
 export function getCherryStudioBrowserModeNotice(): string {
   return 'Cherry Studio sessions are unavailable in browser-only file access mode because the browser/manual store cannot read the local agents.db database. Use npm run dev or npm run preview to load Cherry Studio sessions through the local Node/Vite API.'
+}
+
+/** Single inference of source from an encoded project id, used by every store's resolve path. */
+function inferSourceFromProjectEncoded(projectEncoded: string): SessionSource {
+  if (isCherryStudioProjectId(projectEncoded)) return 'cherrystudio'
+  return isCodexProjectId(projectEncoded) ? 'codex' : 'claude'
+}
+
+/** Quick-scan a browser File/handle-backed session to populate meta for the resolve lane. */
+async function quickScanBrowserFile(file: File, sessionId: string, source: SessionSource): Promise<SessionMeta> {
+  if (source === 'codex') {
+    const head = await file.slice(0, CODEX_PREVIEW_BYTES).text()
+    const scanned = quickScanCodexMetadata(head, sessionId, file.size)?.meta
+    if (scanned) return scanned
+  } else {
+    const head = await file.slice(0, RESOLVE_HEAD_BYTES).text()
+    const scanned = quickScanMetadata(head, sessionId, file.size)
+    if (scanned) return scanned
+  }
+  // Mirror the server: a located file always carries meta (best-effort mtime keeps sort order sane).
+  return createMinimalSessionMeta(source, sessionId, file.size, file.lastModified)
 }
 
 export interface SearchBackendReadyStatus {
@@ -277,6 +309,24 @@ class FSAccessStore implements FileStore {
       this.browserModeNoticePromise = this.detectBrowserModeNotice()
     }
     return this.browserModeNoticePromise
+  }
+
+  async resolveSession(input: string): Promise<ResolvedSessionRef | null> {
+    const trimmed = input.trim()
+    if (trimmed.startsWith('topic:')) return null // Cherry needs the local server (no agents.db in browser)
+    const sessionId = trimmed.toLowerCase()
+    if (this.sessionFiles.size === 0) await this.scanProjects()
+    // sessionFiles is fully populated before any 50-cap slice, so old sessions resolve too.
+    for (const [key, handle] of this.sessionFiles) {
+      const idx = key.lastIndexOf('/')
+      if (idx < 0 || key.slice(idx + 1).toLowerCase() !== sessionId) continue
+      const projectEncoded = key.slice(0, idx)
+      const source = inferSourceFromProjectEncoded(projectEncoded)
+      if (source === 'cherrystudio') return null
+      const meta = await quickScanBrowserFile(await handle.getFile(), sessionId, source)
+      return { source, projectEncoded, sessionId, meta }
+    }
+    return null
   }
 
   async searchSessions(): Promise<SearchResult[]> {
@@ -579,6 +629,32 @@ class InputFallbackStore implements FileStore {
     return file.text()
   }
 
+  async resolveSession(input: string): Promise<ResolvedSessionRef | null> {
+    const trimmed = input.trim()
+    if (trimmed.startsWith('topic:')) return null // Cherry needs the local server
+    const sessionId = trimmed.toLowerCase()
+    if (this.claudeFiles.size === 0 && this.codexFiles.size === 0) await this.scanProjects()
+    // codex files are keyed by sessionId alone — recover the project from the file head. Report a
+    // definitive result here rather than falling through to the claude loop (keyed differently, it
+    // can never match a codex id and would turn a present file into a false miss).
+    const codexFile = this.codexFiles.get(sessionId)
+    if (codexFile) {
+      const scanned = quickScanCodexMetadata(await codexFile.slice(0, CODEX_PREVIEW_BYTES).text(), sessionId, codexFile.size)
+      return scanned
+        ? { source: 'codex', projectEncoded: scanned.projectEncoded, sessionId, meta: scanned.meta }
+        : null
+    }
+    // claude files are keyed by `${projectEncoded}/${sessionId}`.
+    for (const [key, file] of this.claudeFiles) {
+      const idx = key.lastIndexOf('/')
+      if (idx < 0 || key.slice(idx + 1).toLowerCase() !== sessionId) continue
+      const projectEncoded = key.slice(0, idx)
+      const meta = await quickScanBrowserFile(file, sessionId, 'claude')
+      return { source: 'claude', projectEncoded, sessionId, meta }
+    }
+    return null
+  }
+
   async readToolResult(projectEncoded: string, sessionId: string, relativePath: string): Promise<string> {
     void projectEncoded
     void sessionId
@@ -782,6 +858,19 @@ class APIFileStore implements FileStore {
     return null
   }
 
+  async resolveSession(input: string): Promise<ResolvedSessionRef | null> {
+    const res = await fetch(`/api/resolve-session?id=${encodeURIComponent(input)}`)
+    // 404 (no such session) and 400 (invalid id) are genuine misses; a 5xx is a server error that
+    // must surface as an error, not be flattened into "not found".
+    if (res.status === 404 || res.status === 400) return null
+    if (!res.ok) throw new Error(`Resolve failed: ${res.status}`)
+    const ref = await res.json() as ResolvedSessionRef
+    // Remember the resolved source so a later readSessionContent for a not-yet-scanned project
+    // (e.g. beyond the 50-cap) picks the correct API route instead of guessing from the id.
+    this.projectSources.set(ref.projectEncoded, ref.source)
+    return ref
+  }
+
   private rememberProjectSources(projects: ProjectMeta[]) {
     for (const project of projects) {
       this.projectSources.set(project.encodedName, project.source)
@@ -789,10 +878,7 @@ class APIFileStore implements FileStore {
   }
 
   private resolveProjectSource(projectEncoded: string): SessionSource {
-    const source = this.projectSources.get(projectEncoded)
-    if (source) return source
-    if (isCherryStudioProjectId(projectEncoded)) return 'cherrystudio'
-    return isCodexProjectId(projectEncoded) ? 'codex' : 'claude'
+    return this.projectSources.get(projectEncoded) ?? inferSourceFromProjectEncoded(projectEncoded)
   }
 }
 

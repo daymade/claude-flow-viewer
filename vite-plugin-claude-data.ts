@@ -2,9 +2,11 @@ import type { Plugin } from 'vite'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import crypto from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 
-import type { ProjectMeta, SessionMeta, SessionSource } from './src/types/session'
+import { createMinimalSessionMeta } from './src/types/session'
+import type { ProjectMeta, SessionMeta, SessionSource, ResolvedSessionRef } from './src/types/session'
 import { quickScanMetadata, decodeProjectName, extractShortName, disambiguateShortNames } from './src/lib/parser'
 import {
   CODEX_PREVIEW_BYTES,
@@ -25,6 +27,10 @@ const MAX_CLAUDE_SESSIONS_PER_PROJECT = 50
 const MAX_CODEX_GROUPS_PER_PROJECT = 50
 const MAX_CHERRY_SESSIONS_PER_PROJECT = 50
 const CLAUDE_PREVIEW_BYTES = 4096
+// The resolve probe reads a larger head than scan's character-slice: readHead counts BYTES, and CJK
+// sessions pack ~3 bytes/char, so 4× keeps ≥4096 chars of coverage (parity with scan's content.slice)
+// so quickScan finds the first user message and returns meta for the list upsert.
+const RESOLVE_HEAD_BYTES = CLAUDE_PREVIEW_BYTES * 4
 const CODEX_SCAN_CONCURRENCY = 24
 
 type ScanSummary = {
@@ -50,6 +56,11 @@ type SearchRequestBody = {
 
 type SkillRecommendationRequestBody = {
   options?: SkillRecommendationAnalyzeOptions
+}
+
+type ShareRequestBody = {
+  title?: string
+  html?: string
 }
 
 type MiddlewareRegistrar = (fn: (req: IncomingMessage & { url?: string; method?: string }, res: {
@@ -79,6 +90,7 @@ export function claudeDataPlugin(): Plugin {
   const claudeProjectsDir = path.join(homeDir, '.claude', 'projects')
   const codexRootDir = path.join(homeDir, '.codex')
   const codexSessionsDir = path.join(codexRootDir, 'sessions')
+  const shareRootDir = path.join(homeDir, '.claude-flow-viewer', 'shares')
   const sessionScanCache = new SessionScanCache(getSessionScanCachePath(homeDir))
   const searchService = createSQLiteSearchService({
     claudeProjectsDir,
@@ -106,6 +118,83 @@ export function claudeDataPlugin(): Plugin {
         }).catch((err) => {
           res.statusCode = 500
           res.end(JSON.stringify({ error: String(err) }))
+        })
+        return
+      }
+
+      if (pathname === '/api/share') {
+        if ((req.method ?? 'GET').toUpperCase() !== 'POST') {
+          res.statusCode = 405
+          res.end('Use POST /api/share')
+          return
+        }
+
+        // Reject cross-site writes (CSRF): a present Origin must match the server host. A malicious
+        // page's background POST carries its own Origin and is blocked here; same-origin viewer
+        // requests and header-less local tools (curl) are allowed through.
+        const shareHeaders = (req as IncomingMessage).headers ?? {}
+        const shareOrigin = typeof shareHeaders.origin === 'string' ? shareHeaders.origin : ''
+        if (shareOrigin) {
+          let originHost = ''
+          try { originHost = new URL(shareOrigin).host } catch { originHost = '' }
+          if (!shareHeaders.host || originHost !== shareHeaders.host) {
+            res.statusCode = 403
+            res.end('Cross-origin share requests are not allowed')
+            return
+          }
+        }
+
+        readJsonBody(req).then(async (body) => {
+          const payload = body as ShareRequestBody
+          if (!payload.html || typeof payload.html !== 'string') {
+            throw new Error('Missing HTML snapshot')
+          }
+          if (!/^<!doctype html>/i.test(payload.html.trim())) {
+            throw new Error('Share payload must be a complete HTML document')
+          }
+
+          const id = crypto.randomUUID()
+          const shareDir = path.join(shareRootDir, id)
+          await fs.promises.mkdir(shareDir, { recursive: true })
+          await fs.promises.writeFile(path.join(shareDir, 'index.html'), payload.html, 'utf-8')
+          await fs.promises.writeFile(path.join(shareDir, 'meta.json'), JSON.stringify({
+            id,
+            title: payload.title || 'Decision Flow snapshot',
+            createdAt: new Date().toISOString(),
+          }, null, 2), 'utf-8')
+
+          return { id, url: `/share/${id}/` }
+        }).then((payload) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(payload))
+        }).catch((err) => {
+          res.statusCode = 500
+          res.end(String(err.message || err))
+        })
+        return
+      }
+
+      if (pathname.startsWith('/share/')) {
+        const id = pathname.slice('/share/'.length).split('/')[0]
+        if (!/^[0-9a-f-]{36}$/i.test(id)) {
+          res.statusCode = 404
+          res.end('Share not found')
+          return
+        }
+
+        const filePath = path.join(shareRootDir, id, 'index.html')
+        fs.promises.readFile(filePath, 'utf-8').then((html) => {
+          res.setHeader('Content-Type', 'text/html; charset=utf-8')
+          // Serve snapshots in a sandboxed, opaque origin. The snapshot's own scroll-to-top JS still
+          // runs (allow-scripts), but any injected JS runs in a null origin — it cannot reach the
+          // viewer's same-origin APIs (/api/session, /api/resolve-session, …), cookies, or storage,
+          // which neutralizes a stored-XSS payload smuggled in via a CSRF POST to /api/share.
+          res.setHeader('Content-Security-Policy', 'sandbox allow-scripts allow-downloads')
+          res.setHeader('X-Content-Type-Options', 'nosniff')
+          res.end(html)
+        }).catch(() => {
+          res.statusCode = 404
+          res.end('Share not found')
         })
         return
       }
@@ -278,6 +367,34 @@ export function claudeDataPlugin(): Plugin {
         return
       }
 
+      if (pathname === '/api/resolve-session') {
+        let id: string | null = null
+        try {
+          id = new URL(url, 'http://localhost').searchParams.get('id')
+        } catch {
+          id = null
+        }
+        if (!id) {
+          res.statusCode = 400
+          res.end('Need ?id=<session id>')
+          return
+        }
+
+        resolveSessionById(id, claudeProjectsDir, codexSessionsDir).then((ref) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(ref))
+        }).catch((err) => {
+          if (err instanceof ValidationError) {
+            res.statusCode = 400
+            res.end(String(err.message))
+            return
+          }
+          res.statusCode = err instanceof NotFoundError ? 404 : 500
+          res.end(String(err.message || err))
+        })
+        return
+      }
+
       if (pathname.startsWith('/api/tool-result/')) {
         const rest = pathname.slice('/api/tool-result/'.length)
         const parts = rest.split('/')
@@ -437,8 +554,153 @@ async function readSessionContent(
     return fs.promises.readFile(filePath, 'utf-8')
   }
 
+  if (hasPathTraversal(projectEncoded) || hasPathTraversal(sessionId)) {
+    throw new NotFoundError(`Invalid session path: ${projectEncoded}/${sessionId}`)
+  }
   const filePath = path.join(claudeProjectsDir, projectEncoded, `${sessionId}.jsonl`)
   return fs.promises.readFile(filePath, 'utf-8')
+}
+
+class ValidationError extends Error {}
+
+function hasPathTraversal(segment: string): boolean {
+  return (
+    segment.includes('/') ||
+    segment.includes('\\') ||
+    segment.includes('..') ||
+    segment.includes('\0') ||
+    path.isAbsolute(segment)
+  )
+}
+
+const RESOLVE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+// Cherry Studio agent-session ids (agents.db `sessions.id`): session_<epoch-ms>_<random>. No path
+// separators, so it is inherently traversal-safe.
+const RESOLVE_CHERRY_AGENT_RE = /^session_\d{10,}_[a-z0-9]+$/i
+
+/**
+ * Server-side validation for /api/resolve-session. The endpoint is reachable directly (curl),
+ * so it NEVER trusts the client detector — path-separator safety is enforced here. Returns a
+ * Cherry `topic:` id (verbatim, separator-free), a Cherry agent id (`session_…`), or a strict
+ * lowercased UUID; anything else throws ValidationError → 400.
+ */
+function normalizeResolveId(rawId: string): { kind: 'uuid' | 'topic' | 'cherry-agent'; id: string } {
+  const trimmed = (rawId ?? '').trim()
+  if (!trimmed) throw new ValidationError('Empty session id')
+
+  if (trimmed.startsWith('topic:')) {
+    const rest = trimmed.slice('topic:'.length)
+    if (!rest || hasPathTraversal(rest)) throw new ValidationError('Invalid Cherry Studio topic id')
+    return { kind: 'topic', id: trimmed }
+  }
+
+  if (RESOLVE_CHERRY_AGENT_RE.test(trimmed)) {
+    return { kind: 'cherry-agent', id: trimmed }
+  }
+
+  // Accept a bare id / filename / full path, reduce to the basename, and require a strict UUID.
+  // Anything that is not a canonical UUID (including anything with path separators) is rejected.
+  const basename = trimmed.split(/[\\/]/).pop() ?? ''
+  const uuid = basename.replace(/\.jsonl$/i, '').toLowerCase()
+  if (!RESOLVE_UUID_RE.test(uuid)) {
+    throw new ValidationError('Not a valid session identifier')
+  }
+  return { kind: 'uuid', id: uuid }
+}
+
+/**
+ * Locate a session by identifier alone, independent of the scanned-list 50-cap. Probe order is
+ * cheapest-first: claude (one stat per project dir) → cherry (30s-cached catalog) → codex (a full
+ * ~/.codex tree-walk with no negative cache, so it must run last). Returns a populated meta so
+ * callers can upsert it into the project list; misses throw NotFoundError → 404 (never a silent
+ * fallback to some other session).
+ */
+async function resolveSessionById(
+  rawId: string,
+  claudeProjectsDir: string,
+  codexSessionsDir: string,
+): Promise<ResolvedSessionRef> {
+  const normalized = normalizeResolveId(rawId)
+  const homeDir = path.resolve(claudeProjectsDir, '..', '..')
+
+  if (normalized.kind === 'topic' || normalized.kind === 'cherry-agent') {
+    const cherry = await resolveCherrySessionById(normalized.id, homeDir)
+    if (cherry) return cherry
+    throw new NotFoundError(`No Cherry Studio session found: ${normalized.id}`)
+  }
+
+  const claude = await resolveClaudeSessionById(normalized.id, claudeProjectsDir)
+  if (claude) return claude
+
+  const cherry = await resolveCherrySessionById(normalized.id, homeDir)
+  if (cherry) return cherry
+
+  const codex = await resolveCodexSessionById(normalized.id, codexSessionsDir)
+  if (codex) return codex
+
+  throw new NotFoundError(`No session found with id: ${normalized.id}`)
+}
+
+async function resolveClaudeSessionById(
+  sessionId: string,
+  claudeProjectsDir: string,
+): Promise<ResolvedSessionRef | null> {
+  if (!fs.existsSync(claudeProjectsDir)) return null
+  const entries = await fs.promises.readdir(claudeProjectsDir, { withFileTypes: true })
+  const dirNames = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort()
+  // De-prioritize the import target so an original session wins over its imported copy.
+  const ordered = [
+    ...dirNames.filter((n) => n !== 'C--imported'),
+    ...dirNames.filter((n) => n === 'C--imported'),
+  ]
+  for (const dirName of ordered) {
+    const filePath = path.join(claudeProjectsDir, dirName, `${sessionId}.jsonl`)
+    let stat: fs.Stats
+    try {
+      stat = await fs.promises.stat(filePath)
+    } catch {
+      continue
+    }
+    if (!stat.isFile()) continue
+    const meta = quickScanMetadata(await readHead(filePath, RESOLVE_HEAD_BYTES), sessionId, stat.size)
+      ?? createMinimalSessionMeta('claude', sessionId, stat.size, stat.mtimeMs)
+    return { source: 'claude', projectEncoded: dirName, sessionId, meta }
+  }
+  return null
+}
+
+async function resolveCodexSessionById(
+  sessionId: string,
+  codexSessionsDir: string,
+): Promise<ResolvedSessionRef | null> {
+  // The whole probe is guarded: resolveCodexSessionFile may return a STALE cached path (the index
+  // is only rebuilt on /api/scan), so stat/readHead can throw ENOENT for a since-deleted file.
+  // Return null (→ eventual 404) instead of letting it propagate to a 500.
+  try {
+    const filePath = await resolveCodexSessionFile(codexSessionsDir, sessionId)
+    const stat = await fs.promises.stat(filePath)
+    const scanned = quickScanCodexMetadata(await readHead(filePath, RESOLVE_HEAD_BYTES), sessionId, stat.size)
+    if (!scanned) return null
+    return { source: 'codex', projectEncoded: scanned.projectEncoded, sessionId, meta: scanned.meta }
+  } catch {
+    return null
+  }
+}
+
+async function resolveCherrySessionById(
+  sessionId: string,
+  homeDir: string,
+): Promise<ResolvedSessionRef | null> {
+  // Guarded: this probe runs BEFORE codex, so an IndexedDB-recovery throw here must not abort the
+  // whole resolve (which would 500 and skip the codex probe). Treat any failure as a miss.
+  try {
+    const sessions = await listCherryStudioIndexedSessions({ homeDir })
+    const hit = sessions.find((s) => s.sessionId === sessionId || s.meta.id === sessionId)
+    if (!hit) return null
+    return { source: 'cherrystudio', projectEncoded: hit.projectEncoded, sessionId: hit.sessionId, meta: hit.meta }
+  } catch {
+    return null
+  }
 }
 
 async function scanCherryStudioProjects(
@@ -570,14 +832,18 @@ async function scanCodexProjects(
     if (!stat) return null
     const sessionId = extractCodexSessionId(path.basename(filePath))
     const indexEntry = threadIndex.get(sessionId)
-    const cached = sessionScanCache.get(filePath, stat)
+    const scanStat = {
+      ...stat,
+      fingerprint: `${indexEntry?.threadName ?? ''}\n${indexEntry?.updatedAt ?? ''}`,
+    }
+    const cached = sessionScanCache.get(filePath, scanStat)
     const scanned = cached?.source === 'codex'
       ? { cwd: cached.cwd, projectEncoded: cached.projectEncoded, meta: cached.meta }
       : quickScanCodexMetadata(await readHead(filePath, CODEX_PREVIEW_BYTES), sessionId, stat.size, indexEntry?.threadName)
     if (!scanned) return null
     if (onlyProject && scanned.projectEncoded !== onlyProject) return null
     if (!cached) {
-      sessionScanCache.set(filePath, stat, {
+      sessionScanCache.set(filePath, scanStat, {
         source: 'codex',
         cwd: scanned.cwd,
         projectEncoded: scanned.projectEncoded,

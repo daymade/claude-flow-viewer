@@ -3,7 +3,7 @@ import path from 'node:path'
 
 import type { SessionMeta, SessionSource } from '../../src/types/session'
 
-const CACHE_VERSION = 1
+const CACHE_VERSION = 3
 
 type CachedScanEntry =
   | {
@@ -22,6 +22,7 @@ type PersistedCacheEntry = {
   source: SessionSource
   mtimeMs: number
   size: number
+  fingerprint?: string
   scan: CachedScanEntry
 }
 
@@ -45,7 +46,7 @@ function resolveCacheDir(homeDir: string): string {
 }
 
 export function getSessionScanCachePath(homeDir: string): string {
-  return path.join(resolveCacheDir(homeDir), 'session-scan-cache-v1.json')
+  return path.join(resolveCacheDir(homeDir), `session-scan-cache-v${CACHE_VERSION}.json`)
 }
 
 export class SessionScanCache {
@@ -87,20 +88,22 @@ export class SessionScanCache {
     return this.loadPromise
   }
 
-  get(filePath: string, stat: { mtimeMs: number; size: number }): CachedScanEntry | null {
+  get(filePath: string, stat: { mtimeMs: number; size: number; fingerprint?: string }): CachedScanEntry | null {
     const entry = this.entries.get(filePath)
     if (!entry) return null
     if (entry.version !== CACHE_VERSION) return null
     if (entry.mtimeMs !== stat.mtimeMs || entry.size !== stat.size) return null
+    if ((entry.fingerprint ?? '') !== (stat.fingerprint ?? '')) return null
     return entry.scan
   }
 
-  set(filePath: string, stat: { mtimeMs: number; size: number }, scan: CachedScanEntry) {
+  set(filePath: string, stat: { mtimeMs: number; size: number; fingerprint?: string }, scan: CachedScanEntry) {
     this.entries.set(filePath, {
       version: CACHE_VERSION,
       source: scan.source,
       mtimeMs: stat.mtimeMs,
       size: stat.size,
+      fingerprint: stat.fingerprint,
       scan,
     })
     this.dirty = true

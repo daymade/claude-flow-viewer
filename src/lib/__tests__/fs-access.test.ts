@@ -122,6 +122,40 @@ describe('tryAutoLoad', () => {
       method: 'POST',
     }))
   })
+
+  it('resolves a session id through the /api/resolve-session endpoint', async () => {
+    const ref = {
+      source: 'codex' as const,
+      projectEncoded: 'codex:/Users/test/demo',
+      sessionId: '019cd000-0000-7000-8000-000000000001',
+    }
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (input === '/api/scan') return new Response(JSON.stringify(projects), { status: 200 })
+      if (typeof input === 'string' && input.startsWith('/api/resolve-session')) {
+        return new Response(JSON.stringify(ref), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      throw new Error(`Unexpected fetch: ${String(input)}`)
+    })
+
+    const store = await tryAutoLoad()
+    const resolved = await store!.resolveSession!('019cd000-0000-7000-8000-000000000001')
+
+    expect(resolved).toEqual(ref)
+    expect(fetchMock).toHaveBeenCalledWith('/api/resolve-session?id=019cd000-0000-7000-8000-000000000001')
+  })
+
+  it('returns null when the resolve endpoint reports not found', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (input === '/api/scan') return new Response(JSON.stringify(projects), { status: 200 })
+      if (typeof input === 'string' && input.startsWith('/api/resolve-session')) {
+        return new Response('No session found', { status: 404 })
+      }
+      throw new Error(`Unexpected fetch: ${String(input)}`)
+    })
+
+    const store = await tryAutoLoad()
+    await expect(store!.resolveSession!('00000000-0000-4000-8000-000000000000')).resolves.toBeNull()
+  })
 })
 
 describe('browser manual Cherry Studio boundary', () => {

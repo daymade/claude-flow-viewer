@@ -158,6 +158,21 @@ function sanitizePreview(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 100)
 }
 
+function normalizePromptText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function stringifyDisplayValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value === null || value === undefined) return ''
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
 function isCodexBootstrapText(text: string): boolean {
   const trimmed = text.trim()
   if (!trimmed) return true
@@ -233,12 +248,25 @@ function extractDelegationUpdate(text: string): Extract<SessionMessage, { kind: 
 }
 
 function parseContentParts(content: unknown): { text: string; images: EmbeddedImage[] } {
-  if (!Array.isArray(content)) return { text: '', images: [] }
+  if (typeof content === 'string') return { text: content.trim(), images: [] }
+
+  if (!Array.isArray(content)) {
+    if (content && typeof content === 'object') {
+      const record = content as Record<string, unknown>
+      if (typeof record.text === 'string') return { text: record.text.trim(), images: [] }
+      if (Array.isArray(record.content)) return parseContentParts(record.content)
+    }
+    return { text: '', images: [] }
+  }
 
   const parts: string[] = []
   const images: EmbeddedImage[] = []
 
   for (const item of content) {
+    if (typeof item === 'string') {
+      parts.push(item)
+      continue
+    }
     if (!item || typeof item !== 'object') continue
     const part = item as Record<string, unknown>
     const type = String(part.type || '')
@@ -278,6 +306,45 @@ function extractPromptFromMessage(record: Record<string, unknown>): { text: stri
   if (item.type !== 'message' || item.role !== 'user') return null
 
   const { text, images } = parseContentParts(item.content)
+  if (!text || isCodexBootstrapText(text)) return null
+  return { text, images }
+}
+
+function extractPromptFromEvent(event: Record<string, unknown>): { text: string; images: EmbeddedImage[] } | null {
+  if (event.type !== 'user_message') return null
+  const textParts: string[] = []
+  const messageText = typeof event.message === 'string' ? event.message.trim() : ''
+  if (messageText) textParts.push(messageText)
+
+  const textElements = event.text_elements
+  if (!messageText && Array.isArray(textElements)) {
+    for (const element of textElements) {
+      const parsed = parseContentParts(element)
+      if (parsed.text) textParts.push(parsed.text)
+    }
+  }
+
+  const images: EmbeddedImage[] = []
+  for (const key of ['images', 'local_images']) {
+    const items = event[key]
+    if (!Array.isArray(items)) continue
+    for (const item of items) {
+      if (typeof item === 'string') {
+        if (item.startsWith('data:')) {
+          const mediaTypeMatch = item.match(/^data:([^;]+);/)
+          images.push({ mediaType: mediaTypeMatch?.[1] || 'image/png', dataUrl: item })
+        } else {
+          textParts.push(`[Image: ${filenameOf(item)}]`)
+        }
+        continue
+      }
+      const parsed = parseContentParts(item)
+      if (parsed.text) textParts.push(parsed.text)
+      images.push(...parsed.images)
+    }
+  }
+
+  const text = textParts.join('\n').trim()
   if (!text || isCodexBootstrapText(text)) return null
   return { text, images }
 }
@@ -329,6 +396,9 @@ function summarizeToolCall(name: string, input: Record<string, unknown>): string
     case 'web_search':
     case 'web_search_call':
       return `Search ${String(input.query || input.q || '').slice(0, 60)}`
+    case 'tool_search':
+    case 'tool_search_call':
+      return `Search tools ${String(input.query || '').slice(0, 60)}`
     default:
       return `${name}${Object.keys(input).length > 0 ? ` ${String(input.description || input.subject || '').slice(0, 60)}` : ''}`.trim()
   }
@@ -336,7 +406,9 @@ function summarizeToolCall(name: string, input: Record<string, unknown>): string
 
 function unwrapToolOutput(raw: unknown): { content: string; isError: boolean } {
   if (typeof raw !== 'string') {
-    return { content: String(raw ?? ''), isError: false }
+    const content = stringifyDisplayValue(raw)
+    const display = content.slice(0, 500) + (content.length > 500 ? `... (${content.length} chars)` : '')
+    return { content: display, isError: false }
   }
 
   let content = raw
@@ -347,6 +419,7 @@ function unwrapToolOutput(raw: unknown): { content: string; isError: boolean } {
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       const obj = parsed as Record<string, unknown>
       if (typeof obj.output === 'string') content = obj.output
+      else if ('output' in obj) content = stringifyDisplayValue(obj.output)
       const metadata = obj.metadata
       if (metadata && typeof metadata === 'object') {
         const exitCode = (metadata as Record<string, unknown>).exit_code
@@ -369,6 +442,58 @@ function unwrapToolOutput(raw: unknown): { content: string; isError: boolean } {
   return { content: display, isError }
 }
 
+function extractMcpResultContent(result: unknown): { content: string; isError: boolean } {
+  if (!result || typeof result !== 'object') return unwrapToolOutput(result)
+  const record = result as Record<string, unknown>
+  if ('Err' in record) {
+    return { content: stringifyDisplayValue(record.Err).slice(0, 500), isError: true }
+  }
+
+  const ok = record.Ok
+  if (!ok || typeof ok !== 'object') return unwrapToolOutput(result)
+  const okRecord = ok as Record<string, unknown>
+  const okIsError = okRecord.isError === true || okRecord.is_error === true
+  const content = okRecord.content
+  if (!Array.isArray(content)) {
+    const unwrapped = unwrapToolOutput(ok)
+    return { ...unwrapped, isError: unwrapped.isError || okIsError }
+  }
+
+  const parts: string[] = []
+  for (const item of content) {
+    const parsed = parseContentParts([item])
+    if (parsed.text) parts.push(parsed.text)
+    if (!parsed.text && item && typeof item === 'object') parts.push(stringifyDisplayValue(item))
+  }
+  const unwrapped = unwrapToolOutput(parts.join('\n'))
+  return { ...unwrapped, isError: unwrapped.isError || okIsError }
+}
+
+function extractToolSearchOutput(item: Record<string, unknown>): string {
+  const tools = item.tools
+  if (!Array.isArray(tools)) return stringifyDisplayValue(item)
+
+  const names: string[] = []
+  for (const entry of tools) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    if (typeof record.name === 'string') names.push(record.name)
+    const nested = record.tools
+    if (Array.isArray(nested)) {
+      for (const tool of nested) {
+        if (tool && typeof tool === 'object' && typeof (tool as Record<string, unknown>).name === 'string') {
+          names.push(`${record.name || 'tool'}.${String((tool as Record<string, unknown>).name)}`)
+        }
+      }
+    }
+  }
+
+  const unique = [...new Set(names)]
+  return unique.length > 0
+    ? `Available tools:\n${unique.slice(0, 40).map((name) => `- ${name}`).join('\n')}${unique.length > 40 ? `\n... (${unique.length} tools total)` : ''}`
+    : stringifyDisplayValue(item)
+}
+
 function extractReasoningText(payload: Record<string, unknown>): string {
   const summary = payload.summary
   if (Array.isArray(summary)) {
@@ -389,6 +514,62 @@ function extractReasoningText(payload: Record<string, unknown>): string {
 function decidePrompt(text: string, promptNum: number, pendingInterrupt: boolean): DecisionMarker {
   const detected = detectDecision(text, promptNum)
   return pendingInterrupt && detected === 'none' ? 'interrupt' : detected
+}
+
+function scanCodexHeadStats(head: string): { promptCount: number; toolCount: number; recordCount: number } {
+  let promptCount = 0
+  let toolCount = 0
+  let recordCount = 0
+  const seenPrompts: Array<{ text: string; timestampMs: number }> = []
+  const countPrompt = (prompt: { text: string }, timestampMs: number) => {
+    const text = normalizePromptText(prompt.text)
+    if (!text) return
+    const isDuplicate = seenPrompts.some((seen) =>
+      seen.text === text && Math.abs(seen.timestampMs - timestampMs) <= 1000
+    )
+    if (isDuplicate) return
+    seenPrompts.push({ text, timestampMs })
+    promptCount++
+  }
+
+  for (const line of head.split('\n')) {
+    if (!line.trim()) continue
+    let record: Record<string, unknown>
+    try {
+      record = JSON.parse(line) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    recordCount++
+
+    if (record.type === 'event_msg') {
+      const payload = record.payload
+      if (payload && typeof payload === 'object') {
+        const event = payload as Record<string, unknown>
+        const prompt = extractPromptFromEvent(event)
+        if (prompt) countPrompt(prompt, extractTimestamp(record)?.getTime() ?? recordCount)
+        if (event.type === 'mcp_tool_call_end') toolCount++
+      }
+      continue
+    }
+
+    if (record.type !== 'response_item') continue
+    const payload = record.payload
+    if (!payload || typeof payload !== 'object') continue
+    const item = payload as Record<string, unknown>
+    const prompt = extractPromptFromMessage(record)
+    if (prompt) countPrompt(prompt, extractTimestamp(record)?.getTime() ?? recordCount)
+    if (
+      item.type === 'function_call'
+      || item.type === 'custom_tool_call'
+      || item.type === 'web_search_call'
+      || item.type === 'tool_search_call'
+    ) {
+      toolCount++
+    }
+  }
+
+  return { promptCount, toolCount, recordCount }
 }
 
 export function makeCodexProjectId(cwd: string): string {
@@ -435,6 +616,7 @@ export function quickScanCodexMetadata(
   threadName?: string,
 ): CodexQuickScanResult | null {
   const payload = extractCodexSessionMetaPayload(head)
+  const headStats = scanCodexHeadStats(head)
   let startTime = parseTimestamp(payload?.timestamp) ?? parseTimestamp(extractCodexHeadField(head, 'timestamp'))
   let cwd = typeof payload?.cwd === 'string' ? payload.cwd : extractCodexHeadField(head, 'cwd') || ''
   let firstPromptPreview = threadName ? sanitizePreview(threadName) : ''
@@ -468,7 +650,9 @@ export function quickScanCodexMetadata(
     }
 
     if (!firstPromptPreview) {
-      const prompt = extractPromptFromMessage(record)
+      const prompt = record.type === 'event_msg' && record.payload && typeof record.payload === 'object'
+        ? extractPromptFromEvent(record.payload as Record<string, unknown>)
+        : extractPromptFromMessage(record)
       if (prompt) firstPromptPreview = sanitizePreview(prompt.text)
     }
 
@@ -498,11 +682,11 @@ export function quickScanCodexMetadata(
       parentSessionId: threadMeta.parentSessionId,
       agentName: threadMeta.agentName,
       agentRole: threadMeta.agentRole,
-      promptCount: 0,
-      toolCount: 0,
+      promptCount: headStats.promptCount,
+      toolCount: headStats.toolCount,
       firstPromptPreview,
       fileSize,
-      recordCount: 0,
+      recordCount: headStats.recordCount,
     },
   }
 }
@@ -523,15 +707,58 @@ export function parseCodexSessionContent(content: string): SessionData {
 
   let promptCounter = 0
   let pendingInterrupt = false
+  const seenPrompts: Array<{ text: string; timestampMs: number }> = []
+  const pushPrompt = (prompt: { text: string; images: EmbeddedImage[] }, timestampDate: Date) => {
+    const textKey = normalizePromptText(prompt.text)
+    if (!textKey) return false
+    const timestampMs = timestampDate.getTime()
+    const isDuplicate = seenPrompts.some((seen) =>
+      seen.text === textKey && Math.abs(seen.timestampMs - timestampMs) <= 1000
+    )
+    if (isDuplicate) return false
+
+    seenPrompts.push({ text: textKey, timestampMs })
+    promptCounter++
+    const decision = decidePrompt(prompt.text, promptCounter, pendingInterrupt)
+    pendingInterrupt = false
+    messages.push({
+      kind: 'user-prompt',
+      promptNum: promptCounter,
+      text: prompt.text,
+      images: prompt.images,
+      time: formatTime(timestampDate),
+      decision,
+    })
+    prompts.push({
+      num: promptCounter,
+      preview: sanitizePreview(prompt.text),
+      fullText: prompt.text,
+      time: formatTime(timestampDate),
+      decision,
+    })
+    return true
+  }
 
   for (const record of records) {
-    const timestamp = formatTime(extractTimestamp(record) || new Date())
+    const timestampDate = extractTimestamp(record) || new Date()
+    const timestamp = formatTime(timestampDate)
 
     if (record.type === 'event_msg') {
       const payload = record.payload
       if (!payload || typeof payload !== 'object') continue
       const event = payload as Record<string, unknown>
       switch (event.type) {
+        case 'user_message': {
+          const prompt = extractPromptFromEvent(event)
+          if (!prompt) break
+          pushPrompt(prompt, timestampDate)
+          break
+        }
+        case 'agent_message': {
+          const message = typeof event.message === 'string' ? event.message.trim() : ''
+          if (message) messages.push({ kind: 'ai-text', text: message, timestamp })
+          break
+        }
         case 'task_started':
           messages.push({
             kind: 'task-event',
@@ -569,7 +796,43 @@ export function parseCodexSessionContent(content: string): SessionData {
             summaryText: '',
           })
           break
+        case 'mcp_tool_call_end': {
+          const invocation = event.invocation && typeof event.invocation === 'object'
+            ? event.invocation as Record<string, unknown>
+            : {}
+          const server = typeof invocation.server === 'string' ? invocation.server : 'mcp'
+          const tool = typeof invocation.tool === 'string' ? invocation.tool : 'tool'
+          const input = invocation.arguments && typeof invocation.arguments === 'object'
+            ? invocation.arguments as Record<string, unknown>
+            : {}
+          messages.push({
+            kind: 'ai-tool-use',
+            summary: summarizeToolCall(`${server}.${tool}`, input),
+            name: `${server}.${tool}`,
+            input,
+            timestamp,
+          })
+          const result = extractMcpResultContent(event.result)
+          messages.push({
+            kind: 'tool-result',
+            content: result.content,
+            isError: result.isError,
+            timestamp,
+          })
+          break
+        }
       }
+      continue
+    }
+
+    if (record.type === 'compacted') {
+      messages.push({
+        kind: 'compact-boundary',
+        timestamp,
+        trigger: 'auto',
+        preTokens: 0,
+        summaryText: '',
+      })
       continue
     }
 
@@ -597,24 +860,7 @@ export function parseCodexSessionContent(content: string): SessionData {
 
           const prompt = extractPromptFromMessage(record)
           if (prompt) {
-            promptCounter++
-            const decision = decidePrompt(prompt.text, promptCounter, pendingInterrupt)
-            pendingInterrupt = false
-            messages.push({
-              kind: 'user-prompt',
-              promptNum: promptCounter,
-              text: prompt.text,
-              images: prompt.images,
-              time: timestamp,
-              decision,
-            })
-            prompts.push({
-              num: promptCounter,
-              preview: sanitizePreview(prompt.text),
-              fullText: prompt.text,
-              time: timestamp,
-              decision,
-            })
+            pushPrompt(prompt, timestampDate)
           }
         }
         break
@@ -659,11 +905,29 @@ export function parseCodexSessionContent(content: string): SessionData {
       case 'web_search_call': {
         const input: Record<string, unknown> = {}
         if (typeof item.query === 'string') input.query = item.query
+        if (item.action && typeof item.action === 'object') {
+          const action = item.action as Record<string, unknown>
+          if (typeof action.query === 'string') input.query = action.query
+          if (Array.isArray(action.queries)) input.queries = action.queries
+        }
         if (typeof item.arguments === 'string') Object.assign(input, parseJsonObject(item.arguments))
         messages.push({
           kind: 'ai-tool-use',
           summary: summarizeToolCall('web_search_call', input),
           name: 'web_search_call',
+          input,
+          timestamp,
+        })
+        break
+      }
+      case 'tool_search_call': {
+        const input = item.arguments && typeof item.arguments === 'object'
+          ? item.arguments as Record<string, unknown>
+          : parseJsonObject(item.arguments)
+        messages.push({
+          kind: 'ai-tool-use',
+          summary: summarizeToolCall('tool_search_call', input),
+          name: 'tool_search_call',
           input,
           timestamp,
         })
@@ -676,6 +940,16 @@ export function parseCodexSessionContent(content: string): SessionData {
           kind: 'tool-result',
           content: result.content,
           isError: result.isError,
+          timestamp,
+        })
+        break
+      }
+      case 'tool_search_output': {
+        const result = unwrapToolOutput(extractToolSearchOutput(item))
+        messages.push({
+          kind: 'tool-result',
+          content: result.content,
+          isError: String(item.status || '').toLowerCase() === 'failed',
           timestamp,
         })
         break

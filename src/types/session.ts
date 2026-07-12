@@ -77,6 +77,40 @@ export interface ProjectMeta {
   totalSessionCount: number
 }
 
+/**
+ * A session located by identifier alone (the "known-item" resolve lane), independent of
+ * whether it appears in any scanned project list. Shared SSOT for the backend resolve
+ * endpoint, the FileStore.resolveSession implementations, the search controller, and routing.
+ */
+export interface ResolvedSessionRef {
+  source: SessionSource
+  projectEncoded: string
+  sessionId: string
+  /** Populated so callers can upsert it into the project list (required for AppShell to render it properly) */
+  meta?: SessionMeta
+}
+
+/**
+ * A minimal SessionMeta for a located session whose head-scan yielded no metadata (huge sessions,
+ * or ones led by meta/command records). Shared SSOT so the server plugin, the browser stores, and
+ * the reducer all synthesize the same shape. `mtimeMs` (file mtime) is used as a best-effort
+ * startTime so the session sorts by recency instead of sinking to the bottom of an empty-startTime.
+ */
+export function createMinimalSessionMeta(source: SessionSource, sessionId: string, fileSize = 0, mtimeMs = 0): SessionMeta {
+  const iso = mtimeMs ? new Date(mtimeMs).toISOString() : ''
+  return {
+    source,
+    id: sessionId,
+    startTime: iso,
+    startDisplay: iso ? iso.slice(0, 16).replace('T', ' ') : '',
+    promptCount: 0,
+    toolCount: 0,
+    firstPromptPreview: '',
+    fileSize,
+    recordCount: 0,
+  }
+}
+
 export interface SessionData {
   source: SessionSource
   messages: SessionMessage[]
