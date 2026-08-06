@@ -8,7 +8,7 @@ export interface EmbeddedImage {
 }
 
 export type SessionMessage =
-  | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; decision: DecisionMarker }
+  | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; decision: DecisionMarker; queued?: boolean; dupCount?: number }
   | { kind: 'tool-result'; content: string; isError: boolean; externalFile?: string; totalSize?: string; timestamp?: string }
   | { kind: 'ai-text'; text: string; timestamp?: string }
   | { kind: 'ai-thinking'; preview: string; full: string; timestamp?: string }

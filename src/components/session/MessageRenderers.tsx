@@ -13,6 +13,7 @@ export function PromptBlock({ msg, searchQuery }: {
   msg: Extract<SessionMessage, { kind: 'user-prompt' }>
   searchQuery: string
 }) {
+  const [expanded, setExpanded] = useState(false)
   const matches = !searchQuery || msg.text.toLowerCase().includes(searchQuery.toLowerCase())
 
   let bubbleBg = 'bg-stone-100'
@@ -29,6 +30,27 @@ export function PromptBlock({ msg, searchQuery }: {
     badge = <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-700 uppercase tracking-wide">Decision</span>
   }
 
+  const queuedBadge = msg.queued ? (
+    <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-stone-200 text-stone-500 uppercase tracking-wide">Queued</span>
+  ) : null
+
+  // Exact-duplicate prompts (e.g. injected boilerplate, repeated "继续") collapse into a chip
+  if (msg.dupCount && !expanded) {
+    const preview = msg.text.replace(/\s+/g, ' ').trim().slice(0, 80)
+    return (
+      <div
+        data-prompt={msg.promptNum}
+        onClick={() => setExpanded(true)}
+        className={`mt-4 mb-3 ml-auto w-fit max-w-[94%] bg-stone-50 border border-stone-200 rounded-full px-3.5 py-1.5 cursor-pointer hover:bg-stone-100 transition-colors ${matches ? 'opacity-100' : 'opacity-20'}`}
+        title="Repeated identical prompt — click to expand"
+      >
+        <span className="text-[11px] text-stone-400 tabular-nums mr-2">#{msg.promptNum}</span>
+        <span className="text-[12px] text-stone-500">{preview}{msg.text.length > 80 ? '…' : ''}</span>
+        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-stone-200 text-stone-500 ml-2 tabular-nums">×{msg.dupCount}</span>
+      </div>
+    )
+  }
+
   return (
     <div
       data-prompt={msg.promptNum}
@@ -39,6 +61,14 @@ export function PromptBlock({ msg, searchQuery }: {
       <div className="flex items-center gap-1.5 mb-1.5">
         <span className={`text-[11px] font-semibold ${numColor} tabular-nums`}>#{msg.promptNum}</span>
         {badge}
+        {queuedBadge}
+        {msg.dupCount ? (
+          <span
+            onClick={() => setExpanded(false)}
+            className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-stone-200 text-stone-500 tabular-nums cursor-pointer"
+            title="Collapse back"
+          >×{msg.dupCount}</span>
+        ) : null}
         <span className="text-[10px] text-stone-400 font-mono ml-auto tabular-nums">{msg.time}</span>
       </div>
       <div className="text-[15px] leading-[1.75] break-words text-stone-800 prose prose-sm max-w-none prose-p:my-1.5 prose-p:leading-[1.75] prose-headings:my-2 prose-headings:text-stone-900 prose-a:text-amber-700 prose-a:break-all hover:prose-a:underline prose-code:text-[13px] prose-code:bg-stone-200/70 prose-code:text-stone-800 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-pre:bg-stone-900 prose-pre:text-stone-100 prose-pre:text-[13px] prose-pre:leading-relaxed prose-pre:my-2 prose-pre:rounded-md prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 prose-hr:my-2.5 prose-hr:border-stone-300/70 prose-strong:text-stone-900 prose-blockquote:border-l-stone-300 prose-blockquote:text-stone-600 [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0 prose-table:text-[13px] [&_table]:block [&_table]:overflow-x-auto">
