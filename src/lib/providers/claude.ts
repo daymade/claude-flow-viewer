@@ -226,6 +226,32 @@ function getUserText(msg: Record<string, unknown>): string {
   return ''
 }
 
+/** Normalize prompt text for dedupe/frequency comparison (whitespace-insensitive). */
+function normalizePromptText(s: string): string {
+  return s.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Extract the text of a queued_command attachment's `prompt` payload.
+ * Observed as a plain string, with a list-of-content-blocks variant.
+ */
+function coerceQueuedPromptText(prompt: unknown): string {
+  if (typeof prompt === 'string') return prompt
+  if (Array.isArray(prompt)) {
+    const parts: string[] = []
+    for (const c of prompt) {
+      if (typeof c === 'object' && c !== null) {
+        const item = c as Record<string, unknown>
+        if (typeof item.text === 'string') parts.push(item.text)
+      } else if (typeof c === 'string') {
+        parts.push(c)
+      }
+    }
+    return parts.join('\n')
+  }
+  return ''
+}
+
 function getUserImages(msg: Record<string, unknown>): import('../../types/session').EmbeddedImage[] {
   const message = msg.message as Record<string, unknown> | undefined
   const content = message?.content
@@ -510,6 +536,21 @@ export function parseClaudeSessionContent(content: string): SessionData {
     }
   }
 
+  // Pre-scan: index delivered user prompts (normalized text -> timestamps in seconds).
+  // queued_command attachments whose text later landed as a real user record must not
+  // double-render; the real record wins and the attachment copy is skipped.
+  const deliveredPromptIndex = new Map<string, number[]>()
+  for (const rec of records) {
+    if (rec.type !== 'user' || rec.isMeta) continue
+    if (classifyUserMessage(rec)?.type !== 'real-prompt') continue
+    const norm = normalizePromptText(getUserText(rec))
+    if (!norm) continue
+    const sec = extractTimestamp(rec).getTime() / 1000
+    const list = deliveredPromptIndex.get(norm)
+    if (list) list.push(sec)
+    else deliveredPromptIndex.set(norm, [sec])
+  }
+
   // Step 3: Analyze conversation tree
   const tree = analyzeConversationTree(records)
 
@@ -618,6 +659,38 @@ export function parseClaudeSessionContent(content: string): SessionData {
       }
     }
 
+    // 5c2: Mid-work user input lives in attachment records, not user records.
+    // Render origin.kind=='human' queued_command payloads as user prompts.
+    // (Skipped when the same text was later delivered as a real user record —
+    // that copy wins the timeline slot; peer/harness origins are not user prose.)
+    if (data.type === 'attachment') {
+      const att = data.attachment as Record<string, unknown> | undefined
+      const origin = att?.origin as Record<string, unknown> | undefined
+      if (att?.type === 'queued_command' && origin?.kind === 'human') {
+        const text = coerceQueuedPromptText(att.prompt).trim()
+        if (text) {
+          const ts = extractTimestamp(data)
+          const norm = normalizePromptText(text)
+          const deliveredSecs = deliveredPromptIndex.get(norm)
+          const wasDelivered = deliveredSecs?.some((s) => Math.abs(s - ts.getTime() / 1000) <= 120)
+          if (!wasDelivered && promptCounter) {
+            promptCounter.value++
+            const time = formatTime(ts)
+            const decision = detectDecision(text, promptCounter.value)
+            messages.push({ kind: 'user-prompt', promptNum: promptCounter.value, text, images: [], time, decision, queued: true })
+            prompts?.push({
+              num: promptCounter.value,
+              preview: text.slice(0, 100).replace(/\n/g, ' '),
+              fullText: text,
+              time,
+              decision,
+            })
+          }
+        }
+      }
+      continue
+    }
+
     // 5d: Skip abandoned branch records when tree data is available
     if (tree.hasTreeData && typeof uuid === 'string' && !tree.activeUuids.has(uuid)) {
       continue
@@ -687,6 +760,25 @@ export function parseClaudeSessionContent(content: string): SessionData {
           })
         }
       }
+    }
+  }
+
+  // Mark exact-duplicate user prompts for collapsed rendering. Hook/loop-injected
+  // boilerplate lands as structurally ordinary user records (promptSource: typed),
+  // so identical text repeated many times is the reliable tell — this also collapses
+  // genuinely repeated short prompts ("继续" ×N), which is the desired view for both.
+  const DUP_COLLAPSE_THRESHOLD = 5
+  const promptFreq = new Map<string, number>()
+  for (const m of messages) {
+    if (m.kind === 'user-prompt') {
+      const norm = normalizePromptText(m.text)
+      promptFreq.set(norm, (promptFreq.get(norm) ?? 0) + 1)
+    }
+  }
+  for (const m of messages) {
+    if (m.kind === 'user-prompt') {
+      const n = promptFreq.get(normalizePromptText(m.text)) ?? 0
+      if (n >= DUP_COLLAPSE_THRESHOLD) m.dupCount = n
     }
   }
 

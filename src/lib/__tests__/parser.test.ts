@@ -1066,4 +1066,85 @@ describe('parseSessionContent', () => {
       expect(result.messages).toHaveLength(2)
     })
   })
+
+  describe('queued_command attachments (mid-work user input)', () => {
+    function queuedAttachment(uuid: string, prompt: unknown, kind: string | undefined, ts: string): Record<string, unknown> {
+      return {
+        type: 'attachment',
+        uuid,
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: ts,
+        attachment: {
+          type: 'queued_command',
+          prompt,
+          commandMode: 'prompt',
+          ...(kind ? { origin: { kind } } : {}),
+        },
+      }
+    }
+
+    it('renders origin:human queued input as a queued user prompt', () => {
+      const content = jsonl(
+        userMsg('u1', null, 'start', { timestamp: '2026-03-07T10:00:00Z' }),
+        queuedAttachment('a1', 'actually do X instead', 'human', '2026-03-07T10:00:10Z'),
+        assistantMsg('a2', 'u1', [{ type: 'text', text: 'ok' }]),
+      )
+      const result = parseSessionContent(content)
+      const prompts = result.messages.filter(m => m.kind === 'user-prompt')
+      expect(prompts).toHaveLength(2)
+      expect(prompts[1]).toMatchObject({ text: 'actually do X instead', queued: true, promptNum: 2 })
+    })
+
+    it('coerces the list-variant prompt payload', () => {
+      const content = jsonl(
+        queuedAttachment('a1', [{ type: 'text', text: 'line one' }, { type: 'text', text: 'line two' }], 'human', '2026-03-07T10:00:10Z'),
+      )
+      const result = parseSessionContent(content)
+      const prompts = result.messages.filter(m => m.kind === 'user-prompt')
+      expect(prompts).toHaveLength(1)
+      expect((prompts[0] as { text: string }).text).toContain('line one')
+      expect((prompts[0] as { text: string }).text).toContain('line two')
+    })
+
+    it('ignores peer and harness (no origin) attachment payloads', () => {
+      const content = jsonl(
+        queuedAttachment('a1', 'from another agent', 'peer', '2026-03-07T10:00:10Z'),
+        queuedAttachment('a2', 'harness notice', undefined, '2026-03-07T10:00:20Z'),
+      )
+      const result = parseSessionContent(content)
+      expect(result.messages.filter(m => m.kind === 'user-prompt')).toHaveLength(0)
+    })
+
+    it('does not double-render when the queued text was later delivered as a user record', () => {
+      const content = jsonl(
+        queuedAttachment('a1', 'same words', 'human', '2026-03-07T10:00:10Z'),
+        userMsg('u1', null, 'same words', { timestamp: '2026-03-07T10:00:40Z' }),
+      )
+      const result = parseSessionContent(content)
+      const prompts = result.messages.filter(m => m.kind === 'user-prompt')
+      expect(prompts).toHaveLength(1)
+      expect(prompts[0]).not.toMatchObject({ queued: true })
+    })
+  })
+
+  describe('duplicate prompt collapsing', () => {
+    it('marks prompts repeated 5+ times with dupCount', () => {
+      const recs = Array.from({ length: 5 }, (_, i) =>
+        userMsg(`u${i}`, i === 0 ? null : `u${i - 1}`, 'identical instruction', { timestamp: `2026-03-07T10:0${i}:00Z` }))
+      const result = parseSessionContent(jsonl(...recs))
+      const prompts = result.messages.filter(m => m.kind === 'user-prompt')
+      expect(prompts).toHaveLength(5)
+      for (const p of prompts) expect(p).toMatchObject({ dupCount: 5 })
+    })
+
+    it('leaves prompts repeated fewer than 5 times untouched', () => {
+      const recs = Array.from({ length: 4 }, (_, i) =>
+        userMsg(`u${i}`, i === 0 ? null : `u${i - 1}`, 'again', { timestamp: `2026-03-07T10:0${i}:00Z` }))
+      const result = parseSessionContent(jsonl(...recs))
+      for (const p of result.messages.filter(m => m.kind === 'user-prompt')) {
+        expect((p as { dupCount?: number }).dupCount).toBeUndefined()
+      }
+    })
+  })
 })
