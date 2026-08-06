@@ -42,6 +42,21 @@ function codexDelegatedPreviewLabel(delegatedCount: number, isTruncated: boolean
   return isTruncated ? 'Delegated work loads on open' : 'No delegated work recorded'
 }
 
+// A first message that is only a greeting or a connectivity check (not a real ask) makes a
+// session indistinguishable from noise in a long project list. Matched as a whole normalized
+// string, not a substring, so a real prompt that merely contains "hi" or "test" is unaffected.
+const TRIVIAL_PREVIEWS = new Set([
+  'hi', 'hey', 'hello', 'hola', 'yo',
+  'yes', 'no', 'ok', 'okay', 'test', 'testing', 'ping', 'pong',
+  'thanks', 'thank you',
+  '你好', '在吗', '在么', '测试', '试试', '试一下', '好的', '继续', '谢谢',
+])
+
+function isTrivialPreview(preview: string): boolean {
+  const normalized = preview.trim().toLowerCase().replace(/[!?.,、。！？~～]+$/u, '')
+  return TRIVIAL_PREVIEWS.has(normalized)
+}
+
 type MarkerFilterKey = keyof SessionMarkers
 type SourceFilter = 'all' | SessionSource
 
@@ -80,6 +95,9 @@ export function Sidebar({
   const [markerFilter, setMarkerFilter] = useState<MarkerFilterKey | null>(null)
   const [showMarkerFilter, setShowMarkerFilter] = useState(false)
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
+  // Opt-in and off by default: this only hides sessions from view, it never changes what's on
+  // disk, but a filter that can silently hide real content must not be on unless asked for.
+  const [hideTrivial, setHideTrivial] = useState(false)
   const [manuallyCollapsedActiveProjects, setManuallyCollapsedActiveProjects] = useState<Set<string>>(() => new Set<string>())
 
   const normalizedSearch = searchQuery.trim().toLowerCase()
@@ -114,7 +132,7 @@ export function Sidebar({
       result = result.filter((project) => project.source === sourceFilter)
     }
 
-    if (!normalizedSearch && !markerFilter) {
+    if (!normalizedSearch && !markerFilter && !hideTrivial) {
       return result
     }
 
@@ -138,15 +156,20 @@ export function Sidebar({
       }
 
       if (project.source === 'codex') {
+        // hideTrivial does not apply here: Codex sessions are organized as a task tree (see
+        // hasTreeFilter/CodexTaskNavCard below), where a root task is often opened by delegation
+        // rather than a typed prompt, so "first message" is a much weaker signal than for Claude.
         return project.sessions.some(sessionMatches) || projectMatchesSearch
           ? [project]
           : []
       }
 
-      const sessions = project.sessions.filter(sessionMatches)
+      const sessions = project.sessions.filter(
+        (session) => sessionMatches(session) && (!hideTrivial || !isTrivialPreview(session.firstPromptPreview)),
+      )
       return sessions.length > 0 ? [{ ...project, sessions }] : []
     })
-  }, [markerFilter, normalizedSearch, projects, sourceFilter])
+  }, [markerFilter, normalizedSearch, projects, sourceFilter, hideTrivial])
 
   const toggleProject = (encodedName: string) => {
     const isCurrentlyExpanded = expandedProjects.has(encodedName)
@@ -206,6 +229,19 @@ export function Sidebar({
                 {label}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => setHideTrivial((v) => !v)}
+              title="Hide sessions whose first message is just a greeting or connectivity test (hi / test / ok …)"
+              aria-pressed={hideTrivial}
+              className={`rounded-md px-2 py-1 text-[11px] cursor-pointer transition-colors ${
+                hideTrivial
+                  ? 'bg-amber-50 text-amber-700 font-medium'
+                  : 'bg-stone-100 text-stone-500 hover:bg-stone-200 hover:text-stone-700'
+              }`}
+            >
+              Hide trivial
+            </button>
           </div>
           <button
             type="button"
@@ -270,7 +306,7 @@ export function Sidebar({
               {sectionLabel}
             </div>
             {sectionProjects.map((project) => {
-              const isExpanded = expandedProjects.has(project.encodedName) || Boolean(searchQuery) || Boolean(markerFilter)
+              const isExpanded = expandedProjects.has(project.encodedName) || Boolean(searchQuery) || Boolean(markerFilter) || hideTrivial
               const isActiveProject = project.encodedName === activeProjectEncoded
               const sessionCount = project.sessions.length
               const totalCount = project.totalSessionCount

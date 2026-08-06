@@ -229,4 +229,97 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByText('Ship the parser'))
     expect(onSelectSession).toHaveBeenCalledWith('codex:/Users/test/codex-app', 'main-task')
   })
+
+  it('hides greeting-only sessions only when Hide trivial is toggled on', () => {
+    const project: ProjectMeta = {
+      ...claudeProject(),
+      totalSessionCount: 2,
+      sessions: [
+        makeSession('claude', 'trivial-hi', 'hi'),
+        makeSession('claude', 'real-ask', 'Explain the parser architecture'),
+      ],
+    }
+    render(
+      <Sidebar
+        projects={[project]}
+        activeSessionId={null}
+        activeProjectEncoded={null}
+        searchQuery=""
+        onSelectSession={vi.fn()}
+        onLoadAllSessions={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('hi')).toBeTruthy()
+    expect(screen.getByText('Explain the parser architecture')).toBeTruthy()
+
+    fireEvent.click(screen.getByText('Hide trivial'))
+
+    expect(screen.queryByText('hi')).toBeNull()
+    expect(screen.getByText('Explain the parser architecture')).toBeTruthy()
+  })
+
+  it('keeps sessions whose preview merely contains a trivial word', () => {
+    const project: ProjectMeta = {
+      ...claudeProject(),
+      sessions: [makeSession('claude', 'contains-hi', 'hi can you review this patch')],
+    }
+    render(
+      <Sidebar
+        projects={[project]}
+        activeSessionId={null}
+        activeProjectEncoded={null}
+        searchQuery=""
+        onSelectSession={vi.fn()}
+        onLoadAllSessions={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByText('Hide trivial'))
+
+    expect(screen.getByText('hi can you review this patch')).toBeTruthy()
+  })
+
+  it('normalizes trailing punctuation before matching (在吗？ is trivial)', () => {
+    const project: ProjectMeta = {
+      ...claudeProject(),
+      sessions: [makeSession('claude', 'trivial-zaima', '在吗？')],
+    }
+    render(
+      <Sidebar
+        projects={[project]}
+        activeSessionId={null}
+        activeProjectEncoded={null}
+        searchQuery=""
+        onSelectSession={vi.fn()}
+        onLoadAllSessions={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByText('Hide trivial'))
+
+    expect(screen.queryByText('在吗？')).toBeNull()
+  })
+
+  it('never hides trivial-looking Codex tasks (delegation-opened trees)', () => {
+    const project: ProjectMeta = {
+      ...codexProject(),
+      totalSessionCount: 1,
+      sessions: [makeSession('codex', 'codex-trivial', 'ok', { threadKind: 'primary' })],
+    }
+    render(
+      <Sidebar
+        projects={[project]}
+        activeSessionId={null}
+        activeProjectEncoded={null}
+        searchQuery=""
+        onSelectSession={vi.fn()}
+        onLoadAllSessions={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByText('Hide trivial'))
+
+    expect(screen.getByText('ok')).toBeTruthy()
+  })
 })
