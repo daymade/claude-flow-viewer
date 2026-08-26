@@ -365,20 +365,22 @@ function classifyRecord(
       const images = getUserImages(data)
       const ts = extractTimestamp(data)
       const time = formatTime(ts)
+      const timestamp = ts.toISOString()
       if (promptCounter) {
         promptCounter.value++
         const decision = detectDecision(text, promptCounter.value)
-        result.messages.push({ kind: 'user-prompt', promptNum: promptCounter.value, text, images, time, decision })
+        result.messages.push({ kind: 'user-prompt', promptNum: promptCounter.value, text, images, time, timestamp, decision })
         prompts?.push({
           num: promptCounter.value,
           preview: text.slice(0, 100).replace(/\n/g, ' '),
           fullText: text,
           time,
+          timestamp,
           decision,
         })
       } else {
         const decision = detectDecision(text, 0)
-        result.messages.push({ kind: 'user-prompt', promptNum: 0, text, images, time, decision })
+        result.messages.push({ kind: 'user-prompt', promptNum: 0, text, images, time, timestamp, decision })
       }
       return result
     }
@@ -676,13 +678,15 @@ export function parseClaudeSessionContent(content: string): SessionData {
           if (!wasDelivered && promptCounter) {
             promptCounter.value++
             const time = formatTime(ts)
+            const timestamp = ts.toISOString()
             const decision = detectDecision(text, promptCounter.value)
-            messages.push({ kind: 'user-prompt', promptNum: promptCounter.value, text, images: [], time, decision, queued: true })
+            messages.push({ kind: 'user-prompt', promptNum: promptCounter.value, text, images: [], time, timestamp, decision, queued: true })
             prompts?.push({
               num: promptCounter.value,
               preview: text.slice(0, 100).replace(/\n/g, ' '),
               fullText: text,
               time,
+              timestamp,
               decision,
             })
           }

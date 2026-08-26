@@ -2,6 +2,7 @@ import type {
   DecisionMarker,
   EmbeddedImage,
   PromptIndexEntry,
+  RetainedUserInput,
   SessionData,
   SessionMessage,
   SessionMeta,
@@ -179,6 +180,8 @@ function isCodexBootstrapText(text: string): boolean {
   return trimmed.startsWith('# AGENTS.md instructions')
     || trimmed.startsWith('# CLAUDE.md')
     || trimmed.startsWith('# AGENTS.md')
+    || trimmed.startsWith('<skill>')
+    || trimmed.startsWith('<skills_instructions>')
     || trimmed.startsWith('<environment_context>')
     || trimmed.startsWith('<permissions instructions>')
     || trimmed.startsWith('<turn_aborted>')
@@ -347,6 +350,77 @@ function extractPromptFromEvent(event: Record<string, unknown>): { text: string;
   const text = textParts.join('\n').trim()
   if (!text || isCodexBootstrapText(text)) return null
   return { text, images }
+}
+
+function extractRetainedUserInputs(records: Record<string, unknown>[]): RetainedUserInput[] {
+  let sessionStart: Date | null = null
+  let lastCompaction: { record: Record<string, unknown>; index: number; at: Date } | null = null
+
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]
+    if (!sessionStart && record.type === 'session_meta') {
+      const payload = record.payload
+      if (payload && typeof payload === 'object') {
+        sessionStart = parseTimestamp((payload as Record<string, unknown>).timestamp) ?? extractTimestamp(record)
+      }
+    }
+    if (record.type === 'compacted') {
+      const at = extractTimestamp(record)
+      if (at) lastCompaction = { record, index, at }
+    }
+  }
+
+  if (!lastCompaction) return []
+  const compaction = lastCompaction
+  const payload = compaction.record.payload
+  if (!payload || typeof payload !== 'object') return []
+  const history = (payload as Record<string, unknown>).replacement_history
+  if (!Array.isArray(history)) return []
+
+  const rangeEnd = compaction.at.toISOString()
+  const rangeStart = (sessionStart ?? compaction.at).toISOString()
+  const directTextCounts = new Map<string, number>()
+
+  for (const record of records) {
+    const at = extractTimestamp(record)
+    if (!at || at > compaction.at) continue
+    const eventPayload = record.type === 'event_msg' && record.payload && typeof record.payload === 'object'
+      ? record.payload as Record<string, unknown>
+      : null
+    const prompt = eventPayload ? extractPromptFromEvent(eventPayload) : extractPromptFromMessage(record)
+    if (!prompt) continue
+    const key = normalizePromptText(prompt.text)
+    directTextCounts.set(key, (directTextCounts.get(key) ?? 0) + 1)
+  }
+
+  const retained: RetainedUserInput[] = []
+  history.forEach((entry, ordinal) => {
+    if (!entry || typeof entry !== 'object') return
+    const item = entry as Record<string, unknown>
+    if (item.role !== 'user') return
+    const { text } = parseContentParts(item.content)
+    if (!text || isCodexBootstrapText(text)) return
+
+    const key = normalizePromptText(text)
+    const directCount = directTextCounts.get(key) ?? 0
+    if (directCount > 0) {
+      directTextCounts.set(key, directCount - 1)
+      return
+    }
+
+    retained.push({
+      id: `compacted-${compaction.index}-${ordinal}`,
+      text,
+      decision: detectDecision(text, ordinal + 1),
+      origin: 'compacted',
+      timeRangeStart: rangeStart,
+      timeRangeEnd: rangeEnd,
+      sortTimestamp: rangeEnd,
+      ordinal,
+    })
+  })
+
+  return retained
 }
 
 function parseJsonObject(raw: unknown): Record<string, unknown> {
@@ -721,12 +795,14 @@ export function parseCodexSessionContent(content: string): SessionData {
     promptCounter++
     const decision = decidePrompt(prompt.text, promptCounter, pendingInterrupt)
     pendingInterrupt = false
+    const timestamp = timestampDate.toISOString()
     messages.push({
       kind: 'user-prompt',
       promptNum: promptCounter,
       text: prompt.text,
       images: prompt.images,
       time: formatTime(timestampDate),
+      timestamp,
       decision,
     })
     prompts.push({
@@ -734,6 +810,7 @@ export function parseCodexSessionContent(content: string): SessionData {
       preview: sanitizePreview(prompt.text),
       fullText: prompt.text,
       time: formatTime(timestampDate),
+      timestamp,
       decision,
     })
     return true
@@ -967,6 +1044,7 @@ export function parseCodexSessionContent(content: string): SessionData {
     source: 'codex',
     messages,
     prompts,
+    retainedUserInputs: extractRetainedUserInputs(records),
     heatmap: computeHeatmap(messages),
     markers,
   }

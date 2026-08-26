@@ -11,6 +11,7 @@ import {
   extractCodexShortName,
   quickScanCodexMetadata,
 } from '../../src/lib/providers/codex'
+import type { SessionScanCache } from '../scan/session-scan-cache'
 
 const CLAUDE_PREVIEW_BYTES = 4096
 
@@ -263,4 +264,87 @@ export async function listIndexedSessionFiles(roots: SearchRoots): Promise<Index
       if (time !== 0) return time
       return left.sessionId.localeCompare(right.sessionId)
     })
+}
+
+/**
+ * Fast session-identity catalog backed by the scan cache already populated during /api/scan.
+ * Unlike listIndexedSessionFiles(), this does not stat and read the head of every history file.
+ * Claude/Codex exact text and time still come from their input ledgers; Cherry content is parsed
+ * from its own catalog. Cached metadata only supplies project/session identity.
+ */
+export async function listCachedSessionFiles(
+  roots: SearchRoots,
+  scanCache: SessionScanCache,
+): Promise<IndexedSessionFile[]> {
+  const sessions: IndexedSessionFile[] = []
+  const projectEntries = new Map<string, ProjectNameEntry>()
+
+  for (const entry of await scanCache.snapshot()) {
+    const scan = entry.scan
+    if (scan.source === 'claude') {
+      const encodedName = path.basename(path.dirname(entry.filePath))
+      const decodedName = decodeProjectName(encodedName)
+      projectEntries.set(`claude:${encodedName}`, {
+        source: 'claude',
+        encodedName,
+        decodedName,
+        shortName: extractShortName(encodedName),
+      })
+      sessions.push({
+        source: 'claude',
+        projectEncoded: encodedName,
+        projectLabel: decodedName,
+        projectShortName: extractShortName(encodedName),
+        sessionId: scan.meta.id,
+        filePath: entry.filePath,
+        fileSize: entry.size,
+        fileMtimeMs: entry.mtimeMs,
+        fingerprint: `${entry.mtimeMs}:${entry.size}`,
+        meta: scan.meta,
+      })
+      continue
+    }
+
+    const shortName = extractCodexShortName(scan.cwd)
+    projectEntries.set(`codex:${scan.projectEncoded}`, {
+      source: 'codex',
+      encodedName: scan.projectEncoded,
+      decodedName: scan.cwd,
+      shortName,
+    })
+    sessions.push({
+      source: 'codex',
+      projectEncoded: scan.projectEncoded,
+      projectLabel: scan.cwd,
+      projectShortName: shortName,
+      sessionId: scan.meta.id,
+      filePath: entry.filePath,
+      fileSize: entry.size,
+      fileMtimeMs: entry.mtimeMs,
+      fingerprint: `${entry.mtimeMs}:${entry.size}`,
+      meta: scan.meta,
+    })
+  }
+
+  const cherrySessions = await listCherryStudioIndexedSessions({
+    homeDir: path.resolve(roots.claudeProjectsDir, '..', '..'),
+  })
+  for (const session of cherrySessions) {
+    sessions.push(session)
+    projectEntries.set(`cherrystudio:${session.projectEncoded}`, {
+      source: 'cherrystudio',
+      encodedName: session.projectEncoded,
+      decodedName: session.projectLabel,
+      shortName: session.projectShortName,
+    })
+  }
+
+  const projectList = [...projectEntries.values()]
+  disambiguateProjectEntries(projectList)
+  const resolvedNames = new Map(projectList.map((entry) => [`${entry.source}:${entry.encodedName}`, entry.shortName]))
+
+  return sessions.map((session) => ({
+    ...session,
+    projectShortName: resolvedNames.get(`${session.source}:${session.projectEncoded}`) ?? session.projectShortName,
+  }))
 }

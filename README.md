@@ -16,6 +16,7 @@ A browser-based viewer for local Claude Code, Codex, and Cherry Studio session h
 - 📤 **Readable Local Export** - Export the current readable session surface as standalone HTML, print/PDF, or a local share link backed by the same renderer you see in the app
 - 🔍 **SQLite Search Server** - Query a local SQLite-backed index across full session content, rank hits with FTS5/BM25 + trigram + local embedding recall, and jump straight to the matching message
 - 🎯 **Open by Session ID** - Paste a session id (or its `.jsonl` path) into the search box to jump straight to that session, even one buried far down a large project — a separate identifier lane from full-text search, so a normal search that merely mentions an id is never hijacked
+- 🧾 **My Inputs Ledger** - List exact human inputs across local sessions from newest to oldest, keep session/source provenance visible, and export only the selected corrections as a versioned feedback evidence packet
 - 🧠 **Claude Skill Suggestions** - Run an on-demand local Claude Code team analysis over recent history and get reusable skill ideas with discussion notes
 - 📝 **Markdown Rendering** - Renders AI responses with markdown formatting inside parsed sessions
 - 🎨 **Clean UI** - Focused, distraction-free interface
@@ -75,6 +76,7 @@ src/
 │   ├── codex/          # Codex conversation / structure / diagnostics workspace
 │   ├── layout/         # App shell, sidebar
 │   ├── recommendations/# Claude-backed skill suggestion panel
+│   ├── user-inputs/    # Exact-input ledger + explicit feedback packet export
 │   ├── session/        # Session viewer, message renderers, timeline
 │   └── shared/         # Reusable components
 ├── hooks/              # React hooks (state, file loading)
@@ -83,6 +85,7 @@ src/
 │   ├── codex-navigation.ts  # Codex thread tree / task-map helpers
 │   ├── codex-learning.ts    # Codex learning summaries and hidden-noise analysis
 │   ├── skill-recommendations.ts # Shared types + session dossiers for Claude-backed skill analysis
+│   ├── user-inputs.ts  # Cross-session input contract + feedback packet renderer
 │   ├── source-metadata.ts       # Source label/badge/section registry
 │   ├── tree-parser.ts  # Conversation tree analysis
 │   ├── fs-access.ts    # File system abstraction
@@ -128,6 +131,16 @@ Search stays fully local after the server and model cache are available. The ser
 Browser-only file access mode still works for browsing sessions, but transcript search now requires the local Node/Vite server API because indexing and ranking run on the server side.
 
 The search box also doubles as an identifier jump. Paste a session id — a bare UUID, a Cherry agent id like `session_1774486987818_…`, a `topic:` Cherry chat id, or a `.jsonl` path — and a direct **Open session** card appears above the full-text results. This resolve lane is deliberately separate from full-text search: it locates the session file by id — bypassing the per-project scan limit — instead of matching content, so it reaches old sessions that search ranking would never surface. Because a bare id must be the entire query, a normal search that merely mentions an id is never hijacked. Resolution works in browser mode for `Claude`/`Codex`; Cherry Studio resolution needs the local server.
+
+### My Inputs and Feedback Evidence
+
+The bottom-rail **My Inputs** workspace reads the clients' own input ledgers (`~/.claude/history.jsonl` and `~/.codex/history.jsonl`) and joins them with the existing scan cache for project labels. It lists exact human inputs newest first without opening multi-hundred-megabyte rollout files or waiting for full-text/embedding indexing. Every row keeps its source, project, session id, and exact timestamp. Cherry Studio inputs use its local session catalog because it has no equivalent input ledger.
+
+Claude paste markers are expanded only when the history record still carries their inline content. If a record retains only a content hash, the row is omitted and the UI reports that coverage gap instead of presenting `[Pasted text …]` as the user's complete words. The full Codex parser still preserves compaction-only prompts for transcript search, with an honest session-start → compaction range, but the primary My Inputs path uses the timestamped Codex input ledger.
+
+Users can filter likely interruptions/corrections, select the entries that matter, and export `claude-flow-feedback-evidence/v1` Markdown. That file is an evidence packet, not an inferred rule: Flow Viewer does no automatic distillation or skill mutation. AgentZero accepts the packet explicitly with `--domain feedback`, where its normal provenance and human-adjudication gates apply.
+
+This workspace requires `npm run dev` or `npm run preview`; browser/manual file mode cannot read the client input ledgers.
 
 ### Claude Skill Suggestions
 

@@ -4,6 +4,7 @@ import path from 'node:path'
 
 import Database from 'better-sqlite3'
 
+import { detectDecision } from '../../src/lib/decision-detector'
 import { parseSessionContent } from '../../src/lib/parser'
 import {
   SearchEngine,
@@ -18,11 +19,17 @@ import {
 } from '../../src/lib/search'
 import type { SearchEmbeddingProvider } from './embedding-provider'
 import { listIndexedSessionFiles, type IndexedSessionFile, type SearchRoots } from './session-catalog'
+import {
+  isHumanAuthoredHistoryInput,
+  type UserInputListOptions,
+  type UserInputListPayload,
+  type UserInputRecord,
+} from '../../src/lib/user-inputs'
 
 const SEARCH_HOME_DIR = path.join(os.homedir(), '.claude-flow-viewer')
 const SEARCH_DB_PATH = path.join(SEARCH_HOME_DIR, 'search.sqlite')
 const REFRESH_INTERVAL_MS = 5000
-const SCHEMA_VERSION = '4'
+const SCHEMA_VERSION = '5'
 const DEFAULT_LEXICAL_LIMIT = 80
 const DEFAULT_EMBEDDING_LIMIT = 80
 const DEFAULT_FALLBACK_SCAN_LIMIT = 160
@@ -31,6 +38,8 @@ const EMBEDDING_SIGNAL_WEIGHT = 12
 const MAX_QUERY_EMBEDDING_CACHE = 64
 const SEARCH_VEC_TABLE = 'search_embeddings_vec'
 const EMBEDDING_DIMS_META_KEY = 'embedding_dimensions'
+const USER_INPUT_CATALOG_TTL_MS = 5000
+const CHERRY_INPUT_PARSE_BATCH_SIZE = 8
 
 type IndexedSessionRow = {
   source: SearchChunkRecord['source']
@@ -110,6 +119,19 @@ type SearchSignal = {
   embedding?: number
 }
 
+type UserInputSessionCacheEntry = {
+  fingerprint: string
+  inputs: UserInputRecord[]
+}
+
+type UserInputCoverage = NonNullable<UserInputListPayload['coverage']>
+
+type HistoryInputsResult = {
+  inputs: UserInputRecord[]
+  coverage: UserInputCoverage
+  omittedClaudePasteTimestamps: string[]
+}
+
 export interface SearchStatusPayload {
   backend: 'sqlite'
   dbPath: string
@@ -128,6 +150,7 @@ export interface SQLiteSearchServiceOptions {
   embeddingProvider?: SearchEmbeddingProvider | null
   lexicalCandidateLimit?: number
   embeddingCandidateLimit?: number
+  userInputSessionCatalog?: () => Promise<IndexedSessionFile[]>
 }
 
 function openDatabase(dbPath: string): InstanceType<typeof Database> {
@@ -240,12 +263,55 @@ function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, '\\$&')
 }
 
+function sortUserInputs(inputs: UserInputRecord[]): UserInputRecord[] {
+  return inputs.sort((left, right) => {
+    const byTime = right.sortTimestamp.localeCompare(left.sortTimestamp)
+    if (byTime !== 0) return byTime
+    const byOrdinal = (right.ordinal ?? -1) - (left.ordinal ?? -1)
+    if (byOrdinal !== 0) return byOrdinal
+    return right.id.localeCompare(left.id)
+  })
+}
+
+function sessionRecencyMs(session: IndexedSessionFile): number {
+  const startMs = Date.parse(session.meta.startTime)
+  return Math.max(session.fileMtimeMs, Number.isFinite(startMs) ? startMs : 0)
+}
+
+function reconstructClaudeHistoryText(
+  display: unknown,
+  pastedContents: unknown,
+): { text: string | null; omittedPaste: boolean } {
+  if (typeof display !== 'string' || !display) return { text: null, omittedPaste: false }
+  const pasted = pastedContents && typeof pastedContents === 'object'
+    ? pastedContents as Record<string, unknown>
+    : {}
+  let omittedPaste = false
+  const text = display.replace(/\[Pasted text #(\d+)[^\]]*\]/g, (marker, id: string) => {
+    const entry = pasted[id]
+    const content = entry && typeof entry === 'object'
+      ? (entry as Record<string, unknown>).content
+      : null
+    if (typeof content === 'string') return content
+    omittedPaste = true
+    return marker
+  })
+  return omittedPaste ? { text: null, omittedPaste: true } : { text, omittedPaste: false }
+}
+
+function unixTimestampToIso(value: unknown, unit: 'seconds' | 'milliseconds'): string | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  const date = new Date(unit === 'seconds' ? value * 1000 : value)
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null
+}
+
 export class SQLiteSearchService {
   private readonly roots: SearchRoots
   private readonly dbPath: string
   private readonly db: InstanceType<typeof Database>
   private readonly lexicalCandidateLimit: number
   private readonly embeddingCandidateLimit: number
+  private readonly userInputSessionCatalog: () => Promise<IndexedSessionFile[]>
 
   private embeddingProvider: SearchEmbeddingProvider | null
   private embeddingEnabled: boolean
@@ -256,6 +322,9 @@ export class SQLiteSearchService {
   private vecLoadPromise: Promise<void> | null = null
   private vecTableDirty = false
   private readonly queryEmbeddingCache = new Map<string, Float32Array>()
+  private readonly userInputSessionCache = new Map<string, UserInputSessionCacheEntry>()
+  private userInputCatalogCache: { expiresAt: number; sessions: IndexedSessionFile[] } | null = null
+  private userInputCatalogPromise: Promise<IndexedSessionFile[]> | null = null
 
   private readonly selectIndexedSessionsStmt
   private readonly deleteIndexedSessionStmt
@@ -280,6 +349,7 @@ export class SQLiteSearchService {
     this.dbPath = dbPath
     this.lexicalCandidateLimit = options.lexicalCandidateLimit ?? DEFAULT_LEXICAL_LIMIT
     this.embeddingCandidateLimit = options.embeddingCandidateLimit ?? DEFAULT_EMBEDDING_LIMIT
+    this.userInputSessionCatalog = options.userInputSessionCatalog ?? (() => listIndexedSessionFiles(this.roots))
     this.embeddingProvider = options.embeddingProvider ?? null
     this.embeddingEnabled = Boolean(this.embeddingProvider)
 
@@ -483,6 +553,252 @@ export class SQLiteSearchService {
       results: results ?? [],
       status: this.getStatusPayload(),
     }
+  }
+
+  async listUserInputs(options: UserInputListOptions = {}): Promise<UserInputListPayload> {
+    const requestedLimit = Number.isFinite(options.limit) ? Number(options.limit) : 200
+    const limit = Math.max(1, Math.min(500, Math.trunc(requestedLimit)))
+    const sourceFilter = options.sources?.length ? new Set(options.sources) : null
+    const catalog = await this.getUserInputSessionCatalog()
+    const history = await this.readHistoryUserInputs(catalog)
+    const collected = history.inputs
+      .filter((input) => !sourceFilter || sourceFilter.has(input.source))
+      .filter((input) => !options.projectEncoded || input.projectEncoded === options.projectEncoded)
+
+    if (!sourceFilter || sourceFilter.has('cherrystudio')) {
+      const historyEligible = sortUserInputs(collected.filter((input) => (
+        !options.feedbackOnly || input.decision !== 'none' || input.origin === 'queued'
+      )))
+      const cutoffMs = historyEligible.length >= limit
+        ? Date.parse(historyEligible[limit - 1].sortTimestamp)
+        : Number.NEGATIVE_INFINITY
+      const cherryCandidates = catalog
+        .filter((session) => session.source === 'cherrystudio')
+        .filter((session) => !options.projectEncoded || session.projectEncoded === options.projectEncoded)
+        .filter((session) => sessionRecencyMs(session) >= cutoffMs)
+        .sort((left, right) => sessionRecencyMs(right) - sessionRecencyMs(left))
+
+      for (let index = 0; index < cherryCandidates.length; index += CHERRY_INPUT_PARSE_BATCH_SIZE) {
+        const batch = cherryCandidates.slice(index, index + CHERRY_INPUT_PARSE_BATCH_SIZE)
+        const batchInputs = await Promise.all(batch.map((session) => this.readSessionUserInputs(session)))
+        collected.push(...batchInputs.flat())
+      }
+    }
+
+    const records = sortUserInputs(collected.filter((input) => (
+      !options.feedbackOnly || input.decision !== 'none' || input.origin === 'queued'
+    ))).slice(0, limit)
+    const visibleWindowStart = records[records.length - 1]?.sortTimestamp
+    history.coverage.omittedClaudePasteInputs = (
+      (!sourceFilter || sourceFilter.has('claude'))
+      && !options.projectEncoded
+      && visibleWindowStart
+    )
+      ? history.omittedClaudePasteTimestamps.filter((timestamp) => timestamp >= visibleWindowStart).length
+      : 0
+
+    return {
+      generatedAt: new Date().toISOString(),
+      inputs: records,
+      coverage: history.coverage,
+    }
+  }
+
+  private async readHistoryUserInputs(catalog: IndexedSessionFile[]): Promise<HistoryInputsResult> {
+    const homeDir = path.resolve(this.roots.claudeProjectsDir, '..', '..')
+    const claudeHistoryPath = path.join(homeDir, '.claude', 'history.jsonl')
+    const codexHistoryPath = path.join(this.roots.codexRootDir, 'history.jsonl')
+    const sessionLookup = new Map(
+      catalog.map((session) => [`${session.source}:${session.sessionId}`, session]),
+    )
+    const promptCounters = new Map<string, number>()
+    const inputs: UserInputRecord[] = []
+    const omittedClaudePasteTimestamps: string[] = []
+    const coverage: UserInputCoverage = {
+      claudeHistory: fs.existsSync(claudeHistoryPath) ? 'available' : 'missing',
+      codexHistory: fs.existsSync(codexHistoryPath) ? 'available' : 'missing',
+      omittedClaudePasteInputs: 0,
+      malformedHistoryLines: 0,
+    }
+
+    const appendInput = ({
+      source,
+      sessionId,
+      text,
+      timestamp,
+      lineNumber,
+      project,
+    }: {
+      source: 'claude' | 'codex'
+      sessionId: string
+      text: string
+      timestamp: string
+      lineNumber: number
+      project?: string
+    }) => {
+      const session = sessionLookup.get(`${source}:${sessionId}`)
+      const derivedClaudeEncoded = project?.startsWith('/') ? project.replaceAll('/', '-') : project
+      const projectEncoded = session?.projectEncoded
+        ?? (source === 'claude' && derivedClaudeEncoded ? derivedClaudeEncoded : `codex:unknown:${sessionId}`)
+      const projectLabel = session?.projectLabel ?? project ?? 'Unknown Codex project'
+      const projectShortName = session?.projectShortName ?? (project ? path.basename(project) : 'Codex')
+      const counterKey = `${source}:${sessionId}`
+      const promptNum = (promptCounters.get(counterKey) ?? 0) + 1
+      promptCounters.set(counterKey, promptNum)
+      inputs.push({
+        id: `${source}-history:${sessionId}:${lineNumber}`,
+        source,
+        projectEncoded,
+        projectLabel,
+        projectShortName,
+        sessionId,
+        sessionStartTime: session?.meta.startTime ?? timestamp,
+        text,
+        timestamp,
+        timeRangeStart: null,
+        timeRangeEnd: null,
+        origin: 'direct',
+        decision: detectDecision(text, promptNum),
+        promptNum,
+        sortTimestamp: timestamp,
+        ordinal: null,
+      })
+    }
+
+    if (coverage.claudeHistory === 'available') {
+      const raw = await fs.promises.readFile(claudeHistoryPath, 'utf-8')
+      raw.split('\n').forEach((line, lineIndex) => {
+        if (!line.trim()) return
+        try {
+          const row = JSON.parse(line) as Record<string, unknown>
+          if (typeof row.sessionId !== 'string') return
+          const timestamp = unixTimestampToIso(row.timestamp, 'milliseconds')
+          if (!timestamp) return
+          const reconstructed = reconstructClaudeHistoryText(row.display, row.pastedContents)
+          if (reconstructed.omittedPaste) omittedClaudePasteTimestamps.push(timestamp)
+          if (!reconstructed.text) return
+          appendInput({
+            source: 'claude',
+            sessionId: row.sessionId,
+            text: reconstructed.text,
+            timestamp,
+            lineNumber: lineIndex + 1,
+            project: typeof row.project === 'string' ? row.project : undefined,
+          })
+        } catch {
+          coverage.malformedHistoryLines += 1
+        }
+      })
+    }
+
+    if (coverage.codexHistory === 'available') {
+      const raw = await fs.promises.readFile(codexHistoryPath, 'utf-8')
+      raw.split('\n').forEach((line, lineIndex) => {
+        if (!line.trim()) return
+        try {
+          const row = JSON.parse(line) as Record<string, unknown>
+          if (typeof row.session_id !== 'string' || typeof row.text !== 'string') return
+          if (!isHumanAuthoredHistoryInput(row.text)) return
+          const timestamp = unixTimestampToIso(row.ts, 'seconds')
+          if (!timestamp) return
+          appendInput({
+            source: 'codex',
+            sessionId: row.session_id,
+            text: row.text,
+            timestamp,
+            lineNumber: lineIndex + 1,
+          })
+        } catch {
+          coverage.malformedHistoryLines += 1
+        }
+      })
+    }
+
+    return { inputs, coverage, omittedClaudePasteTimestamps }
+  }
+
+  private async getUserInputSessionCatalog(): Promise<IndexedSessionFile[]> {
+    const now = Date.now()
+    if (this.userInputCatalogCache && this.userInputCatalogCache.expiresAt > now) {
+      return this.userInputCatalogCache.sessions
+    }
+    if (this.userInputCatalogPromise) return this.userInputCatalogPromise
+
+    this.userInputCatalogPromise = this.userInputSessionCatalog().then((sessions) => {
+      this.userInputCatalogCache = {
+        expiresAt: Date.now() + USER_INPUT_CATALOG_TTL_MS,
+        sessions,
+      }
+      return sessions
+    })
+
+    try {
+      return await this.userInputCatalogPromise
+    } finally {
+      this.userInputCatalogPromise = null
+    }
+  }
+
+  private async readSessionUserInputs(session: IndexedSessionFile): Promise<UserInputRecord[]> {
+    const key = sessionKey(session.source, session.projectEncoded, session.sessionId)
+    const cached = this.userInputSessionCache.get(key)
+    if (cached?.fingerprint === session.fingerprint) return cached.inputs
+
+    const content = session.loadContent
+      ? await session.loadContent()
+      : await fs.promises.readFile(session.filePath, 'utf-8')
+    const data = parseSessionContent(content, session.source)
+    const inputs: UserInputRecord[] = []
+
+    data.messages.forEach((message, messageIndex) => {
+      if (message.kind !== 'user-prompt') return
+      const exactTimestamp = message.timestamp && Number.isFinite(Date.parse(message.timestamp))
+        ? message.timestamp
+        : null
+      const origin = message.queued ? 'queued' : 'direct'
+      inputs.push({
+        id: `${session.projectEncoded}:${session.meta.id}:${messageIndex}:prompt`,
+        source: session.source,
+        projectEncoded: session.projectEncoded,
+        projectLabel: session.projectLabel,
+        projectShortName: session.projectShortName,
+        sessionId: session.sessionId,
+        sessionStartTime: session.meta.startTime,
+        text: message.text,
+        timestamp: exactTimestamp,
+        timeRangeStart: null,
+        timeRangeEnd: null,
+        origin,
+        decision: message.decision,
+        promptNum: message.promptNum,
+        sortTimestamp: exactTimestamp ?? session.meta.startTime,
+        ordinal: null,
+      })
+    })
+
+    data.retainedUserInputs?.forEach((input) => {
+      inputs.push({
+        id: `${session.projectEncoded}:${session.meta.id}:${-(input.ordinal + 1)}:prompt`,
+        source: session.source,
+        projectEncoded: session.projectEncoded,
+        projectLabel: session.projectLabel,
+        projectShortName: session.projectShortName,
+        sessionId: session.sessionId,
+        sessionStartTime: session.meta.startTime,
+        text: input.text,
+        timestamp: null,
+        timeRangeStart: input.timeRangeStart,
+        timeRangeEnd: input.timeRangeEnd,
+        origin: input.origin,
+        decision: input.decision,
+        promptNum: null,
+        sortTimestamp: input.sortTimestamp,
+        ordinal: input.ordinal,
+      })
+    })
+
+    this.userInputSessionCache.set(key, { fingerprint: session.fingerprint, inputs })
+    return inputs
   }
 
   async getStatus(): Promise<SearchStatusPayload> {

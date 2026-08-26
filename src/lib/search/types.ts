@@ -24,6 +24,10 @@ export interface SearchChunkLocator {
   messageIndex: number
   promptNum?: number
   timestamp?: string
+  origin?: 'direct' | 'queued' | 'compacted'
+  timeRangeStart?: string
+  timeRangeEnd?: string
+  ordinal?: number
 }
 
 export interface SearchChunkRecord {

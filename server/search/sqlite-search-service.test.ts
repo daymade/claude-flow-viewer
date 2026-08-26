@@ -475,4 +475,110 @@ describe('SQLiteSearchService', () => {
     expect(payload.results[0]?.snippet.toLowerCase()).toContain('framwork')
     expect(refreshCalls).toBe(0)
   })
+
+  it('lists recent exact user inputs from the lightweight Claude and Codex history logs', async () => {
+    const fixture = await makeFixture()
+    roots.push(fixture.root)
+
+    await writeClaudeSession(
+      path.join(fixture.claudeProjectsDir, 'demo-project', 'session-1.jsonl'),
+      '优先复用以前做过的事情',
+      '收到',
+    )
+    await fs.writeFile(path.join(fixture.root, '.claude', 'history.jsonl'), [
+      JSON.stringify({
+        display: '优先复用以前做过的事情',
+        pastedContents: {},
+        timestamp: Date.parse('2026-03-10T00:00:00.000Z'),
+        project: 'demo-project',
+        sessionId: 'session-1',
+      }),
+      JSON.stringify({
+        display: '[Pasted text #1 +3 lines]',
+        pastedContents: { 1: { id: 1, type: 'text', contentHash: 'hash-only' } },
+        timestamp: Date.parse('2026-03-10T00:00:01.000Z'),
+        project: 'demo-project',
+        sessionId: 'session-1',
+      }),
+    ].join('\n'))
+
+    const codexPath = path.join(
+      fixture.codexSessionsDir,
+      '2026',
+      '08',
+      '26',
+      'rollout-2026-08-26T00-26-51-01a039be-f86d-7203-b821-1d72370e1b69.jsonl',
+    )
+    await fs.mkdir(path.dirname(codexPath), { recursive: true })
+    await fs.writeFile(codexPath, [
+      JSON.stringify({
+        timestamp: '2026-08-26T00:26:51.000Z',
+        type: 'session_meta',
+        payload: {
+          id: '01a039be-f86d-7203-b821-1d72370e1b69',
+          timestamp: '2026-08-26T00:26:51.000Z',
+          cwd: '/Users/test/workspace/pkm',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-08-26T02:42:07.000Z',
+        type: 'compacted',
+        payload: {
+          replacement_history: [
+            { role: 'user', content: [{ type: 'input_text', text: '你要看一下我们以前是怎么做的' }] },
+            { role: 'assistant', content: [{ type: 'output_text', text: '收到' }] },
+          ],
+        },
+      }),
+    ].join('\n'))
+    await fs.writeFile(path.join(fixture.codexRootDir, 'history.jsonl'), [
+      JSON.stringify({
+        session_id: '01a039be-f86d-7203-b821-1d72370e1b69',
+        ts: Date.parse('2026-08-26T02:42:07.000Z') / 1000,
+        text: '你要看一下我们以前是怎么做的',
+      }),
+      JSON.stringify({
+        session_id: '01a039be-f86d-7203-b821-1d72370e1b69',
+        ts: Date.parse('2026-08-26T02:42:08.000Z') / 1000,
+        text: '• UserPromptSubmit (blocked) says: fused session.\n  feedback: Start a new chat.',
+      }),
+    ].join('\n'))
+
+    const service = createSQLiteSearchService({
+      claudeProjectsDir: fixture.claudeProjectsDir,
+      codexRootDir: fixture.codexRootDir,
+      codexSessionsDir: fixture.codexSessionsDir,
+    }, fixture.dbPath)
+
+    const payload = await service.listUserInputs({ limit: 10 })
+
+    const db = new Database(fixture.dbPath)
+    try {
+      const indexed = db.prepare('SELECT count(*) AS count FROM indexed_sessions').get() as { count: number }
+      expect(indexed.count).toBe(0)
+    } finally {
+      db.close()
+    }
+
+    expect(payload.inputs.map((input) => input.text)).toEqual([
+      '你要看一下我们以前是怎么做的',
+      '优先复用以前做过的事情',
+    ])
+    expect(payload.inputs[0]).toMatchObject({
+      source: 'codex',
+      origin: 'direct',
+      timestamp: '2026-08-26T02:42:07.000Z',
+    })
+    expect(payload.inputs[1]).toMatchObject({
+      source: 'claude',
+      origin: 'direct',
+      timestamp: '2026-03-10T00:00:00.000Z',
+    })
+    expect(payload.coverage).toMatchObject({
+      claudeHistory: 'available',
+      codexHistory: 'available',
+      omittedClaudePasteInputs: 1,
+      malformedHistoryLines: 0,
+    })
+  })
 })

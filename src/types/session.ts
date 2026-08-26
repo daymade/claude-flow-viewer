@@ -1,6 +1,7 @@
 export type DecisionMarker = 'none' | 'interrupt' | 'correction'
 export type SessionSource = 'claude' | 'codex' | 'cherrystudio'
 export type SessionThreadKind = 'primary' | 'subagent'
+export type UserInputOrigin = 'direct' | 'queued' | 'compacted'
 
 export interface EmbeddedImage {
   mediaType: string
@@ -8,7 +9,7 @@ export interface EmbeddedImage {
 }
 
 export type SessionMessage =
-  | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; decision: DecisionMarker; queued?: boolean; dupCount?: number }
+  | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; timestamp?: string; decision: DecisionMarker; queued?: boolean; dupCount?: number }
   | { kind: 'tool-result'; content: string; isError: boolean; externalFile?: string; totalSize?: string; timestamp?: string }
   | { kind: 'ai-text'; text: string; timestamp?: string }
   | { kind: 'ai-thinking'; preview: string; full: string; timestamp?: string }
@@ -37,7 +38,24 @@ export interface PromptIndexEntry {
   preview: string
   fullText: string
   time: string
+  timestamp?: string
   decision: DecisionMarker
+}
+
+/**
+ * User input retained only inside a Codex compaction replacement history.
+ * Codex preserves the exact text and order but not the original per-message timestamp,
+ * so callers must display the honest session-start -> compaction time window.
+ */
+export interface RetainedUserInput {
+  id: string
+  text: string
+  decision: DecisionMarker
+  origin: 'compacted'
+  timeRangeStart: string
+  timeRangeEnd: string
+  sortTimestamp: string
+  ordinal: number
 }
 
 export interface SessionMarkers {
@@ -115,6 +133,7 @@ export interface SessionData {
   source: SessionSource
   messages: SessionMessage[]
   prompts: PromptIndexEntry[]
+  retainedUserInputs?: RetainedUserInput[]
   heatmap: number[]
   markers: SessionMarkers
 }
