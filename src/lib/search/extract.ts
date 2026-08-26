@@ -83,7 +83,7 @@ function createChunk(
 
 function messageTimestamp(message: SessionMessage): string | undefined {
   switch (message.kind) {
-    case 'user-prompt': return message.time
+    case 'user-prompt': return message.timestamp ?? message.time
     case 'ai-text':
     case 'ai-thinking':
     case 'ai-tool-use':
@@ -116,8 +116,18 @@ function messageToChunk(
         session,
         'prompt',
         message.text,
-        { kind: 'prompt', messageIndex, promptNum: message.promptNum, timestamp: message.time },
-        message.images.map((image) => image.mediaType),
+        {
+          kind: 'prompt',
+          messageIndex,
+          promptNum: message.promptNum,
+          timestamp: message.timestamp ?? message.time,
+          origin: message.queued ? 'queued' : 'direct',
+        },
+        [
+          ...message.images.map((image) => image.mediaType),
+          `decision:${message.decision}`,
+          `origin:${message.queued ? 'queued' : 'direct'}`,
+        ],
       )
     case 'ai-text':
       return createChunk(session, 'ai-text', message.text, { kind: 'ai-text', messageIndex, timestamp: message.timestamp })
@@ -186,6 +196,25 @@ export function extractSearchChunks(session: SearchSessionRecord): SearchChunkRe
 
   session.data.messages.forEach((message, messageIndex) => {
     const chunk = messageToChunk(session, message, messageIndex)
+    if (chunk) chunks.push(chunk)
+  })
+
+  session.data.retainedUserInputs?.forEach((input) => {
+    const chunk = createChunk(
+      session,
+      'prompt',
+      input.text,
+      {
+        kind: 'prompt',
+        messageIndex: -(input.ordinal + 1),
+        timestamp: input.sortTimestamp,
+        origin: input.origin,
+        timeRangeStart: input.timeRangeStart,
+        timeRangeEnd: input.timeRangeEnd,
+        ordinal: input.ordinal,
+      },
+      [`decision:${input.decision}`, 'origin:compacted'],
+    )
     if (chunk) chunks.push(chunk)
   })
 

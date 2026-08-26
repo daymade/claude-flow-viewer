@@ -11,6 +11,8 @@ import { CodexWorkspaceView } from '../codex/CodexWorkspaceView'
 import { SkillRecommendationsPanel } from '../recommendations/SkillRecommendationsPanel'
 import { SearchResultsPanel } from '../search/SearchResultsPanel'
 import { SessionView } from '../session/SessionView'
+import { UserInputsWorkspace } from '../user-inputs/UserInputsWorkspace'
+import type { UserInputRecord } from '../../lib/user-inputs'
 import type { FilterState, ResolvedSessionRef } from '../../types/session'
 
 const FILTER_LABELS: { key: keyof FilterState; label: string }[] = [
@@ -50,6 +52,16 @@ export function AppShell() {
   const importFileRef = useRef<HTMLInputElement>(null)
   const [importing, setImporting] = useState(false)
   const [sharing, setSharing] = useState(false)
+  const [showUserInputs, setShowUserInputs] = useState(false)
+
+  const handleSelectSession = useCallback((projectEncoded: string, sessionId: string, sourceHint?: UserInputRecord['source']) => {
+    setShowUserInputs(false)
+    void loadSession(projectEncoded, sessionId, sourceHint)
+  }, [loadSession])
+
+  const handleOpenUserInputSession = useCallback((input: UserInputRecord) => {
+    handleSelectSession(input.projectEncoded, input.sessionId, input.source)
+  }, [handleSelectSession])
 
   const handleExport = useCallback(() => {
     exportSessionAsHTML()
@@ -217,7 +229,7 @@ export function AppShell() {
   }, [activeProject, activeSession])
   const showMessageFilters = activeProject?.source !== 'codex'
   const activeSourceMeta = activeProject ? SOURCE_METADATA[activeProject.source] : null
-  const showSkillRecommendations = !state.searchQuery.trim() && activeProject?.source !== 'codex'
+  const showSkillRecommendations = !showUserInputs && !state.searchQuery.trim() && activeProject?.source !== 'codex'
 
   // Keyboard shortcut: Cmd+K for search focus
   const searchRef = useRef<HTMLInputElement>(null)
@@ -306,8 +318,14 @@ export function AppShell() {
           <SearchResultsPanel
             query={state.searchQuery}
             search={search}
-            onSelectResult={selectResult}
-            onOpenResolved={openResolved}
+            onSelectResult={(result) => {
+              setShowUserInputs(false)
+              void selectResult(result)
+            }}
+            onOpenResolved={() => {
+              setShowUserInputs(false)
+              void openResolved()
+            }}
           />
         </div>
 
@@ -318,13 +336,27 @@ export function AppShell() {
             activeSessionId={state.activeSessionId}
             activeProjectEncoded={state.activeProjectEncoded}
             searchQuery={sidebarSearchQuery}
-            onSelectSession={loadSession}
+            onSelectSession={handleSelectSession}
             onLoadAllSessions={loadAllProjectSessions}
           />
         </div>
 
         {/* Secondary tools + global stats, pinned at the bottom out of the content path */}
         <div className="shrink-0 border-t border-stone-200/70 px-3 py-2">
+          <button
+            type="button"
+            onClick={() => setShowUserInputs(true)}
+            className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium transition-colors ${
+              showUserInputs ? 'bg-amber-50 text-amber-800' : 'text-stone-600 hover:bg-stone-100'
+            }`}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M4 5h16M4 12h16M4 19h10" />
+              <path d="M2 5h.01M2 12h.01M2 19h.01" />
+            </svg>
+            我的输入
+            <span className="ml-auto text-[10px] font-normal text-stone-400">新到旧</span>
+          </button>
           {showSkillRecommendations && (
             <SkillRecommendationsPanel
               key={skillPanelStoreKey}
@@ -360,12 +392,12 @@ export function AppShell() {
       <div
         className="flex-1 flex flex-col min-w-0 min-h-0"
         onWheel={handleContentWheel}
-        data-export-live={state.activeSessionData ? true : undefined}
-        data-export-title={state.activeSessionData ? activeExportTitle : undefined}
-        data-export-filename={state.activeSessionData ? activeExportFilename : undefined}
+        data-export-live={!showUserInputs && state.activeSessionData ? true : undefined}
+        data-export-title={!showUserInputs && state.activeSessionData ? activeExportTitle : undefined}
+        data-export-filename={!showUserInputs && state.activeSessionData ? activeExportFilename : undefined}
       >
         {/* Content Header (selection context + filters) */}
-        <div className="bg-white border-b border-stone-200/70 px-4 py-2.5 flex flex-col gap-2 shrink-0 sm:flex-row sm:items-start sm:gap-4">
+        {!showUserInputs && <div className="bg-white border-b border-stone-200/70 px-4 py-2.5 flex flex-col gap-2 shrink-0 sm:flex-row sm:items-start sm:gap-4">
           {activeProject ? (
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
@@ -525,10 +557,16 @@ export function AppShell() {
               ))}
             </div>
           ) : null}
-        </div>
+        </div>}
 
         {/* Session content */}
-        {state.loading ? (
+        {showUserInputs ? (
+          <UserInputsWorkspace
+            fileStore={state.fileStore}
+            onClose={() => setShowUserInputs(false)}
+            onOpenSession={handleOpenUserInputSession}
+          />
+        ) : state.loading ? (
           <div className="flex-1 flex items-center justify-center text-stone-400 text-sm">
             <div className="flex flex-col items-center gap-2">
               <div className="w-6 h-6 border-2 border-amber-200 border-t-amber-600 rounded-full animate-spin" />
@@ -546,7 +584,7 @@ export function AppShell() {
                 searchQuery={state.searchQuery}
                 fileStore={state.fileStore}
                 activeSearchTarget={activeSearchTarget}
-                onSelectSession={loadSession}
+                onSelectSession={handleSelectSession}
               />
             ) : (
               <SessionView

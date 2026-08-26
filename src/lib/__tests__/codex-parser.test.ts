@@ -478,4 +478,61 @@ describe('codex quick scan', () => {
     expect(result?.meta.promptCount).toBe(1)
     expect(result?.meta.recordCount).toBe(3)
   })
+
+  it('recovers exact user inputs retained only by the last Codex compaction', () => {
+    const content = jsonl(
+      {
+        timestamp: '2026-08-26T00:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: '01a039be-f86d-7203-b821-1d72370e1b69',
+          timestamp: '2026-08-26T00:00:00.000Z',
+          cwd: '/Users/test/workspace/pkm',
+        },
+      },
+      {
+        timestamp: '2026-08-26T02:00:00.000Z',
+        type: 'compacted',
+        payload: {
+          replacement_history: [
+            { role: 'user', content: [{ type: 'input_text', text: '先看我们以前是怎么做的' }] },
+            { role: 'assistant', content: [{ type: 'output_text', text: '好的' }] },
+            { role: 'user', content: [{ type: 'input_text', text: '<skill><name>injected</name></skill>' }] },
+            { role: 'user', content: [{ type: 'input_text', text: '不要重新开启一轮试错' }] },
+          ],
+        },
+      },
+      {
+        timestamp: '2026-08-26T02:01:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '继续当前工作' }],
+        },
+      },
+    )
+
+    const result = parseSessionContent(content)
+
+    expect(result.prompts).toHaveLength(1)
+    expect(result.prompts[0]).toMatchObject({
+      fullText: '继续当前工作',
+      timestamp: '2026-08-26T02:01:00.000Z',
+    })
+    expect(result.retainedUserInputs).toEqual([
+      expect.objectContaining({
+        text: '先看我们以前是怎么做的',
+        origin: 'compacted',
+        timeRangeStart: '2026-08-26T00:00:00.000Z',
+        timeRangeEnd: '2026-08-26T02:00:00.000Z',
+        ordinal: 0,
+      }),
+      expect.objectContaining({
+        text: '不要重新开启一轮试错',
+        origin: 'compacted',
+        ordinal: 3,
+      }),
+    ])
+  })
 })

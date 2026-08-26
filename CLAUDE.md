@@ -18,6 +18,7 @@ npx vitest run src/lib/__tests__/parser.test.ts
 npx vitest run src/lib/__tests__/codex-parser.test.ts
 npx vitest run src/lib/__tests__/vite-plugin-claude-data.test.ts
 npx vitest run server/search/sqlite-search-service.test.ts
+npx vitest run src/components/user-inputs/UserInputsWorkspace.test.tsx
 npx vitest run src/components/search/SearchResultsPanel.test.tsx
 npx vitest run src/components/sidebar/Sidebar.test.tsx
 ```
@@ -71,6 +72,7 @@ Three implementations behind one `FileStore` interface, tried in order:
 - `/share/:id/` — Serve a persisted local share snapshot by id
 - `/api/search/status` — Report local SQLite search availability and index stats
 - `/api/search` — Query the local SQLite-backed transcript index
+- `/api/user-inputs` — List exact cross-session human inputs newest-first from `~/.claude/history.jsonl` + `~/.codex/history.jsonl`, joined to cached session metadata; Cherry uses its local catalog. It must not wait for FTS/embedding indexing or parse giant rollout files.
 - `/api/skill-recommendations/status` — Report whether local Claude-backed skill analysis is ready to run
 - `/api/skill-recommendations` — Run the on-demand Claude-backed skill analysis flow
 
@@ -90,6 +92,7 @@ Three implementations behind one `FileStore` interface, tried in order:
 Provider details:
 - `src/lib/providers/claude.ts` keeps Claude-specific tree parsing, compaction, `/clear`, and marker logic
 - `src/lib/codex-parser.ts` handles Codex `response_item` / `event_msg` normalization, including `event_msg.user_message`, `agent_message`, `mcp_tool_call_end`, `tool_search_*`, task lifecycle, tool calls/results, rollback markers, and thread metadata extraction (`primary` vs `subagent`)
+- Codex compaction `replacement_history` may be the only remaining copy of an earlier human prompt. `retainedUserInputs` preserves its exact text and ordinal while exposing only the honest session-start → compaction time range; never synthesize a per-message timestamp for it.
 - `src/lib/providers/cherrystudio.ts` parses serialized Cherry Studio payloads for both `agents.db` agent sessions and recovered regular-chat topics
 
 **Exports from `parser.ts`**:
@@ -132,7 +135,7 @@ Counts of special events in a session: `{ compacts, plans, clears, forks }`.
 
 ### Supporting Modules
 
-- `src/lib/decision-detector.ts` — Classifies user prompt decisions: `'interrupt'` (contains `[Request interrupted by user]`), `'correction'` (promptNum > 1 + keywords like "no", "wrong", "stop", "instead"), or `'none'`
+- `src/lib/decision-detector.ts` — Classifies user prompt decisions: `'interrupt'` (contains `[Request interrupted by user]`), `'correction'` (promptNum > 1 + narrow English/Chinese agent-correction patterns), or `'none'`. Keep Chinese patterns about the interaction itself; generic domain negation must not become feedback.
 - `src/lib/heatmap.ts` — Per-prompt intensity scoring (0–1). Weights: tool calls +1, errors +3, forks +5, thinking +length/1000, compact +2. **It currently has NO renderer.** All three parsers still compute it into `SessionData.heatmap`, but the sidebar heat-bar it used to feed was deleted in the content-first pass (a blue gradient bar under every row was colour noise in the rail). The data is retained because it is cheap and a better home may exist (e.g. intensity shading on the right-rail outline). **Do not assume it is displayed anywhere — pick a consumer before relying on it, or retire the module.**
 - `src/lib/timeline.ts` — Extracts `TimelineEvent[]` from messages, computes time gaps, formats tokens/durations
 - `src/lib/codex-navigation.ts` — SSOT for the `Codex` sidebar task tree: builds root/delegated hierarchy, filters whole task paths, preserves active lineage, and selects the latest root tasks for scan-time display
@@ -140,10 +143,11 @@ Counts of special events in a session: `{ compacts, plans, clears, forks }`.
 - `src/lib/providers/cherrystudio.ts` — Parses serialized Cherry Studio agent-session and recovered regular-chat payloads into the shared session model. Also exports shared Cherry Studio text utilities (`collectText`, `sanitizeCherryStudioText`) used by the server catalog — keep these as the SSOT for Cherry Studio text processing
 - `src/lib/source-metadata.ts` — Source label/badge/section registry used by the sidebar, header, and search results
 - `src/lib/skill-recommendations.ts` — Shared types plus compact recent-session dossiers for the Claude-backed skill recommendation flow
+- `src/lib/user-inputs.ts` — Shared cross-session exact-input contract and the deterministic `claude-flow-feedback-evidence/v1` Markdown renderer. The packet contains selected evidence only; rule inference belongs to AgentZero.
 - `server/cherrystudio/catalog.ts` — Resolves Cherry Studio user-data paths, loads agent sessions from `agents.db`, recovers regular chats from IndexedDB-backed app data, and serializes per-session content for API/search consumers. Regular-chat recovery is cached with a 30s TTL to avoid rescanning IndexedDB on every session load
 - `server/recommendations/claude-skill-recommendation-service.ts` — Runs an on-demand local Claude Code custom-agent team (`scout` → `skeptic` → `writer`) over recent session dossiers and returns structured skill ideas, launched through the user’s real shell environment (`zsh` / `bash` startup files) rather than a clean process env
 - `src/lib/search/` — Local chunk-based search core. `extract.ts` converts `SessionMeta + SessionData` into searchable chunks, `search-engine.ts` supports chunk hydration/replacement plus hybrid ranking hooks (`bm25` / `embedding` external signals), and `semantic.ts` keeps the lightweight corpus-driven scorer used alongside server signals
-- `server/search/` — Node-side SQLite search service. `session-catalog.ts` discovers session files + quick-scan metadata, `sqlite-search-service.ts` persists chunk rows to `~/.claude-flow-viewer/search.sqlite`, maintains the FTS5/BM25 and embedding tables, and incrementally refreshes them, while `embedding-provider.ts` provides the local model-backed embedding runtime
+- `server/search/` — Node-side search services. `session-catalog.ts` discovers session files + quick-scan metadata and can project the already-populated scan cache into session identities; `sqlite-search-service.ts` persists full-text chunks to `~/.claude-flow-viewer/search.sqlite`, maintains FTS5/BM25 and embedding tables, and separately joins the clients' input ledgers to cached session identities for My Inputs; `embedding-provider.ts` provides the local model-backed embedding runtime
 - `server/scan/session-scan-cache.ts` — Persistent dev-server quick-scan cache for `~/.claude` and `~/.codex`. Reuses unchanged session metadata across server restarts so `/api/scan` stays fast on large local histories. Bump `CACHE_VERSION` whenever quick-scan semantics change; otherwise stale cached metadata can hide parser/scan fixes.
 
 ### Search Flow
@@ -179,6 +183,16 @@ Current behavior is intentionally local-only:
 - default cache/model paths: `~/.claude-flow-viewer/model-cache` and `~/.claude-flow-viewer/models`
 - embedding failure mode: search degrades to lexical-only instead of crashing
 - browser-only file access mode: browsing still works, but transcript search is unavailable without the local server API
+
+### Exact User Inputs → Feedback Evidence
+
+- `SQLiteSearchService.listUserInputs()` reads `~/.claude/history.jsonl` (`display`, `timestamp`, `project`, `sessionId`) and `~/.codex/history.jsonl` (`text`, `ts`, `session_id`), joins cached metadata, and orders by the input event time. It must not call `ensureFreshIndex()`, embed chunks, or parse giant rollouts for this simple ledger.
+- Claude paste placeholders are expanded only when `pastedContents.*.content` exists. Hash-only paste records are omitted and counted in `coverage.omittedClaudePasteInputs`; never show the placeholder as complete original wording. Malformed history lines and missing ledgers are likewise explicit coverage fields.
+- Codex hook/global instruction feedback can enter `history.jsonl` through the same transport. `isHumanAuthoredHistoryInput()` filters the concrete `• UserPromptSubmit (...) says: ... feedback:` envelope and the fully anchored documentation-governance template (prefix + `CLAUDE.md` + delivery section); do not broaden this into keyword filtering that would delete a human discussing a hook or quoting an assistant response.
+- Cherry Studio has no client input ledger, so it remains the only source parsed from its local session catalog. The full Codex parser's `retainedUserInputs` remains a search/transcript recovery path for compaction-only evidence, not the primary timestamped My Inputs source.
+- `src/components/user-inputs/UserInputsWorkspace.tsx` is an editorial evidence ledger: time, source, session, exact input, filtering, selection, and open-original-session. Keep it a compact table rather than a dashboard.
+- Export is a deliberate human selection into `claude-flow-feedback-evidence/v1`. Do not silently scan directories, call AgentZero, distill rules, or mutate skills from this viewer.
+- Browser/manual mode has no cross-session ledger; surface that limitation instead of silently listing only the currently loaded files.
 
 ### Right Rail: Prompt Outline + Timeline
 
@@ -258,6 +272,7 @@ Single `useReducer` with `AppContext`. Key actions:
 - `Codex` delegated runs are nested under their parent task rather than dumped flat, and filters keep the full parent-child path visible
 - Search results now come from the server-backed SQLite index in `SearchResultsPanel`; sidebar tree filtering remains metadata-driven when used on its own
 - When the search box is empty and the active project is not `Codex`, `AppShell` shows `src/components/recommendations/SkillRecommendationsPanel.tsx`, driven by `src/hooks/useClaudeSkillRecommendations.ts`; it uses the local Node/Vite API to run an on-demand local Claude Code analysis instead of heuristic matching, with user-selectable scopes (`Smart`, `This project`, `Recent all`) so cost and breadth stay explicit. Keep this panel hidden for active `Codex` sessions so the sidebar stays focused on task navigation.
+- `My Inputs` is a secondary bottom-rail tool. Opening it replaces the content surface and hides skill recommendations; do not move it above the conversation list or mix its evidence-selection task with session export controls.
 - Marker filters still auto-expand matching `Codex` delegated chains so users do not have to re-open branches just to see a hit
 - The currently active project may be manually collapsed; it should stay collapsed until the user deliberately selects a session in another project
 

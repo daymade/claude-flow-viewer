@@ -17,11 +17,13 @@ import {
 } from './src/lib/providers/codex'
 import { selectCodexRootSessions } from './src/lib/codex-navigation'
 import { createSQLiteSearchService } from './server/search/sqlite-search-service'
+import { listCachedSessionFiles } from './server/search/session-catalog'
 import { listCherryStudioIndexedSessions, readCherryStudioSessionContent } from './server/cherrystudio/catalog'
 import { ClaudeSkillRecommendationService } from './server/recommendations/claude-skill-recommendation-service'
 import { SessionScanCache, getSessionScanCachePath } from './server/scan/session-scan-cache'
 import type { SearchQueryOptions } from './src/lib/search'
 import type { SkillRecommendationAnalyzeOptions } from './src/lib/skill-recommendations'
+import type { UserInputListOptions } from './src/lib/user-inputs'
 
 const MAX_CLAUDE_SESSIONS_PER_PROJECT = 50
 const MAX_CODEX_GROUPS_PER_PROJECT = 50
@@ -52,6 +54,10 @@ const codexProjectSessionCatalog = new Map<string, SessionMeta[]>()
 type SearchRequestBody = {
   query?: string
   options?: SearchQueryOptions
+}
+
+type UserInputRequestBody = {
+  options?: UserInputListOptions
 }
 
 type SkillRecommendationRequestBody = {
@@ -96,6 +102,12 @@ export function claudeDataPlugin(): Plugin {
     claudeProjectsDir,
     codexRootDir,
     codexSessionsDir,
+  }, undefined, {
+    userInputSessionCatalog: () => listCachedSessionFiles({
+      claudeProjectsDir,
+      codexRootDir,
+      codexSessionsDir,
+    }, sessionScanCache),
   })
   const skillRecommendationService = new ClaudeSkillRecommendationService({
     claudeProjectsDir,
@@ -220,6 +232,26 @@ export function claudeDataPlugin(): Plugin {
         readJsonBody(req).then((body) => {
           const payload = body as SearchRequestBody
           return searchService.search(payload.query ?? '', payload.options ?? {})
+        }).then((payload) => {
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(payload))
+        }).catch((err) => {
+          res.statusCode = 500
+          res.end(JSON.stringify({ error: String(err) }))
+        })
+        return
+      }
+
+      if (pathname === '/api/user-inputs') {
+        if ((req.method ?? 'GET').toUpperCase() !== 'POST') {
+          res.statusCode = 405
+          res.end('Use POST /api/user-inputs')
+          return
+        }
+
+        readJsonBody(req).then((body) => {
+          const payload = body as UserInputRequestBody
+          return searchService.listUserInputs(payload.options ?? {})
         }).then((payload) => {
           res.setHeader('Content-Type', 'application/json')
           res.end(JSON.stringify(payload))

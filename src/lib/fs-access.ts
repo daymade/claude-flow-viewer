@@ -6,6 +6,7 @@ import type {
   SkillRecommendationAnalyzeOptions,
   SkillRecommendationBackendStatus,
 } from './skill-recommendations'
+import type { UserInputListOptions, UserInputListPayload } from './user-inputs'
 import { quickScanMetadata, decodeProjectName, extractShortName, disambiguateShortNames } from './parser'
 import {
   CODEX_PROJECT_PREFIX,
@@ -49,6 +50,8 @@ export interface FileStore {
   getSearchBackendStatus(): Promise<SearchBackendStatus>
   analyzeSkillRecommendations(options?: SkillRecommendationAnalyzeOptions): Promise<SkillRecommendationAnalysis>
   getSkillRecommendationBackendStatus(): Promise<SkillRecommendationBackendStatus>
+  /** Server-backed cross-session user-input ledger. Browser/manual stores do not index all sessions. */
+  listUserInputs?(options?: UserInputListOptions): Promise<UserInputListPayload>
   /** Optional browser/manual-mode notice for unsupported source layouts. */
   getBrowserModeNotice?(): Promise<string | null>
   /**
@@ -830,6 +833,16 @@ class APIFileStore implements FileStore {
     if (!res.ok) throw new Error(`Search request failed: ${res.status}`)
     const data = await res.json() as { results: SearchResult[] }
     return data.results
+  }
+
+  async listUserInputs(options: UserInputListOptions = {}): Promise<UserInputListPayload> {
+    const res = await fetch('/api/user-inputs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ options }),
+    })
+    if (!res.ok) throw new Error(`User input request failed: ${res.status}`)
+    return res.json()
   }
 
   async getSearchBackendStatus(): Promise<SearchBackendStatus> {

@@ -5,7 +5,7 @@ import type { SessionMeta, SessionSource } from '../../src/types/session'
 
 const CACHE_VERSION = 3
 
-type CachedScanEntry =
+export type CachedScanEntry =
   | {
       source: 'claude'
       meta: SessionMeta
@@ -23,6 +23,13 @@ type PersistedCacheEntry = {
   mtimeMs: number
   size: number
   fingerprint?: string
+  scan: CachedScanEntry
+}
+
+export type SessionScanCacheEntry = {
+  filePath: string
+  mtimeMs: number
+  size: number
   scan: CachedScanEntry
 }
 
@@ -107,6 +114,16 @@ export class SessionScanCache {
       scan,
     })
     this.dirty = true
+  }
+
+  async snapshot(): Promise<SessionScanCacheEntry[]> {
+    await this.load()
+    return [...this.entries.entries()].map(([filePath, entry]) => ({
+      filePath,
+      mtimeMs: entry.mtimeMs,
+      size: entry.size,
+      scan: entry.scan,
+    }))
   }
 
   async persist(): Promise<void> {
