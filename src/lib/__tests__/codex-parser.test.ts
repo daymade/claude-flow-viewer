@@ -921,3 +921,485 @@ describe('codex inter-agent messages (response_item / agent_message)', () => {
     expect(team[0]).toMatchObject({ content: 'a bare conclusion with no header at all' })
   })
 })
+
+describe('codex parser provenance (sourceRecord / sourceRecordId)', () => {
+  const meta = {
+    timestamp: '2026-10-01T00:00:00.000Z',
+    type: 'session_meta',
+    payload: {
+      id: '11111111-2222-4333-8444-555555555555',
+      timestamp: '2026-10-01T00:00:00.000Z',
+      cwd: '/synthetic/workspace',
+    },
+  }
+
+  async function* linesFromString(content: string): AsyncIterable<string> {
+    for (const line of content.split('\n')) {
+      yield line
+    }
+  }
+
+  async function noopYield(): Promise<void> {}
+
+  it('emits a custom_tool_call with a string input immediately, byte-exact, keyed by its call_id', () => {
+    const patch = '*** Begin Patch\n*** Update File: /synthetic/workspace/app.ts\n@@\n-old line\n+new line\n*** End Patch'
+    const record = {
+      timestamp: '2026-10-01T00:00:02.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'custom_tool_call',
+        call_id: 'call_synthetic_patch_1',
+        name: 'apply_patch',
+        input: patch,
+        internal_chat_message_metadata_passthrough: { turn_id: 'turn-synthetic-1' },
+      },
+    }
+
+    const data = parseCodexSessionContent(jsonl(meta, record))
+
+    // No output record follows the call: the ai-tool-use must already be there on its own.
+    const toolUse = data.messages.filter((m) => m.kind === 'ai-tool-use')
+    expect(toolUse).toHaveLength(1)
+    expect(data.messages.some((m) => m.kind === 'tool-result')).toBe(false)
+    expect(toolUse[0].kind === 'ai-tool-use' && toolUse[0].input.raw).toBe(patch)
+    expect(toolUse[0].sourceRecordId).toBe('call_synthetic_patch_1')
+    expect(toolUse[0].sourceRecord).toEqual(record)
+  })
+
+  it('never lifts an id embedded inside payload input/arguments into sourceRecordId', () => {
+    const record = {
+      timestamp: '2026-10-01T00:00:02.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        call_id: 'call_outer_envelope_1',
+        name: 'exec_command',
+        arguments: JSON.stringify({
+          cmd: 'synthetic --apply',
+          approval_id: 'inner-approval-must-not-win',
+          request_id: 'inner-request-must-not-win',
+        }),
+      },
+    }
+
+    const data = parseCodexSessionContent(jsonl(meta, record))
+
+    const toolUse = data.messages.find((m) => m.kind === 'ai-tool-use')
+    expect(toolUse?.sourceRecordId).toBe('call_outer_envelope_1')
+    expect(JSON.stringify(toolUse?.sourceRecord)).toContain('inner-approval-must-not-win')
+  })
+
+  it('prefers payload.call_id over payload.id for response_item records', () => {
+    const record = {
+      timestamp: '2026-10-01T00:00:02.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        id: 'item-synthetic-id-loses',
+        call_id: 'call_synthetic_wins',
+        name: 'exec_command',
+        arguments: '{"cmd":"true"}',
+      },
+    }
+
+    const data = parseCodexSessionContent(jsonl(meta, record))
+
+    expect(data.messages.find((m) => m.kind === 'ai-tool-use')?.sourceRecordId).toBe('call_synthetic_wins')
+  })
+
+  it('uses payload.id for a response_item that has no call_id', () => {
+    const record = {
+      timestamp: '2026-10-01T00:00:02.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        id: 'item-synthetic-7',
+        name: 'exec_command',
+        arguments: '{"cmd":"true"}',
+      },
+    }
+
+    const data = parseCodexSessionContent(jsonl(meta, record))
+
+    expect(data.messages.find((m) => m.kind === 'ai-tool-use')?.sourceRecordId).toBe('item-synthetic-7')
+  })
+
+  it('falls back to codex-record-<ordinal> with the physical record ordinal when no id exists', () => {
+    const data = parseCodexSessionContent(jsonl(
+      meta, // record 0
+      { // record 1
+        timestamp: '2026-10-01T00:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'synthetic question' },
+      },
+      { // record 2: no call_id, no payload.id, no record.id
+        timestamp: '2026-10-01T00:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'synthetic thought' }],
+        },
+      },
+    ))
+
+    const thinking = data.messages.find((m) => m.kind === 'ai-thinking')
+    expect(thinking?.sourceRecordId).toBe('codex-record-2')
+    expect(thinking?.sourceRecord).toEqual({
+      timestamp: '2026-10-01T00:00:02.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'reasoning',
+        summary: [{ type: 'summary_text', text: 'synthetic thought' }],
+      },
+    })
+  })
+
+  it('carries provenance on event_msg-sourced messages: payload.id, then record.id, then the ordinal', () => {
+    const data = parseCodexSessionContent(jsonl(
+      meta, // record 0
+      { // record 1: payload.id wins over the top-level record id
+        timestamp: '2026-10-01T00:00:01.000Z',
+        type: 'event_msg',
+        id: 'rec-top-level-loses',
+        payload: { type: 'agent_message', id: 'evt-synthetic-1', message: 'first synthetic reply' },
+      },
+      { // record 2: no payload.id, so the top-level record id names the message
+        timestamp: '2026-10-01T00:00:02.000Z',
+        type: 'event_msg',
+        id: 'rec-synthetic-2',
+        payload: { type: 'agent_message', message: 'second synthetic reply' },
+      },
+      { // record 3: no id anywhere, so the ordinal names the message
+        timestamp: '2026-10-01T00:00:03.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'third synthetic reply' },
+      },
+    ))
+
+    const texts = data.messages.filter((m) => m.kind === 'ai-text')
+    expect(texts.map((m) => m.sourceRecordId)).toEqual(['evt-synthetic-1', 'rec-synthetic-2', 'codex-record-3'])
+    expect(texts[0].sourceRecord).toMatchObject({ type: 'event_msg', id: 'rec-top-level-loses' })
+  })
+
+  it('shares one record identity across the mcp_tool_call_end ai-tool-use/tool-result pair', () => {
+    const record = {
+      timestamp: '2026-10-01T00:00:02.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'mcp_tool_call_end',
+        id: 'evt-synthetic-mcp-1',
+        invocation: { server: 'synthetic-server', tool: 'ping', arguments: { target: 'local' } },
+        result: { Ok: { content: [{ type: 'text', text: 'pong' }] } },
+      },
+    }
+
+    const data = parseCodexSessionContent(jsonl(meta, record))
+
+    const pair = data.messages.filter((m) => m.kind === 'ai-tool-use' || m.kind === 'tool-result')
+    expect(pair).toHaveLength(2)
+    expect(pair.map((m) => m.sourceRecordId)).toEqual(['evt-synthetic-mcp-1', 'evt-synthetic-mcp-1'])
+    expect(pair[0].sourceRecord).toEqual(record)
+    expect(pair[1].sourceRecord).toEqual(record)
+  })
+
+  it('yields identical sourceRecordId sequences from the sync and streaming entry points', async () => {
+    const content = jsonl(
+      meta,
+      {
+        timestamp: '2026-10-01T00:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', id: 'evt-synthetic-user', message: 'synthetic request' },
+      },
+      {
+        timestamp: '2026-10-01T00:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call',
+          call_id: 'call-synthetic-sync-1',
+          name: 'exec_command',
+          arguments: '{"cmd":"true"}',
+        },
+      },
+      {
+        timestamp: '2026-10-01T00:00:03.000Z',
+        type: 'response_item',
+        payload: { type: 'function_call_output', call_id: 'call-synthetic-sync-1', output: '{"output":"ok","metadata":{"exit_code":0}}' },
+      },
+      {
+        timestamp: '2026-10-01T00:00:04.000Z',
+        type: 'response_item',
+        payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'synthetic thought' }] },
+      },
+      {
+        timestamp: '2026-10-01T00:00:05.000Z',
+        type: 'event_msg',
+        payload: { type: 'thread_rolled_back', num_turns: 1 },
+      },
+    )
+
+    const direct = parseCodexSessionContent(content)
+    const streamed = await parseCodexSessionContentStreaming(linesFromString(content), noopYield)
+
+    expect(streamed.messages.map((m) => m.sourceRecordId)).toEqual(direct.messages.map((m) => m.sourceRecordId))
+    expect(streamed.messages.map((m) => m.sourceRecord)).toEqual(direct.messages.map((m) => m.sourceRecord))
+    expect(direct.messages.every((m) => typeof m.sourceRecordId === 'string' && m.sourceRecord)).toBe(true)
+  })
+
+  it('keeps prompt de-dup behavior unchanged with provenance attached', () => {
+    const data = parseCodexSessionContent(jsonl(
+      meta,
+      {
+        timestamp: '2026-10-01T00:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', id: 'evt-dup-wins', message: 'same synthetic question' },
+      },
+      {
+        timestamp: '2026-10-01T00:00:01.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'same synthetic question' }],
+        },
+      },
+    ))
+
+    const prompts = data.messages.filter((m) => m.kind === 'user-prompt')
+    expect(prompts).toHaveLength(1)
+    expect(data.prompts).toHaveLength(1)
+    expect(prompts[0].sourceRecordId).toBe('evt-dup-wins')
+  })
+})
+
+describe('codex classifier record selection', () => {
+  const meta = {
+    timestamp: '2026-10-02T00:00:00.000Z',
+    type: 'session_meta',
+    payload: {
+      id: '44444444-5555-4666-8666-777777777777',
+      timestamp: '2026-10-02T00:00:00.000Z',
+      cwd: '/synthetic/workspace',
+    },
+  }
+  const TURN_KEPT = 'turn-kept'
+  const TURN_DROPPED = 'turn-dropped'
+
+  async function* linesFromString(content: string): AsyncIterable<string> {
+    for (const line of content.split('\n')) {
+      yield line
+    }
+  }
+
+  async function noopYield(): Promise<void> {}
+
+  // The same predicate shape the turn-scoped CLI reader builds: exact turn_id equality inside the
+  // record payload's turn metadata, anything missing means not selected.
+  const turnSelection = (turn: string) => (record: Record<string, unknown>): boolean => {
+    const payload = record.payload
+    if (!payload || typeof payload !== 'object') return false
+    const metadata = (payload as Record<string, unknown>).internal_chat_message_metadata_passthrough
+    if (!metadata || typeof metadata !== 'object') return false
+    return (metadata as Record<string, unknown>).turn_id === turn
+  }
+
+  it('emits messages only from records the selection predicate accepts', async () => {
+    const content = jsonl(
+      meta, // record 0: no turn metadata, and session_meta emits nothing either way
+      { // record 1: a prompt bound to the dropped turn must not become a user-prompt message
+        timestamp: '2026-10-02T00:00:01.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'user_message',
+          id: 'evt-drop-prompt',
+          message: 'synthetic request from the dropped turn',
+          internal_chat_message_metadata_passthrough: { turn_id: TURN_DROPPED },
+        },
+      },
+      { // record 2: kept turn's tool call
+        timestamp: '2026-10-02T00:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call',
+          call_id: 'call-keep-1',
+          name: 'exec_command',
+          arguments: '{"cmd":"ls /synthetic/workspace"}',
+          internal_chat_message_metadata_passthrough: { turn_id: TURN_KEPT },
+        },
+      },
+      { // record 3: kept turn's delivery record still classifies (to a tool-result)
+        timestamp: '2026-10-02T00:00:03.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call_output',
+          call_id: 'call-keep-1',
+          output: '{"output":"synthetic listing","metadata":{"exit_code":0}}',
+          internal_chat_message_metadata_passthrough: { turn_id: TURN_KEPT },
+        },
+      },
+      { // record 4: the dropped turn's tool call constructs nothing
+        timestamp: '2026-10-02T00:00:04.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call',
+          call_id: 'call-drop-1',
+          name: 'exec_command',
+          arguments: '{"cmd":"pwd"}',
+          internal_chat_message_metadata_passthrough: { turn_id: TURN_DROPPED },
+        },
+      },
+      { // record 5: no turn metadata at all — not selected
+        timestamp: '2026-10-02T00:00:05.000Z',
+        type: 'response_item',
+        payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'unbound reply' }] },
+      },
+      { // record 6: selection applies to event_msg records too
+        timestamp: '2026-10-02T00:00:06.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'agent_message',
+          id: 'evt-keep-reply',
+          message: 'synthetic reply from the kept turn',
+          internal_chat_message_metadata_passthrough: { turn_id: TURN_KEPT },
+        },
+      },
+    )
+
+    const data = await parseCodexSessionContentStreaming(linesFromString(content), noopYield, {
+      recordSelection: turnSelection(TURN_KEPT),
+    })
+
+    expect(data.messages.map((m) => m.kind)).toEqual(['ai-tool-use', 'tool-result', 'ai-text'])
+    expect(data.messages.map((m) => m.sourceRecordId)).toEqual(['call-keep-1', 'call-keep-1', 'evt-keep-reply'])
+    expect(data.prompts).toHaveLength(0)
+  })
+
+  it('counts skipped records in the physical ordinal behind codex-record-N fallbacks', async () => {
+    const content = jsonl(
+      meta, // record 0
+      { // record 1: skipped by the predicate, but the ordinal must still count it
+        timestamp: '2026-10-02T00:00:01.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'dropped turn thought' }],
+          internal_chat_message_metadata_passthrough: { turn_id: TURN_DROPPED },
+        },
+      },
+      { // record 2: kept, and no id anywhere — the fallback must be codex-record-2, not a
+        // renumbered "second selected record" index.
+        timestamp: '2026-10-02T00:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'kept turn thought' }],
+          internal_chat_message_metadata_passthrough: { turn_id: TURN_KEPT },
+        },
+      },
+    )
+
+    const data = await parseCodexSessionContentStreaming(linesFromString(content), noopYield, {
+      recordSelection: turnSelection(TURN_KEPT),
+    })
+
+    const thinking = data.messages.filter((m) => m.kind === 'ai-thinking')
+    expect(thinking).toHaveLength(1)
+    expect(thinking[0].sourceRecordId).toBe('codex-record-2')
+  })
+
+  it('keeps retained-input bookkeeping and sessionStart-derived ranges unaffected by skipping', async () => {
+    const content = jsonl(
+      meta, // record 0: no turn metadata — skipped by the predicate, but sessionStart is unconditional
+      { // record 1: dropped-turn prompt — emits nothing, but MUST still fold into the live
+        // direct-text counts so the compaction below consumes its replacement_history entry.
+        timestamp: '2026-10-02T01:00:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'direct prompt before compact' }],
+          internal_chat_message_metadata_passthrough: { turn_id: TURN_DROPPED },
+        },
+      },
+      { // record 2: compaction carries no turn metadata — no boundary is emitted, but the
+        // snapshot re-baseline is bookkeeping and stays unconditional.
+        timestamp: '2026-10-02T02:00:00.000Z',
+        type: 'compacted',
+        payload: {
+          replacement_history: [
+            { role: 'user', content: [{ type: 'input_text', text: 'direct prompt before compact' }] },
+            { role: 'user', content: [{ type: 'input_text', text: 'compaction-only prompt' }] },
+          ],
+        },
+      },
+      { // record 3: the one selected record
+        timestamp: '2026-10-02T03:00:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'custom_tool_call',
+          call_id: 'call-keep-9',
+          name: 'apply_patch',
+          input: '*** Begin Patch\n*** End Patch',
+          internal_chat_message_metadata_passthrough: { turn_id: TURN_KEPT },
+        },
+      },
+    )
+
+    const data = await parseCodexSessionContentStreaming(linesFromString(content), noopYield, {
+      recordSelection: turnSelection(TURN_KEPT),
+    })
+
+    expect(data.messages.map((m) => m.kind)).toEqual(['ai-tool-use'])
+    expect(data.prompts).toHaveLength(0)
+    // Only the compaction-only input is retained: the dropped-turn prompt was never emitted as a
+    // message, yet its unconditional fold still consumed the first replacement_history entry.
+    expect(data.retainedUserInputs).toEqual([
+      expect.objectContaining({
+        id: 'compacted-2-1',
+        text: 'compaction-only prompt',
+        origin: 'compacted',
+        timeRangeStart: '2026-10-02T00:00:00.000Z',
+        timeRangeEnd: '2026-10-02T02:00:00.000Z',
+        ordinal: 1,
+      }),
+    ])
+  })
+
+  it('is byte-identical to the synchronous parse when no options are passed', async () => {
+    const content = jsonl(
+      meta,
+      {
+        timestamp: '2026-10-02T00:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', id: 'evt-sel-user', message: 'synthetic selection request' },
+      },
+      {
+        timestamp: '2026-10-02T00:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call',
+          call_id: 'call-sel-1',
+          name: 'exec_command',
+          arguments: '{"cmd":"true"}',
+          internal_chat_message_metadata_passthrough: { turn_id: TURN_KEPT },
+        },
+      },
+      {
+        timestamp: '2026-10-02T00:00:03.000Z',
+        type: 'response_item',
+        payload: { type: 'function_call_output', call_id: 'call-sel-1', output: '{"output":"ok","metadata":{"exit_code":0}}' },
+      },
+      {
+        timestamp: '2026-10-02T00:00:04.000Z',
+        type: 'response_item',
+        payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'synthetic selection thought' }] },
+      },
+      { timestamp: '2026-10-02T00:00:05.000Z', type: 'compacted', payload: {} },
+    )
+
+    const direct = parseCodexSessionContent(content)
+    const streamed = await parseCodexSessionContentStreaming(linesFromString(content), noopYield)
+
+    expect(streamed).toEqual(direct)
+    expect(JSON.stringify(streamed)).toBe(JSON.stringify(direct))
+  })
+})

@@ -625,6 +625,43 @@ function decidePrompt(text: string, promptNum: number, pendingInterrupt: boolean
   return pendingInterrupt && detected === 'none' ? 'interrupt' : detected
 }
 
+/**
+ * Provenance attached to every SessionMessage classified from one raw Codex record.
+ * `sourceRecord` is the record object BY REFERENCE — never cloned, never mutated — so a consumer
+ * can recover byte-meaning the normalized message dropped (e.g. the turn binding inside a tool
+ * call's payload) without re-reading the rollout file.
+ *
+ * `sourceRecordId` is the first non-empty STRING of, in order:
+ *   - response_item records: payload.call_id, then payload.id
+ *   - event_msg records:     payload.id
+ *   - any record:            record.id (top level)
+ *   - fallback:              codex-record-<recordIndex>, the 0-based physical record ordinal
+ * Ids nested inside payload input/arguments (e.g. an inner approval id) are NEVER lifted — only
+ * the envelope-level fields above may name a record.
+ */
+interface CodexRecordProvenance {
+  sourceRecord: Record<string, unknown>
+  sourceRecordId: string
+}
+
+function codexRecordProvenance(record: Record<string, unknown>, recordIndex: number): CodexRecordProvenance {
+  const payload = record.payload && typeof record.payload === 'object'
+    ? record.payload as Record<string, unknown>
+    : undefined
+  const candidates: unknown[] = record.type === 'response_item'
+    ? [payload?.call_id, payload?.id]
+    : record.type === 'event_msg'
+      ? [payload?.id]
+      : []
+  candidates.push(record.id)
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0) {
+      return { sourceRecord: record, sourceRecordId: candidate }
+    }
+  }
+  return { sourceRecord: record, sourceRecordId: `codex-record-${recordIndex}` }
+}
+
 function scanCodexHeadStats(head: string): { promptCount: number; toolCount: number; recordCount: number } {
   let promptCount = 0
   let toolCount = 0
@@ -801,6 +838,19 @@ export function quickScanCodexMetadata(
 }
 
 /**
+ * Optional per-record gate for the streaming classifier. `recordSelection` receives the raw parsed
+ * record and its 0-based physical ordinal (the same ordinal `codex-record-<N>` provenance falls
+ * back to) BEFORE any semantic classification; returning false skips message construction for that
+ * record. Record counting, sessionStart detection, and retained-input bookkeeping are NOT gated —
+ * they stay physical and unconditional so selected output keeps honest ordinals and compaction
+ * snapshots. Used by the turn-scoped CLI reader so an unselected turn's payloads are never
+ * materialized as SessionMessages (the memory win); callers parsing whole sessions omit it.
+ */
+export interface CodexClassifierOptions {
+  recordSelection?: (record: Record<string, unknown>, ordinal: number) => boolean
+}
+
+/**
  * The per-record classification core, shared by the synchronous (`parseCodexSessionContent`) and
  * streaming (`parseCodexSessionContentStreaming`) entry points so the switch that turns a raw Codex
  * record into `SessionMessage`s is written exactly once. Everything that used to live in
@@ -809,13 +859,13 @@ export function quickScanCodexMetadata(
  * folded into the same per-record pass — see the comment above `processRecord`'s retained-input
  * block for why that fold is safe.
  */
-function createCodexClassifier() {
+function createCodexClassifier(options?: CodexClassifierOptions) {
   const messages: SessionMessage[] = []
   const prompts: PromptIndexEntry[] = []
   let promptCounter = 0
   let pendingInterrupt = false
   const seenPrompts: Array<{ text: string; timestampMs: number }> = []
-  const pushPrompt = (prompt: { text: string; images: EmbeddedImage[] }, timestampDate: Date) => {
+  const pushPrompt = (prompt: { text: string; images: EmbeddedImage[] }, timestampDate: Date, provenance: CodexRecordProvenance) => {
     const textKey = normalizePromptText(prompt.text)
     if (!textKey) return false
     const timestampMs = timestampDate.getTime()
@@ -830,6 +880,7 @@ function createCodexClassifier() {
     pendingInterrupt = false
     const timestamp = timestampDate.toISOString()
     messages.push({
+      ...provenance,
       kind: 'user-prompt',
       promptNum: promptCounter,
       text: prompt.text,
@@ -861,9 +912,9 @@ function createCodexClassifier() {
   // "the previous message is already a boundary" identifies the duplicate exactly, whichever form
   // came first. Two genuine compactions with no message at all between them would merge, which cannot
   // happen: a compaction is triggered by the context the messages in between built up.
-  const pushCompactBoundary = (timestamp: string) => {
+  const pushCompactBoundary = (timestamp: string, provenance: CodexRecordProvenance) => {
     if (messages[messages.length - 1]?.kind === 'compact-boundary') return
-    messages.push({ kind: 'compact-boundary', timestamp, trigger: 'auto', preTokens: 0, summaryText: '' })
+    messages.push({ ...provenance, kind: 'compact-boundary', timestamp, trigger: 'auto', preTokens: 0, summaryText: '' })
   }
 
   // Retained-input bookkeeping (was extractRetainedUserInputs's own two full-array scans over a
@@ -919,6 +970,18 @@ function createCodexClassifier() {
       lastCompactionSnapshot = { record, index: currentRecordIndex, at: recordAt, counts: new Map(liveDirectTextCounts) }
     }
 
+    // Record selection: the counting and bookkeeping above stay physical and unconditional — every
+    // fed record advances the ordinal, feeds sessionStart detection, and folds into retained-input
+    // state. Only the semantic classification section below is gated: a skipped record emits
+    // nothing (no messages, no prompt or de-dup state, no pending interrupt), so a selecting
+    // caller never pins an unselected record's payload in the message list.
+    if (options?.recordSelection && !options.recordSelection(record, currentRecordIndex)) return
+
+    // Provenance for every message this record emits (see codexRecordProvenance). Computed once,
+    // up front, so the classify switch below only spreads it — messages from the same record
+    // (e.g. the mcp_tool_call_end ai-tool-use/tool-result pair) share one record identity.
+    const provenance = codexRecordProvenance(record, currentRecordIndex)
+
     // --- Below is the classify switch, moved verbatim from the old per-record loop body. Its 5
     // `continue` statements become `return` now that this runs once per record instead of once per
     // `for` iteration; none of the 5 sit inside a nested loop of their own, so the conversion is exact. ---
@@ -933,16 +996,17 @@ function createCodexClassifier() {
         case 'user_message': {
           const prompt = extractPromptFromEvent(event)
           if (!prompt) break
-          pushPrompt(prompt, timestampDate)
+          pushPrompt(prompt, timestampDate, provenance)
           break
         }
         case 'agent_message': {
           const message = typeof event.message === 'string' ? event.message.trim() : ''
-          if (message) messages.push({ kind: 'ai-text', text: message, timestamp })
+          if (message) messages.push({ ...provenance, kind: 'ai-text', text: message, timestamp })
           break
         }
         case 'task_started':
           messages.push({
+            ...provenance,
             kind: 'task-event',
             taskId: typeof event.turn_id === 'string' ? event.turn_id : '?',
             status: 'started',
@@ -952,6 +1016,7 @@ function createCodexClassifier() {
           break
         case 'task_complete':
           messages.push({
+            ...provenance,
             kind: 'task-event',
             taskId: typeof event.turn_id === 'string' ? event.turn_id : '?',
             status: 'completed',
@@ -964,13 +1029,14 @@ function createCodexClassifier() {
           break
         case 'thread_rolled_back':
           messages.push({
+            ...provenance,
             kind: 'rollback-marker',
             timestamp,
             numTurns: typeof event.num_turns === 'number' ? event.num_turns : 1,
           })
           break
         case 'context_compacted':
-          pushCompactBoundary(timestamp)
+          pushCompactBoundary(timestamp, provenance)
           break
         case 'mcp_tool_call_end': {
           const invocation = event.invocation && typeof event.invocation === 'object'
@@ -982,6 +1048,7 @@ function createCodexClassifier() {
             ? invocation.arguments as Record<string, unknown>
             : {}
           messages.push({
+            ...provenance,
             kind: 'ai-tool-use',
             summary: summarizeToolCall(`${server}.${tool}`, input),
             name: `${server}.${tool}`,
@@ -990,6 +1057,7 @@ function createCodexClassifier() {
           })
           const result = extractMcpResultContent(event.result)
           messages.push({
+            ...provenance,
             kind: 'tool-result',
             content: result.content,
             isError: result.isError,
@@ -1015,7 +1083,7 @@ function createCodexClassifier() {
     }
 
     if (record.type === 'compacted') {
-      pushCompactBoundary(timestamp)
+      pushCompactBoundary(timestamp, provenance)
       return
     }
 
@@ -1029,12 +1097,13 @@ function createCodexClassifier() {
         const role = String(item.role || '')
         if (role === 'assistant') {
           const { text } = parseContentParts(item.content)
-          if (text) messages.push({ kind: 'ai-text', text, timestamp })
+          if (text) messages.push({ ...provenance, kind: 'ai-text', text, timestamp })
         } else if (role === 'user') {
           const { text } = parseContentParts(item.content)
           const delegationUpdate = text ? extractDelegationUpdate(text) : null
           if (delegationUpdate) {
             messages.push({
+              ...provenance,
               ...delegationUpdate,
               timestamp,
             })
@@ -1043,7 +1112,7 @@ function createCodexClassifier() {
 
           const prompt = extractPromptFromMessage(record)
           if (prompt) {
-            pushPrompt(prompt, timestampDate)
+            pushPrompt(prompt, timestampDate, provenance)
           }
         }
         break
@@ -1060,6 +1129,7 @@ function createCodexClassifier() {
         const author = typeof item.author === 'string' ? item.author : ''
         const from = author.split('/').filter(Boolean).pop() || 'delegated-agent'
         messages.push({
+          ...provenance,
           kind: 'team-message',
           from,
           color: teamColorFor(from),
@@ -1073,6 +1143,7 @@ function createCodexClassifier() {
         const reasoning = extractReasoningText(item)
         if (!reasoning) break
         messages.push({
+          ...provenance,
           kind: 'ai-thinking',
           preview: sanitizePreview(reasoning).slice(0, 120),
           full: reasoning,
@@ -1083,6 +1154,7 @@ function createCodexClassifier() {
       case 'function_call': {
         const input = parseJsonObject(item.arguments)
         messages.push({
+          ...provenance,
           kind: 'ai-tool-use',
           summary: summarizeToolCall(String(item.name || 'unknown'), input),
           name: String(item.name || 'unknown'),
@@ -1098,6 +1170,7 @@ function createCodexClassifier() {
             ? item.input as Record<string, unknown>
             : {}
         messages.push({
+          ...provenance,
           kind: 'ai-tool-use',
           summary: summarizeToolCall(String(item.name || 'custom_tool'), input),
           name: String(item.name || 'custom_tool'),
@@ -1116,6 +1189,7 @@ function createCodexClassifier() {
         }
         if (typeof item.arguments === 'string') Object.assign(input, parseJsonObject(item.arguments))
         messages.push({
+          ...provenance,
           kind: 'ai-tool-use',
           summary: summarizeToolCall('web_search_call', input),
           name: 'web_search_call',
@@ -1129,6 +1203,7 @@ function createCodexClassifier() {
           ? item.arguments as Record<string, unknown>
           : parseJsonObject(item.arguments)
         messages.push({
+          ...provenance,
           kind: 'ai-tool-use',
           summary: summarizeToolCall('tool_search_call', input),
           name: 'tool_search_call',
@@ -1141,6 +1216,7 @@ function createCodexClassifier() {
       case 'custom_tool_call_output': {
         const result = unwrapToolOutput(item.output)
         messages.push({
+          ...provenance,
           kind: 'tool-result',
           content: result.content,
           isError: result.isError,
@@ -1151,6 +1227,7 @@ function createCodexClassifier() {
       case 'tool_search_output': {
         const result = unwrapToolOutput(extractToolSearchOutput(item))
         messages.push({
+          ...provenance,
           kind: 'tool-result',
           content: result.content,
           isError: String(item.status || '').toLowerCase() === 'failed',
@@ -1216,12 +1293,16 @@ const CODEX_STREAM_YIELD_EVERY_LINES = 3000
  * This function must stay free of Node-specific imports (no `fs`, no `readline`, no `setImmediate`):
  * `codex-parser.ts` is bundled into the browser build via `parser.ts` -> `useFileLoader.ts`/`App.tsx`,
  * so all I/O and the event-loop yield itself are supplied by the (Node-only) caller.
+ *
+ * `options` is optional and threaded straight into `createCodexClassifier`; when it is absent the
+ * parse is byte-identical to the synchronous entry point (pinned by the equivalence tests).
  */
 export async function parseCodexSessionContentStreaming(
   lines: AsyncIterable<string>,
   yieldToEventLoop: () => Promise<void>,
+  options?: CodexClassifierOptions,
 ): Promise<SessionData> {
-  const classifier = createCodexClassifier()
+  const classifier = createCodexClassifier(options)
   let recordsProcessed = 0
   for await (const line of lines) {
     if (!line.trim()) continue
