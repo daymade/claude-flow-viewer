@@ -1,9 +1,22 @@
 import { useMemo, useState } from 'react'
-import { SessionView, type SessionViewProps } from './SessionView'
+import { SessionView, type SessionViewProps, type ReaderJumpTarget } from './SessionView'
 import { SessionToolbar } from './SessionToolbar'
 import type { FilterState } from '../../types/session'
 
 const READER_FILTER: FilterState = {thinking:false,toolCalls:true,toolResults:true,aiText:true,team:true,branches:true,markers:true,timeline:true}
+
+/**
+ * Stable identity of one external navigation: the request token when the
+ * host supplies one, otherwise the target position. Re-rendering with a
+ * fresh object that carries the same token/position is the SAME navigation
+ * and must not reset the reader's internal Find.
+ */
+function navigationIdentity(target: ReaderJumpTarget | null): string | null {
+  if (!target) return null
+  return target.requestId != null
+    ? `req:${String(target.requestId)}`
+    : `pos:${target.messageIndex}:${target.promptNum ?? ''}`
+}
 
 export function SessionReader({ filter: controlledFilter, searchQuery: controlledQuery, onToggleFilter, showToolbar = true, ...props }:
   Omit<SessionViewProps, 'filter' | 'searchQuery'> & {
@@ -14,8 +27,27 @@ export function SessionReader({ filter: controlledFilter, searchQuery: controlle
   const [hit, setHit] = useState(0)
   const currentFilter = controlledFilter ?? filter
   const currentQuery = controlledQuery ?? query
+  const externalTarget = props.activeSearchTarget ?? null
+
+  // A NEW external navigation suspends the internal Find so the host's focus
+  // wins; the user can re-enter Find afterwards and Next keeps working.
+  const navigation = navigationIdentity(externalTarget)
+  const [lastNavigation, setLastNavigation] = useState<string | null>(navigation)
+  if (navigation !== lastNavigation) {
+    setLastNavigation(navigation)
+    if (navigation !== null && query) {
+      setQuery('')
+      setHit(0)
+    }
+  }
+
   const matches = useMemo(() => currentQuery ? props.data.messages.flatMap((message, i) => JSON.stringify(message).toLowerCase().includes(currentQuery.toLowerCase()) ? [i] : []) : [], [props.data.messages, currentQuery])
-  const target = controlledQuery !== undefined ? props.activeSearchTarget : currentQuery ? (matches.length ? {messageIndex:matches[hit % matches.length]} : null) : props.activeSearchTarget
+  // Controlled search keeps precedence: the host drives both query and target.
+  const target = useMemo<ReaderJumpTarget | null>(() => {
+    if (controlledQuery !== undefined) return externalTarget
+    if (!currentQuery) return externalTarget
+    return matches.length ? {messageIndex:matches[hit % matches.length]} : null
+  }, [controlledQuery, currentQuery, matches, hit, externalTarget])
   return <div className="flex min-h-0 flex-1 flex-col" data-session-reader="claude-flow-viewer">
     {showToolbar && <div className="shrink-0 border-b border-stone-200 bg-white px-3 py-2 flex flex-wrap items-center gap-2">
       <SessionToolbar filter={currentFilter} onToggle={key => onToggleFilter ? onToggleFilter(key) : setFilter(old => ({...old,[key]:!old[key]}))} />

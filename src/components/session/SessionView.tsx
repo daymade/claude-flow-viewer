@@ -3,7 +3,7 @@ import type { SessionData, SessionMessage, FilterState, PromptIndexEntry } from 
 import { extractTimelineEvents } from '../../lib/timeline'
 import { Timeline } from './Timeline'
 import { useHoverCard, HoverCard } from '../shared/HoverCard'
-import { SessionResources, type ReadToolResult } from './SessionResources'
+import { SessionResources, type ReadToolResult, type SessionResourcesValue } from './SessionResources'
 import {
   PromptBlock,
   AiTextBlock,
@@ -21,7 +21,18 @@ import {
   PlanEndMarker,
 } from './MessageRenderers'
 
-export interface ReaderJumpTarget {messageIndex:number;promptNum?:number}
+export interface ReaderJumpTarget {
+  messageIndex: number
+  promptNum?: number
+  /**
+   * Optional stable identity token for one explicit navigation request.
+   * A host that wants repeated jumps to the same position to count as
+   * separate navigations (and to suspend the reader's internal Find)
+   * supplies a fresh token per request; re-rendering with the same token
+   * is the same navigation and must not reset anything.
+   */
+  requestId?: string | number
+}
 
 export interface SessionViewProps {
   data: SessionData
@@ -33,6 +44,8 @@ export interface SessionViewProps {
   header?: React.ReactNode
   readerMode?: boolean
   readToolResult?: ReadToolResult | null
+  /** Semantic identity of the session resource behind `readToolResult`. */
+  resourceScope?: string | null
 }
 
 function scrollWithinReader(container: HTMLDivElement, target: HTMLElement, block: 'start' | 'center') {
@@ -51,8 +64,16 @@ export function SessionView({
   header = null,
   readerMode = false,
   readToolResult = null,
+  resourceScope = null,
 }: SessionViewProps) {
   const contentRef = useRef<HTMLDivElement>(null)
+  const resourcesValue = useMemo<SessionResourcesValue | null>(
+    () => {
+      if (!readToolResult) return null
+      return resourceScope != null ? { readToolResult, scope: resourceScope } : readToolResult
+    },
+    [readToolResult, resourceScope],
+  )
   const [activePromptNums, setActivePromptNums] = useState<Set<number>>(new Set())
   const [scrollFraction, setScrollFraction] = useState(0)
   const [viewportFraction, setViewportFraction] = useState(1)
@@ -190,7 +211,7 @@ export function SessionView({
   }, [rendered])
 
   return (
-    <SessionResources.Provider value={readToolResult}><div className="flex-1 flex min-w-0 min-h-0 overflow-hidden">
+    <SessionResources.Provider value={resourcesValue}><div className="flex-1 flex min-w-0 min-h-0 overflow-hidden">
       <div
         className="min-h-0 flex-1 overflow-y-auto bg-[#FAFAF8] focus:outline-none"
         ref={contentRef}

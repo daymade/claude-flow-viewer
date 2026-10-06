@@ -1,9 +1,9 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { SessionMessage, FilterState } from '../../types/session'
 import { formatTokens } from '../../lib/timeline'
-import { useSessionResources } from './SessionResources'
+import { useSessionResources, resolveToolResultReader, type ReadToolResult } from './SessionResources'
 
 const REMARK_PLUGINS = [remarkGfm]
 
@@ -160,25 +160,52 @@ export function ToolCallLine({ msg }: { msg: Extract<SessionMessage, { kind: 'ai
 // ━━━ L4: Tool Result ━━━
 
 export function ToolResultBlock({ msg }: { msg: Extract<SessionMessage, { kind: 'tool-result' }> }) {
-  const readToolResult = useSessionResources()
-  const [fullContent, setFullContent] = useState<string | null>(null)
-  const [loadingFull, setLoadingFull] = useState(false)
-  const [loadError, setLoadError] = useState<string | null>(null)
+  const { read: readToolResult, scope } = resolveToolResultReader(useSessionResources())
+  // Semantic identity of the resource this mounted slot currently shows.
+  // externalFile / sourceRecordId distinguish resources inside one session;
+  // scope distinguishes the session itself, so a same-named file from a
+  // different session never inherits this slot's state.
+  const resourceKey = `${scope ?? ''}|${msg.externalFile ?? ''}|${msg.sourceRecordId ?? ''}`
+  const resourceKeyRef = useRef(resourceKey)
+  resourceKeyRef.current = resourceKey
+  const loadTicketRef = useRef(0)
+  const [loaded, setLoaded] = useState<{ key: string; loader: ReadToolResult; content: string } | null>(null)
+  const [pendingKey, setPendingKey] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<{ key: string; message: string } | null>(null)
+
+  // Loaded output counts only for the resource it was loaded for. Without a
+  // semantic scope the loader identity is the only identity signal, so an
+  // unknown consumer conservatively invalidates when the callback changes;
+  // with a scope, a fresh callback for the same resource keeps the output.
+  const fullContent = loaded !== null && loaded.key === resourceKey && (scope !== null || loaded.loader === readToolResult)
+    ? loaded.content
+    : null
+  const loadingFull = pendingKey === resourceKey
+  const errorMessage = loadError !== null && loadError.key === resourceKey ? loadError.message : null
 
   const loadFull = useCallback(async () => {
     if (!msg.externalFile || !readToolResult) return
-    setLoadingFull(true)
+    const ticket = ++loadTicketRef.current
+    const key = resourceKey
+    setPendingKey(key)
     setLoadError(null)
     try {
       // externalFile is "tool-results/filename.txt" (relative to session dir)
       const content = await readToolResult(msg.externalFile)
-      setFullContent(content)
+      // Ignore a late reply when this slot has switched to another resource
+      // since the load started, or a newer load superseded this one.
+      if (loadTicketRef.current !== ticket || resourceKeyRef.current !== key) return
+      setLoaded({ key, loader: readToolResult, content })
     } catch {
-      setLoadError('Failed to load full content')
+      if (loadTicketRef.current === ticket && resourceKeyRef.current === key) {
+        setLoadError({ key, message: 'Failed to load full content' })
+      }
     } finally {
-      setLoadingFull(false)
+      if (loadTicketRef.current === ticket) {
+        setPendingKey(current => (current === key ? null : current))
+      }
     }
-  }, [msg.externalFile, readToolResult])
+  }, [msg.externalFile, readToolResult, resourceKey])
 
   const displayContent = fullContent ?? msg.content
   const hasExternal = Boolean(msg.externalFile)
@@ -215,13 +242,13 @@ export function ToolResultBlock({ msg }: { msg: Extract<SessionMessage, { kind: 
           >
             {loadingFull ? 'Loading...' : `Load full output (${msg.totalSize})`}
           </button>
-          {loadError && <span className="text-xs text-red-500 ml-2">{loadError}</span>}
+          {errorMessage && <span className="text-xs text-red-500 ml-2">{errorMessage}</span>}
         </div>
       )}
       {showingFull && (
         <div className="ml-5 mt-1">
           <button
-            onClick={() => setFullContent(null)}
+            onClick={() => setLoaded(null)}
             className="text-xs text-stone-400 hover:text-stone-600 hover:underline"
           >
             Collapse to preview
