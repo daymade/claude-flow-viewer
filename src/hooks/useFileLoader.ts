@@ -1,7 +1,7 @@
 import { useCallback } from 'react'
 import { useAppState } from './useSessionStore'
 import { openDirectoryPicker, createStoreFromFiles, createStoreFromHandle, tryAutoLoad } from '../lib/fs-access'
-import { parseSessionContent } from '../lib/parser'
+import { parseFetchedSessionContent } from '../lib/parser'
 import type { SessionSource } from '../types/session'
 
 // --- Hash-based URL routing ---
@@ -66,7 +66,7 @@ export function useFileLoader() {
       const content = await state.fileStore.readSessionContent(projectEncoded, sessionId)
       // Prefer the known source: the project list may not yet include a just-resolved beyond-cap
       // session, so project?.source can be undefined even though the caller knows the real source.
-      const data = parseSessionContent(content, project?.source ?? sourceHint)
+      const data = parseFetchedSessionContent(content, project?.source ?? sourceHint)
       dispatch({ type: 'LOAD_SESSION', sessionId, projectEncoded, data })
       // Sync URL hash
       const newHash = encodeHash(projectEncoded, sessionId)

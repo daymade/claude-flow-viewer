@@ -15,6 +15,11 @@ export const CODEX_PROJECT_PREFIX = 'codex:'
 // Codex session_meta is the first JSONL line. We only need a small head window
 // for scan-time grouping and thread metadata, not the full bootstrap payload.
 export const CODEX_PREVIEW_BYTES = 16 * 1024
+/**
+ * Codex moves older rollouts out of `sessions/` into this sibling directory. They are unique
+ * history — nothing in sessions/ duplicates them — so every scanner must walk both.
+ */
+export const CODEX_ARCHIVED_SESSIONS_DIR = 'archived_sessions'
 
 export interface CodexQuickScanResult {
   cwd: string
@@ -157,6 +162,41 @@ function formatTime(d: Date): string {
 
 function sanitizePreview(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 100)
+}
+
+/**
+ * Codex "teams" writes inter-agent traffic as `response_item` / `agent_message`, whose one
+ * `input_text` part carries a fixed header before the body:
+ *
+ *   Message Type: FINAL_ANSWER
+ *   Task name: /root
+ *   Sender: /root/integration_conflict_audit
+ *   Payload:
+ *   <body>
+ *
+ * Only the body is content. Measured across real rollouts the split is total: every FINAL_ANSWER
+ * carries a plain-text body (249/249 in September's 20 largest files, 298/298 in an August one),
+ * and every MESSAGE / NEW_TASK carries none -- their payload sits in an `encrypted_content` part
+ * this viewer cannot read. So the emit decision keys off the body, not the label: a body-bearing
+ * record of any type becomes a message, an empty one is dropped rather than rendering hundreds of
+ * empty envelopes into the reading surface.
+ *
+ * With no header at all the whole text is treated as the body, so an unrecognised future shape
+ * degrades to showing everything rather than to showing nothing.
+ */
+function extractAgentMessageBody(text: string): string {
+  const marker = '\nPayload:\n'
+  const at = text.indexOf(marker)
+  if (at === -1) return text.startsWith('Message Type:') ? '' : text.trim()
+  return text.slice(at + marker.length).trim()
+}
+
+/** Stable per-agent colour, so one delegated agent keeps its identity across a session. */
+function teamColorFor(name: string): string {
+  const palette = ['green', 'blue', 'purple']
+  let hash = 0
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0
+  return palette[Math.abs(hash) % palette.length]
 }
 
 function normalizePromptText(text: string): string {
@@ -352,46 +392,41 @@ function extractPromptFromEvent(event: Record<string, unknown>): { text: string;
   return { text, images }
 }
 
-function extractRetainedUserInputs(records: Record<string, unknown>[]): RetainedUserInput[] {
-  let sessionStart: Date | null = null
-  let lastCompaction: { record: Record<string, unknown>; index: number; at: Date } | null = null
+/**
+ * A snapshot of "which prompt texts are still live elsewhere in the session" taken at the moment
+ * of the most recent `compacted` record. `createCodexClassifier` rebuilds this incrementally as it
+ * streams records instead of re-scanning a materialized `records[]` array a second time — see the
+ * fold in `processRecord` below for why the snapshot's counts must be re-baselined per compaction
+ * rather than accumulated once at the end.
+ */
+interface CompactionSnapshot {
+  record: Record<string, unknown>
+  index: number
+  at: Date
+  counts: Map<string, number>
+}
 
-  for (let index = 0; index < records.length; index += 1) {
-    const record = records[index]
-    if (!sessionStart && record.type === 'session_meta') {
-      const payload = record.payload
-      if (payload && typeof payload === 'object') {
-        sessionStart = parseTimestamp((payload as Record<string, unknown>).timestamp) ?? extractTimestamp(record)
-      }
-    }
-    if (record.type === 'compacted') {
-      const at = extractTimestamp(record)
-      if (at) lastCompaction = { record, index, at }
-    }
-  }
-
-  if (!lastCompaction) return []
-  const compaction = lastCompaction
-  const payload = compaction.record.payload
+/**
+ * Builds the retained-input list from the LAST compaction's snapshot. This is the unchanged tail of
+ * what used to be extractRetainedUserInputs's second full-array scan + history.forEach — only the
+ * inputs changed (a precomputed snapshot instead of a fresh scan of `records[]`).
+ */
+function buildRetainedFromSnapshot(
+  sessionStart: Date | null,
+  snapshot: CompactionSnapshot | null,
+): RetainedUserInput[] {
+  if (!snapshot) return []
+  const payload = snapshot.record.payload
   if (!payload || typeof payload !== 'object') return []
   const history = (payload as Record<string, unknown>).replacement_history
   if (!Array.isArray(history)) return []
 
-  const rangeEnd = compaction.at.toISOString()
-  const rangeStart = (sessionStart ?? compaction.at).toISOString()
-  const directTextCounts = new Map<string, number>()
-
-  for (const record of records) {
-    const at = extractTimestamp(record)
-    if (!at || at > compaction.at) continue
-    const eventPayload = record.type === 'event_msg' && record.payload && typeof record.payload === 'object'
-      ? record.payload as Record<string, unknown>
-      : null
-    const prompt = eventPayload ? extractPromptFromEvent(eventPayload) : extractPromptFromMessage(record)
-    if (!prompt) continue
-    const key = normalizePromptText(prompt.text)
-    directTextCounts.set(key, (directTextCounts.get(key) ?? 0) + 1)
-  }
+  const rangeEnd = snapshot.at.toISOString()
+  const rangeStart = (sessionStart ?? snapshot.at).toISOString()
+  // Clone, don't alias: the consume-one dedup below mutates this map. Sharing snapshot.counts
+  // directly would make a second finalize() call on the same classifier see already-decremented
+  // counts and return a different (wrong) answer for the identical session.
+  const directTextCounts = new Map(snapshot.counts)
 
   const retained: RetainedUserInput[] = []
   history.forEach((entry, ordinal) => {
@@ -409,7 +444,7 @@ function extractRetainedUserInputs(records: Record<string, unknown>[]): Retained
     }
 
     retained.push({
-      id: `compacted-${compaction.index}-${ordinal}`,
+      id: `compacted-${snapshot.index}-${ordinal}`,
       text,
       decision: detectDecision(text, ordinal + 1),
       origin: 'compacted',
@@ -481,7 +516,7 @@ function summarizeToolCall(name: string, input: Record<string, unknown>): string
 function unwrapToolOutput(raw: unknown): { content: string; isError: boolean } {
   if (typeof raw !== 'string') {
     const content = stringifyDisplayValue(raw)
-    const display = content.slice(0, 500) + (content.length > 500 ? `... (${content.length} chars)` : '')
+    const display = content
     return { content: display, isError: false }
   }
 
@@ -512,7 +547,7 @@ function unwrapToolOutput(raw: unknown): { content: string; isError: boolean } {
     isError = true
   }
 
-  const display = content.slice(0, 500) + (content.length > 500 ? `... (${content.length} chars)` : '')
+  const display = content
   return { content: display, isError }
 }
 
@@ -520,7 +555,7 @@ function extractMcpResultContent(result: unknown): { content: string; isError: b
   if (!result || typeof result !== 'object') return unwrapToolOutput(result)
   const record = result as Record<string, unknown>
   if ('Err' in record) {
-    return { content: stringifyDisplayValue(record.Err).slice(0, 500), isError: true }
+    return { content: stringifyDisplayValue(record.Err), isError: true }
   }
 
   const ok = record.Ok
@@ -765,20 +800,18 @@ export function quickScanCodexMetadata(
   }
 }
 
-export function parseCodexSessionContent(content: string): SessionData {
+/**
+ * The per-record classification core, shared by the synchronous (`parseCodexSessionContent`) and
+ * streaming (`parseCodexSessionContentStreaming`) entry points so the switch that turns a raw Codex
+ * record into `SessionMessage`s is written exactly once. Everything that used to live in
+ * `parseCodexSessionContent`'s own closure (prompt dedup state) plus the retained-input bookkeeping
+ * that used to be `extractRetainedUserInputs`'s own second full-array scan now lives here instead,
+ * folded into the same per-record pass — see the comment above `processRecord`'s retained-input
+ * block for why that fold is safe.
+ */
+function createCodexClassifier() {
   const messages: SessionMessage[] = []
   const prompts: PromptIndexEntry[] = []
-  const records: Record<string, unknown>[] = []
-
-  for (const line of content.split('\n')) {
-    if (!line.trim()) continue
-    try {
-      records.push(JSON.parse(line))
-    } catch {
-      continue
-    }
-  }
-
   let promptCounter = 0
   let pendingInterrupt = false
   const seenPrompts: Array<{ text: string; timestampMs: number }> = []
@@ -816,13 +849,85 @@ export function parseCodexSessionContent(content: string): SessionData {
     return true
   }
 
-  for (const record of records) {
-    const timestampDate = extractTimestamp(record) || new Date()
+  // One compaction can be written BOTH ways: a top-level `compacted` record and an `event_msg`
+  // `context_compacted`. Both cases below emit a boundary, so a file that writes both double-counted
+  // `markers.compacts` and rendered two dividers (measured: a 635MB rollout reported 584 for 292 real
+  // compactions). Neither case can simply be deleted -- the formats are not consistent between files,
+  // and a 829MB rollout writes only the top-level form, so dropping either would turn over-counting
+  // into under-counting for whichever files use only the other one.
+  //
+  // The two records for one compaction are separated only by bookkeeping that emits nothing
+  // (`world_state`, `turn_context`, `token_count` -- verified for all 292 pairs, zero unpaired), so
+  // "the previous message is already a boundary" identifies the duplicate exactly, whichever form
+  // came first. Two genuine compactions with no message at all between them would merge, which cannot
+  // happen: a compaction is triggered by the context the messages in between built up.
+  const pushCompactBoundary = (timestamp: string) => {
+    if (messages[messages.length - 1]?.kind === 'compact-boundary') return
+    messages.push({ kind: 'compact-boundary', timestamp, trigger: 'auto', preTokens: 0, summaryText: '' })
+  }
+
+  // Retained-input bookkeeping (was extractRetainedUserInputs's own two full-array scans over a
+  // materialized records[]). Codex writes rollouts append-only during a live session, so record
+  // timestamps are non-decreasing — verified directly against real oversized rollouts (zero
+  // out-of-order violations across 124,685 records), not merely assumed. That lets liveDirectTextCounts
+  // grow forward-only and lastCompactionSnapshot re-baseline from it at each `compacted` record,
+  // so finalize() only ever needs the LAST compaction's snapshot, never a second pass over the file.
+  let sessionStart: Date | null = null
+  const liveDirectTextCounts = new Map<string, number>()
+  let lastCompactionSnapshot: CompactionSnapshot | null = null
+  let recordIndex = 0
+
+  function processRecord(record: Record<string, unknown>): void {
+    // Captured before any of the early returns below so every record advances the index exactly
+    // once, matching extractRetainedUserInputs's original `for (let index = 0; ...)` position.
+    // Placing the increment at the tail instead would miss it for most record types: the classify
+    // switch below returns early for event_msg/compacted/non-response_item records, which is the
+    // majority of records in a real session.
+    const currentRecordIndex = recordIndex
+    recordIndex += 1
+
+    if (!sessionStart && record.type === 'session_meta') {
+      const metaPayload = record.payload
+      if (metaPayload && typeof metaPayload === 'object') {
+        sessionStart = parseTimestamp((metaPayload as Record<string, unknown>).timestamp) ?? extractTimestamp(record)
+      }
+    }
+
+    // extractTimestamp is pure, so computing it once here and reusing it below (as `timestampDate`'s
+    // source) instead of calling it a second time inside the classify switch is not a behavior
+    // change — just one fewer redundant parse per record.
+    const recordAt = extractTimestamp(record)
+    if (recordAt) {
+      const eventPayload = record.type === 'event_msg' && record.payload && typeof record.payload === 'object'
+        ? record.payload as Record<string, unknown>
+        : null
+      const retainedProbe = eventPayload ? extractPromptFromEvent(eventPayload) : extractPromptFromMessage(record)
+      if (retainedProbe) {
+        const key = normalizePromptText(retainedProbe.text)
+        liveDirectTextCounts.set(key, (liveDirectTextCounts.get(key) ?? 0) + 1)
+        // A record positioned after the last compaction line but sharing its exact timestamp still
+        // satisfies extractRetainedUserInputs's original `at <= compaction.at` (inclusive) check —
+        // keep feeding the frozen snapshot too, not just the live map.
+        if (lastCompactionSnapshot && recordAt.getTime() <= lastCompactionSnapshot.at.getTime()) {
+          lastCompactionSnapshot.counts.set(key, (lastCompactionSnapshot.counts.get(key) ?? 0) + 1)
+        }
+      }
+    }
+    if (record.type === 'compacted' && recordAt) {
+      // Re-baseline from the live map: under non-decreasing timestamps, everything folded into the
+      // live map up to this instant already satisfies `at <= recordAt` for THIS compaction.
+      lastCompactionSnapshot = { record, index: currentRecordIndex, at: recordAt, counts: new Map(liveDirectTextCounts) }
+    }
+
+    // --- Below is the classify switch, moved verbatim from the old per-record loop body. Its 5
+    // `continue` statements become `return` now that this runs once per record instead of once per
+    // `for` iteration; none of the 5 sit inside a nested loop of their own, so the conversion is exact. ---
+    const timestampDate = recordAt || new Date()
     const timestamp = formatTime(timestampDate)
 
     if (record.type === 'event_msg') {
       const payload = record.payload
-      if (!payload || typeof payload !== 'object') continue
+      if (!payload || typeof payload !== 'object') return
       const event = payload as Record<string, unknown>
       switch (event.type) {
         case 'user_message': {
@@ -865,13 +970,7 @@ export function parseCodexSessionContent(content: string): SessionData {
           })
           break
         case 'context_compacted':
-          messages.push({
-            kind: 'compact-boundary',
-            timestamp,
-            trigger: 'auto',
-            preTokens: 0,
-            summaryText: '',
-          })
+          pushCompactBoundary(timestamp)
           break
         case 'mcp_tool_call_end': {
           const invocation = event.invocation && typeof event.invocation === 'object'
@@ -898,24 +997,31 @@ export function parseCodexSessionContent(content: string): SessionData {
           })
           break
         }
+
+        // Deliberately dropped, recorded here so the question is not re-opened. Every one of the
+        // 18,473 of these across this machine's history carries the same six fields
+        // (type/event_id/occurred_at_ms/agent_thread_id/agent_path/kind) and no content: `started`
+        // trails a spawn_agent tool call already rendered as ai-tool-use, `interrupted` trails
+        // interrupt_agent. They are also broadcast — one event_id was found byte-identical in 13
+        // separate session files — so surfacing them would duplicate delegation the reader already
+        // sees. The format is retired besides: 819/1086 files in 2026/07, 202/3144 in 2026/08,
+        // 0/199 in 2026/09, superseded by item_completed (whose content we already parse via
+        // response_item). Delegation that IS content-bearing arrives as <subagent_notification>
+        // and is parsed into delegation-update above.
+        case 'sub_agent_activity':
+          break
       }
-      continue
+      return
     }
 
     if (record.type === 'compacted') {
-      messages.push({
-        kind: 'compact-boundary',
-        timestamp,
-        trigger: 'auto',
-        preTokens: 0,
-        summaryText: '',
-      })
-      continue
+      pushCompactBoundary(timestamp)
+      return
     }
 
-    if (record.type !== 'response_item') continue
+    if (record.type !== 'response_item') return
     const payload = record.payload
-    if (!payload || typeof payload !== 'object') continue
+    if (!payload || typeof payload !== 'object') return
     const item = payload as Record<string, unknown>
 
     switch (item.type) {
@@ -942,13 +1048,34 @@ export function parseCodexSessionContent(content: string): SessionData {
         }
         break
       }
+      case 'agent_message': {
+        // Codex teams: a delegated agent handing work back to the main thread. This is the same
+        // event `delegation-update` describes, in the record shape that replaced the `event_msg`
+        // form during August -- so without this case the conclusions delegated agents return are
+        // dropped outright from every session written since.
+        const parts = Array.isArray(item.content) ? item.content as Array<Record<string, unknown>> : []
+        const text = parts.map((part) => (typeof part.text === 'string' ? part.text : '')).join('')
+        const body = text ? extractAgentMessageBody(text) : ''
+        if (!body) break
+        const author = typeof item.author === 'string' ? item.author : ''
+        const from = author.split('/').filter(Boolean).pop() || 'delegated-agent'
+        messages.push({
+          kind: 'team-message',
+          from,
+          color: teamColorFor(from),
+          summary: sanitizePreview(body),
+          content: body,
+          isProtocol: false,
+        })
+        break
+      }
       case 'reasoning': {
         const reasoning = extractReasoningText(item)
         if (!reasoning) break
         messages.push({
           kind: 'ai-thinking',
           preview: sanitizePreview(reasoning).slice(0, 120),
-          full: reasoning.slice(0, 3000) + (reasoning.length > 3000 ? `\n... (${reasoning.length} chars total)` : ''),
+          full: reasoning,
           timestamp,
         })
         break
@@ -1034,18 +1161,79 @@ export function parseCodexSessionContent(content: string): SessionData {
     }
   }
 
-  const markers = { compacts: 0, plans: 0, clears: 0, forks: 0 }
-  for (const msg of messages) {
-    if (msg.kind === 'compact-boundary') markers.compacts++
-    else if (msg.kind === 'rollback-marker') markers.forks++
+  function finalize(): SessionData {
+    const markers = { compacts: 0, plans: 0, clears: 0, forks: 0 }
+    for (const msg of messages) {
+      if (msg.kind === 'compact-boundary') markers.compacts++
+      else if (msg.kind === 'rollback-marker') markers.forks++
+    }
+
+    return {
+      source: 'codex',
+      messages,
+      prompts,
+      retainedUserInputs: buildRetainedFromSnapshot(sessionStart, lastCompactionSnapshot),
+      heatmap: computeHeatmap(messages),
+      markers,
+    }
   }
 
-  return {
-    source: 'codex',
-    messages,
-    prompts,
-    retainedUserInputs: extractRetainedUserInputs(records),
-    heatmap: computeHeatmap(messages),
-    markers,
+  return { processRecord, finalize }
+}
+
+export function parseCodexSessionContent(content: string): SessionData {
+  const classifier = createCodexClassifier()
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue
+    let record: Record<string, unknown>
+    try {
+      record = JSON.parse(line)
+    } catch {
+      continue
+    }
+    classifier.processRecord(record)
   }
+  return classifier.finalize()
+}
+
+// How many records pass through the streaming classifier between explicit event-loop yields. 3000
+// matches ~40 yields over the ~125k-record file this streaming path exists for — frequent enough
+// that the single-threaded dev/preview server stays responsive during a multi-second parse, cheap
+// enough (a `setImmediate` round-trip) that it costs nothing measurable against the parse itself.
+const CODEX_STREAM_YIELD_EVERY_LINES = 3000
+
+/**
+ * Streaming twin of `parseCodexSessionContent`, for Codex files too large to ever exist as one JS
+ * string (see `readSessionContent`'s Codex branch in vite-plugin-claude-data.ts, the only caller).
+ * Drives the identical `processRecord`/`finalize` pair via `for await` instead of a synchronous
+ * `for...of`, so classification logic is written exactly once regardless of entry point.
+ *
+ * `yieldToEventLoop` is required, not optional: the local API is single-threaded, and an implicit
+ * assumption that stream I/O alone provides enough asynchrony is exactly the failure class this
+ * branch exists to close off (see CLAUDE.md's "Indexing must never own the event loop"). Making this
+ * parameter optional is how that regresses — a future caller could simply forget to pass it.
+ *
+ * This function must stay free of Node-specific imports (no `fs`, no `readline`, no `setImmediate`):
+ * `codex-parser.ts` is bundled into the browser build via `parser.ts` -> `useFileLoader.ts`/`App.tsx`,
+ * so all I/O and the event-loop yield itself are supplied by the (Node-only) caller.
+ */
+export async function parseCodexSessionContentStreaming(
+  lines: AsyncIterable<string>,
+  yieldToEventLoop: () => Promise<void>,
+): Promise<SessionData> {
+  const classifier = createCodexClassifier()
+  let recordsProcessed = 0
+  for await (const line of lines) {
+    if (!line.trim()) continue
+    let record: Record<string, unknown>
+    try {
+      record = JSON.parse(line)
+    } catch {
+      continue
+    }
+    classifier.processRecord(record)
+    recordsProcessed += 1
+    if (recordsProcessed % CODEX_STREAM_YIELD_EVERY_LINES === 0) await yieldToEventLoop()
+  }
+  return classifier.finalize()
 }

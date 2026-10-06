@@ -1,3 +1,5 @@
+import type {ServerParsedSessionEnvelope} from './src/types/session'
+import {readCodexNativeSession} from './server/codex-native-session'
 import type { Plugin } from 'vite'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -582,6 +584,8 @@ async function readSessionContent(
   }
 
   if (source === 'codex' || isCodexProjectId(projectEncoded)) {
+    const native=readCodexNativeSession(path.resolve(codexSessionsDir,'..','..'),sessionId)
+    if(native)return JSON.stringify({__serverParsed:true,data:native} satisfies ServerParsedSessionEnvelope)
     const filePath = await resolveCodexSessionFile(codexSessionsDir, sessionId)
     return fs.promises.readFile(filePath, 'utf-8')
   }

@@ -3,7 +3,7 @@ import { AppContext, reducer, initialState } from './hooks/useSessionStore'
 import { WelcomeScreen } from './components/landing/WelcomeScreen'
 import { AppShell } from './components/layout/AppShell'
 import { tryAutoLoad } from './lib/fs-access'
-import { parseSessionContent } from './lib/parser'
+import { parseFetchedSessionContent } from './lib/parser'
 import { decodeHash, encodeHash } from './hooks/useFileLoader'
 import { planInitialNavigation, mostRecentSession, type InitialNavPlan } from './lib/initial-navigation'
 import type { FileStore } from './lib/fs-access'
@@ -19,7 +19,7 @@ async function loadTarget(
 ) {
   const content = await store.readSessionContent(projectEncoded, sessionId)
   if (cancelled.current) return
-  const data = parseSessionContent(content, source)
+  const data = parseFetchedSessionContent(content, source)
   if (cancelled.current) return
   dispatch({ type: 'LOAD_SESSION', sessionId, projectEncoded, data })
   history.replaceState(null, '', encodeHash(projectEncoded, sessionId))

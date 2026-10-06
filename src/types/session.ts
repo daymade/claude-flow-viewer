@@ -8,7 +8,7 @@ export interface EmbeddedImage {
   dataUrl: string
 }
 
-export type SessionMessage =
+export type SessionMessage = { sourceRecordId?: string; sourceRecord?: Record<string,unknown> } & (
   | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; timestamp?: string; decision: DecisionMarker; queued?: boolean; dupCount?: number }
   | { kind: 'tool-result'; content: string; isError: boolean; externalFile?: string; totalSize?: string; timestamp?: string }
   | { kind: 'ai-text'; text: string; timestamp?: string }
@@ -23,6 +23,7 @@ export type SessionMessage =
   | { kind: 'compact-boundary'; timestamp: string; trigger: 'auto' | 'manual'; preTokens: number; summaryText: string }
   | { kind: 'plan-start'; timestamp: string }
   | { kind: 'plan-end'; timestamp: string; planPreview: string }
+)
 
 export interface TimelineEvent {
   kind: 'prompt' | 'compact' | 'clear' | 'fork' | 'plan-start' | 'plan-end'
@@ -137,6 +138,8 @@ export interface SessionData {
   heatmap: number[]
   markers: SessionMarkers
 }
+
+export type ServerParsedSessionEnvelope = {__serverParsed:true;data:SessionData}
 
 export interface FilterState {
   thinking: boolean

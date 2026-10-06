@@ -1,0 +1,14 @@
+import {build} from 'esbuild';
+import {mkdir,writeFile,copyFile,readdir,rm} from 'node:fs/promises';
+import {execFileSync} from 'node:child_process';
+const sourceCommit=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+await rm('dist-reader/types',{recursive:true,force:true});
+await mkdir('dist-reader/server',{recursive:true});
+await build({entryPoints:['scripts/reader-parser.ts'],bundle:true,platform:'node',format:'esm',target:'node20',outfile:'dist-reader/server/parse-claude.mjs'});
+await build({entryPoints:['src/reader.ts'],bundle:true,platform:'browser',format:'esm',external:['react','react-dom','react/jsx-runtime','react-markdown','remark-gfm'],outfile:'dist-reader/reader.mjs'});
+await copyFile('LICENSE','dist-reader/LICENSE');
+const css=(await readdir('dist-reader/web/assets')).find(name=>name.endsWith('.css'));
+if(!css)throw new Error('Reader CSS was not built');
+await copyFile('dist-reader/web/assets/'+css,'dist-reader/reader.css');
+const sourceDirty=Boolean(execFileSync('git',['status','--porcelain=v1','--untracked-files=all'],{encoding:'utf8'}).trim());
+await writeFile('dist-reader/package.json',JSON.stringify({name:'@daymade/session-reader',version:'0.1.0',type:'module',license:'MIT',sourceCommit,sourceDirty,repository:'https://github.com/daymade/claude-flow-viewer',files:['web','server','types','reader.mjs','reader.css','LICENSE'],exports:{'.':{types:'./types/reader.d.ts',import:'./reader.mjs'},'./reader.css':'./reader.css','./embed.html':'./web/embed.html','./package.json':'./package.json'},peerDependencies:{react:'^19.2.0','react-dom':'^19.2.0','react-markdown':'^10.1.0','remark-gfm':'^4.0.1'}},null,2)+'\n');

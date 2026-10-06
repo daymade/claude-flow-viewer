@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "./dist-reader/types",
+    "rootDir": "./src",
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.reader.tsbuildinfo"
+  },
+  "include": [
+    "src/reader.ts",
+    "src/**/*.d.ts"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.test.tsx"
+  ]
+}
