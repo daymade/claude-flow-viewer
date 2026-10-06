@@ -35,6 +35,12 @@ export interface SessionViewProps {
   readToolResult?: ReadToolResult | null
 }
 
+function scrollWithinReader(container: HTMLDivElement, target: HTMLElement, block: 'start' | 'center') {
+  const offset = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
+  const padding = block === 'center' ? Math.max(0, (container.clientHeight - target.offsetHeight) / 2) : 0
+  container.scrollTop = Math.max(0, offset - padding)
+}
+
 export function SessionView({
   data,
   filter,
@@ -55,7 +61,7 @@ export function SessionView({
 
   const scrollToPrompt = useCallback((num: number) => {
     const el = contentRef.current?.querySelector(`[data-prompt="${num}"]`)
-    el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    if(el instanceof HTMLElement && contentRef.current)scrollWithinReader(contentRef.current,el,'start')
   }, [])
 
   const scrollToFraction = useCallback((fraction: number) => {
@@ -145,7 +151,7 @@ export function SessionView({
         ? el.querySelector(`[data-prompt="${activeSearchTarget.promptNum}"]`)
         : el.querySelector(`[data-message-index="${activeSearchTarget.messageIndex}"]`)
       if (target instanceof HTMLElement) {
-        target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        scrollWithinReader(el,target,'center')
       }
     })
 

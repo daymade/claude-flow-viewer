@@ -24,3 +24,18 @@ it('retains the standalone controlled search target instead of choosing the firs
  expect(container.querySelector('[data-message-index="1"]')?.className).toContain('ring-1')
  expect(container.querySelector('[data-message-index="0"]')?.className).not.toContain('ring-1')
 })
+
+it('keeps search navigation inside its reader and exposes the start of an oversized message',async()=>{
+ const outerScroll=vi.spyOn(HTMLElement.prototype,'scrollIntoView')
+ outerScroll.mockClear()
+ const data:SessionData={source:'claude',messages:[{kind:'ai-text',text:'first'},{kind:'ai-text',text:'long selected question'}],prompts:[],heatmap:[],markers:{compacts:0,plans:0,clears:0,forks:0}}
+ const {container,rerender}=render(<SessionReader data={data} showToolbar={false}/>)
+ const reader=container.querySelector('[data-primary-scroll]') as HTMLElement, target=container.querySelector('[data-message-index="1"]') as HTMLElement
+ Object.defineProperty(reader,'clientHeight',{value:200})
+ Object.defineProperty(target,'offsetHeight',{value:300})
+ reader.getBoundingClientRect=()=>({top:100}) as DOMRect
+ target.getBoundingClientRect=()=>({top:500}) as DOMRect
+ rerender(<SessionReader data={data} showToolbar={false} activeSearchTarget={{messageIndex:1}}/>)
+ await waitFor(()=>expect(reader.scrollTop).toBe(400))
+ expect(outerScroll).not.toHaveBeenCalled()
+})
