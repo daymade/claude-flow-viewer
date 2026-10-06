@@ -152,7 +152,7 @@ export function ToolCallLine({ msg }: { msg: Extract<SessionMessage, { kind: 'ai
         </svg>
         <span className="truncate min-w-0">{msg.summary}</span>
       </summary>
-      <pre className="mt-1 ml-5 p-3 bg-stone-50 rounded text-[13px] max-h-[200px] overflow-auto leading-relaxed text-stone-500">{truncateInput(msg.input)}</pre>
+      <pre className="mt-1 ml-5 p-3 bg-stone-50 rounded text-[13px] max-h-[200px] overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] leading-relaxed text-stone-500">{truncateInput(msg.input)}</pre>
     </details>
   )
 }
@@ -516,5 +516,15 @@ export function PlanEndMarker({ msg }: { msg: Extract<SessionMessage, { kind: 'p
 // ─── Utility ───
 
 function truncateInput(input: Record<string, unknown>): string {
+  // A sole string `raw` field is the verbatim tool payload (e.g. an apply-patch
+  // body). Show it exactly as-is: JSON.stringify would wrap it in quotes and
+  // double-escape every newline/quote, destroying readability.
+  if (
+    Object.keys(input).length === 1 &&
+    Object.prototype.hasOwnProperty.call(input, 'raw') &&
+    typeof input.raw === 'string'
+  ) {
+    return input.raw
+  }
   return JSON.stringify(input, null, 2)
 }
