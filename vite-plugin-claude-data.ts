@@ -1,3 +1,4 @@
+import type {ServerParsedSessionEnvelope} from './src/types/session'
 import {readCodexNativeSession} from './server/codex-native-session'
 import type { Plugin } from 'vite'
 import fs from 'node:fs'

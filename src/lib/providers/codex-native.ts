@@ -20,7 +20,7 @@ export function parseCodexNativeRecords(records: NativeConversationRecord[]): Se
   let count = 0
   for (const record of records) {
     const item = record.item, type = item.type
-    const base = {sourceRecordId:record.id, ...(record.timestamp ? {timestamp:record.timestamp} : {})}
+    const base = {sourceRecordId:record.id,sourceRecord:item, ...(record.timestamp ? {timestamp:record.timestamp} : {})}
     if (type === 'userMessage') {
       const parts = Array.isArray(item.content) ? item.content : [item.content]
       const images: EmbeddedImage[] = []
@@ -31,6 +31,7 @@ export function parseCodexNativeRecords(records: NativeConversationRecord[]): Se
           else return display(part)
           return ''
         }
+        if (part && typeof part === 'object' && part.type==='skill') return `[Skill: ${String(part.name ?? 'unnamed')}]`
         return display(part)
       }).filter(Boolean).join('\n')
       const promptNum=++count, decision=detectDecision(text,promptNum)
@@ -45,7 +46,7 @@ export function parseCodexNativeRecords(records: NativeConversationRecord[]): Se
         if (!text.includes(title)) text+='\n\n'+title
         for (const option of options) {
           const label=typeof option === 'string' ? option : display(option.label ?? option.title)
-          if (label && !text.includes(label)) text+='\n- '+label+(option.description ? ': '+display(option.description) : '')
+          if (label && (!text.includes(label) || option.description && !text.includes(display(option.description)))) text+='\n- '+label+(option.description ? ': '+display(option.description) : '')
         }
       }
       messages.push({...base,kind:'ai-text',text})
@@ -53,7 +54,7 @@ export function parseCodexNativeRecords(records: NativeConversationRecord[]): Se
       const full=[display(item.content),display(item.summary)].filter(Boolean).join('\n')
       messages.push({...base,kind:'ai-thinking',preview:full.slice(0,120),full})
     } else if (type === 'commandExecution') {
-      messages.push({...base,kind:'ai-tool-use',name:'commandExecution',summary:display(item.command).slice(0,100),input:{command:item.command}})
+      messages.push({...base,kind:'ai-tool-use',name:'commandExecution',summary:display(item.command).slice(0,100),input:Object.fromEntries(Object.entries(item).filter(([key])=>key!=='aggregatedOutput'))})
       messages.push({...base,kind:'tool-result',content:display(item.aggregatedOutput),isError:typeof item.exitCode === 'number' && item.exitCode!==0})
     } else if (type === 'mcpToolCall' || type === 'dynamicToolCall') {
       const name=[item.server,item.tool ?? item.toolName ?? type].filter(Boolean).join('/')

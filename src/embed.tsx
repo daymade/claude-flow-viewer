@@ -1,28 +1,16 @@
 import { createRoot } from 'react-dom/client'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { SessionReader } from './components/session/SessionReader'
-import { parseCodexNativeRecords, type NativeConversationRecord } from './lib/providers/codex-native'
-import type { SessionData, SessionMessage } from './types/session'
-import type { SearchJumpTarget } from './hooks/useSearchController'
-import {computeHeatmap} from './lib/heatmap'
+import {normalizeConversationPage as adapt,type ConversationPage as Page} from './lib/reader-page'
+import type { ReaderJumpTarget } from './components/session/SessionView'
 import './index.css'
 import './embed.css'
-interface Page {
-  provider: 'claude' | 'codex'; session_id: string; records: Array<NativeConversationRecord & {message?:SessionMessage}>
-  total:number; offset:number; next_offset:number; has_earlier:boolean; has_later:boolean
-  revision?:string; until?:number; read_at:string; boundary:string
-}
-function adapt(page:Page):SessionData {
-  if (page.provider==='codex') return parseCodexNativeRecords(page.records)
-  const messages=page.records.map(record=>({...record.message!,sourceRecordId:record.id}))
-  const prompts=messages.flatMap(message=>message.kind==='user-prompt' ? [{num:message.promptNum,preview:message.text.slice(0,100),fullText:message.text,time:message.time,timestamp:message.timestamp,decision:message.decision}] : [])
-  return {source:page.provider,messages,prompts,heatmap:computeHeatmap(messages),markers:{compacts:0,plans:0,clears:0,forks:0}}
-}
 export function ReaderEmbed() {
   const raw=new URLSearchParams(location.search).get('endpoint') ?? ''
+  const expectedSession=new URLSearchParams(location.search).get('session')
   const endpoint=raw.startsWith('/api/') && !raw.includes('\\') && !raw.includes('#') ? raw : null
   const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(''), [busy,setBusy]=useState(false)
-  const [target,setTarget]=useState<SearchJumpTarget|null>(null)
+  const [target,setTarget]=useState<ReaderJumpTarget|null>(null)
   const generation=useRef(0), current=useRef<Page|null>(null)
   const read=useCallback(async (mode:string,anchor?:string)=>{
     if (!endpoint) {setError('No bound session endpoint');return}
@@ -38,15 +26,16 @@ export function ReaderEmbed() {
       const response=await fetch(endpoint+'?'+query,{credentials:'same-origin'})
       if(!response.ok)throw new Error((await response.text()).slice(0,1000))
       const next:Page=await response.json()
+      if(expectedSession && next.session_id!==expectedSession)throw new Error('Selected session identity changed')
       if(version!==generation.current)return
       if(previous && ['earlier','later'].includes(mode) && next.session_id!==previous.session_id)throw new Error('Selected session identity changed')
       const merged=mode==='earlier' && previous ? {...next,records:[...next.records,...previous.records],next_offset:previous.next_offset,has_later:previous.has_later} : mode==='later' && previous ? {...next,offset:previous.offset,has_earlier:previous.has_earlier,records:[...previous.records,...next.records]} : next
       current.current=merged;setPage(merged)
       const data=adapt(merged), index=anchor ? data.messages.findIndex(message=>message.sourceRecordId===anchor) : mode==='latest' ? data.messages.length-1 : 0
-      setTarget(index>=0 ? {chunkId:anchor ?? mode+'-'+version,sessionId:next.session_id,projectEncoded:'',messageIndex:index} : null)
+      setTarget(index>=0 ? {messageIndex:index} : null)
     } catch(e) {if(version===generation.current)setError(e instanceof Error ? e.message : String(e))}
     finally {if(version===generation.current)setBusy(false)}
-  },[endpoint])
+  },[endpoint,expectedSession])
   useEffect(()=>{void read('latest');const counter=generation;return()=>{counter.current++}},[read])
   useEffect(()=>{
     const receive=(event:MessageEvent)=>{

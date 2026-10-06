@@ -27,10 +27,11 @@ function extractTimestamp(data: Record<string, unknown>): Date {
     const ts = parseTimestamp(val)
     if (ts) return ts
   }
-  return new Date()
+  return new Date(NaN)
 }
 
 function formatDateTime(d: Date): string {
+  if(Number.isNaN(d.getTime()))return 'Time not recorded'
   const year = d.getFullYear()
   const month = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
@@ -40,6 +41,7 @@ function formatDateTime(d: Date): string {
 }
 
 function formatTime(d: Date): string {
+  if(Number.isNaN(d.getTime()))return 'Time not recorded'
   const h = String(d.getHours()).padStart(2, '0')
   const m = String(d.getMinutes()).padStart(2, '0')
   const s = String(d.getSeconds()).padStart(2, '0')
@@ -365,7 +367,7 @@ function classifyRecord(
       const images = getUserImages(data)
       const ts = extractTimestamp(data)
       const time = formatTime(ts)
-      const timestamp = ts.toISOString()
+      const timestamp = Number.isNaN(ts.getTime()) ? '' : ts.toISOString()
       if (promptCounter) {
         promptCounter.value++
         const decision = detectDecision(text, promptCounter.value)
@@ -678,7 +680,7 @@ export function parseClaudeSessionContent(content: string): SessionData {
           if (!wasDelivered && promptCounter) {
             promptCounter.value++
             const time = formatTime(ts)
-            const timestamp = ts.toISOString()
+            const timestamp = Number.isNaN(ts.getTime()) ? '' : ts.toISOString()
             const decision = detectDecision(text, promptCounter.value)
             messages.push({ kind: 'user-prompt', promptNum: promptCounter.value, text, images: [], time, timestamp, decision, queued: true })
             prompts?.push({
@@ -722,7 +724,8 @@ export function parseClaudeSessionContent(content: string): SessionData {
       continue
     }
 
-    const recordedTimestamp = parseTimestamp(data.timestamp) ? (typeof data.timestamp==='string' ? data.timestamp : parseTimestamp(data.timestamp)!.toISOString()) : undefined
+    const recorded = extractTimestamp(data)
+    const recordedTimestamp = Number.isNaN(recorded.getTime()) ? undefined : (typeof data.timestamp==='string' ? data.timestamp : recorded.toISOString())
     messages.push(...classified.messages.map(message => ({...message, timestamp:recordedTimestamp ?? '', ...(message.kind==='user-prompt' && !recordedTimestamp ? {time:'Time not recorded'} : {})})))
 
     // 5g: Inject fork-indicator after the current record if it's a fork point
@@ -813,7 +816,8 @@ export function quickScanClaudeMetadata(head: string, sessionId: string, fileSiz
     try { data = JSON.parse(line) } catch { continue }
 
     if (!startTime) {
-      startTime = extractTimestamp(data)
+      const recorded=extractTimestamp(data)
+      if(!Number.isNaN(recorded.getTime()))startTime=recorded
     }
 
     if (!firstPromptPreview) {

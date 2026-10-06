@@ -44,14 +44,21 @@ function collectSubtree(
 ): Record<string, unknown>[] {
   const result: Record<string, unknown>[] = []
   const queue = [rootUuid]
+  // In a well-formed tree each node is reached once, so `visited` changes nothing -- it is here so
+  // that a malformed parent/child cycle on disk degrades to a partial subtree instead of looping
+  // forever and growing `result` without bound. Sessions with cycles are real; see the trace above.
+  const visited = new Set<string>([rootUuid])
 
-  while (queue.length > 0) {
-    const current = queue.shift()!
+  // Index cursor rather than queue.shift(), which is O(n) per call and makes BFS quadratic.
+  for (let head = 0; head < queue.length; head += 1) {
+    const current = queue[head]
     const rec = byUuid.get(current)
     if (rec) result.push(rec)
     const children = childrenOf.get(current)
     if (children) {
       for (const childUuid of children) {
+        if (visited.has(childUuid)) continue
+        visited.add(childUuid)
         queue.push(childUuid)
       }
     }
@@ -158,9 +165,16 @@ export function analyzeConversationTree(records: Record<string, unknown>[]): Tre
     }
     if (!tipUuid) continue
 
-    // Walk from tip back to root via parentOf (which covers ALL types)
+    // Walk from tip back to root via parentOf (which covers ALL types).
+    // Cycle guard: real sessions on disk DO contain parentUuid cycles (observed: an 8-record loop
+    // in a 5MB Claude session). Without this the walk spins forever, pinning the CPU and hanging
+    // whatever called it -- the browser tab for a viewer, the whole dev server for the indexer.
+    // findRoot above already guards for the same reason; this walk must too.
+    const walked = new Set<string>()
     let current: string | null = tipUuid
     while (current) {
+      if (walked.has(current)) break
+      walked.add(current)
       activeUuids.add(current)
       const parent = parentOf.get(current)
       if (parent === undefined) break // uuid not found at all

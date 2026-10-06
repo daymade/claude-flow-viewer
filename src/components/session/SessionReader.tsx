@@ -15,7 +15,7 @@ export function SessionReader({ filter: controlledFilter, searchQuery: controlle
   const currentFilter = controlledFilter ?? filter
   const currentQuery = controlledQuery ?? query
   const matches = useMemo(() => currentQuery ? props.data.messages.flatMap((message, i) => JSON.stringify(message).toLowerCase().includes(currentQuery.toLowerCase()) ? [i] : []) : [], [props.data.messages, currentQuery])
-  const target = controlledQuery !== undefined ? props.activeSearchTarget : currentQuery ? (matches.length ? {messageIndex:matches[hit % matches.length],chunkId:'reader-find-'+hit,projectEncoded:'',sessionId:''} : null) : props.activeSearchTarget
+  const target = controlledQuery !== undefined ? props.activeSearchTarget : currentQuery ? (matches.length ? {messageIndex:matches[hit % matches.length]} : null) : props.activeSearchTarget
   return <div className="flex min-h-0 flex-1 flex-col" data-session-reader="claude-flow-viewer">
     {showToolbar && <div className="shrink-0 border-b border-stone-200 bg-white px-3 py-2 flex flex-wrap items-center gap-2">
       <SessionToolbar filter={currentFilter} onToggle={key => onToggleFilter ? onToggleFilter(key) : setFilter(old => ({...old,[key]:!old[key]}))} />

@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest'
-import { parseSessionContent } from '../parser'
+import { describe, it, expect, vi } from 'vitest'
+import { parseFetchedSessionContent, parseSessionContent } from '../parser'
+import type { SessionData } from '../../types/session'
 
 // --- Test fixtures: sanitized JSONL records ---
 
@@ -1146,4 +1147,144 @@ describe('parseSessionContent', () => {
       }
     })
   })
+
+  describe('parentUuid cycles (tree-parser hang regression)', () => {
+    // Real sessions on disk contain parentUuid cycles: a 5.34MB local Claude session held an
+    // 8-record loop. The active-path walk followed parentOf without a visited set, so it spun
+    // forever — pinning a core and hanging whatever called it (a browser tab for the viewer, the
+    // entire dev server for the search indexer, which is single-threaded). findRoot() already
+    // guarded against this; the tip-to-root walk and the subtree BFS did not.
+
+    it('terminates on a parentUuid cycle instead of looping forever', () => {
+      // c1 -> c2 -> c3 -> c1 is a closed loop with no root, plus a normal turn after it.
+      const content = jsonl(
+        userMsg('c1', 'c3', 'cycle a'),
+        assistantMsg('c2', 'c1', [{ type: 'text', text: 'cycle b' }]),
+        userMsg('c3', 'c2', 'cycle c'),
+        userMsg('u1', null, 'a normal question'),
+        assistantMsg('a1', 'u1', [{ type: 'text', text: 'a normal answer' }]),
+      )
+
+      const started = Date.now()
+      const result = parseSessionContent(content)
+      expect(Date.now() - started).toBeLessThan(5000)
+
+      // The healthy turn is still parsed; the cycle must not swallow it.
+      const prompts = result.messages.filter(m => m.kind === 'user-prompt')
+      expect(prompts.some(p => (p as { text?: string }).text === 'a normal question')).toBe(true)
+    })
+
+    it('terminates when the tip itself sits inside the cycle', () => {
+      // No record outside the loop, so the tip trace starts on the cycle itself.
+      const content = jsonl(
+        userMsg('c1', 'c3', 'one'),
+        assistantMsg('c2', 'c1', [{ type: 'text', text: 'two' }]),
+        userMsg('c3', 'c2', 'three'),
+      )
+
+      const started = Date.now()
+      expect(() => parseSessionContent(content)).not.toThrow()
+      expect(Date.now() - started).toBeLessThan(5000)
+    })
+  })
+})
+
+describe('parseFetchedSessionContent', () => {
+  // The FROZEN contract: an oversized Codex session is parsed server-side and shipped as
+  // `{ __serverParsed: true, data }` instead of raw text. Everything below exercises the client
+  // detection side of that contract in isolation from the server/streaming half.
+
+  it('unwraps a server-parsed envelope into the wrapped SessionData', () => {
+    const data: SessionData = {
+      source: 'codex',
+      messages: [{ kind: 'ai-text', text: 'parsed server-side' }],
+      prompts: [],
+      heatmap: [],
+      markers: { compacts: 0, plans: 0, clears: 0, forks: 0 },
+    }
+    const envelope = JSON.stringify({ __serverParsed: true, data })
+
+    expect(parseFetchedSessionContent(envelope, 'codex')).toEqual(data)
+  })
+
+  it('does not mistake a genuine single-line Codex session for a server-parsed envelope', () => {
+    // A real session_meta-only rollout: one line, no trailing newline, itself valid whole-string
+    // JSON -- exactly the shape a naive "JSON.parse succeeded" check would misread as pre-parsed.
+    const content = JSON.stringify({
+      type: 'session_meta',
+      payload: {
+        id: 'abc-123',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        cwd: '/tmp/demo',
+        originator: 'codex_cli_rs',
+        cli_version: '1.0.0',
+      },
+    })
+
+    const result = parseFetchedSessionContent(content, 'codex')
+
+    expect(result.source).toBe('codex')
+    expect(result).toEqual(parseSessionContent(content, 'codex'))
+  })
+
+  it('falls through to normal parsing when no __serverParsed marker is present', () => {
+    const content = JSON.stringify({ hello: 'world' })
+
+    expect(parseFetchedSessionContent(content, 'codex')).toEqual(parseSessionContent(content, 'codex'))
+  })
+
+  it('falls through without throwing when the body is truncated past the envelope prefix', () => {
+    const content = '{"__serverParsed":true,"data":{"source":"codex","mess'
+
+    expect(() => parseFetchedSessionContent(content, 'codex')).not.toThrow()
+    expect(parseFetchedSessionContent(content, 'codex')).toEqual(parseSessionContent(content, 'codex'))
+  })
+
+  it('rejects a large Cherry Studio-shaped payload by a bounded prefix check, not a redundant full JSON.parse', () => {
+    // Cherry Studio's route returns ONE whole-file JSON document, not JSONL -- a blind
+    // `JSON.parse` here to check for the marker would cost real time proportional to this
+    // document's size, unlike a JSONL line's cheap "throws at the second line" early exit. Padded
+    // well past a trivial fixture size so a redundant full parse would be a real, not token, cost.
+    const bigContent = JSON.stringify({
+      source: 'cherrystudio',
+      userDataPath: '/Users/test/Library/Application Support/CherryStudio',
+      session: {
+        id: 'topic:big',
+        name: 'Big Cherry Studio chat',
+        createdAt: '2026-03-10T10:00:00.000Z',
+        updatedAt: '2026-03-10T10:00:05.000Z',
+        messages: [
+          {
+            role: 'user',
+            content: { text: 'x'.repeat(5_000_000) },
+            createdAt: '2026-03-10T10:00:00.000Z',
+            updatedAt: '2026-03-10T10:00:00.000Z',
+          },
+        ],
+      },
+    })
+
+    const parseSpy = vi.spyOn(JSON, 'parse')
+    try {
+      // Passing the known source bypasses parseSessionContent's own detectSessionSource probe
+      // parse, isolating the count to the ONE legitimate parse inside
+      // parseCherryStudioSessionContent's own payload read -- anything more would mean the
+      // envelope check above blindly re-parsed this large document just to reject it.
+      const result = parseFetchedSessionContent(bigContent, 'cherrystudio')
+      const parseCallsOnThisPayload = parseSpy.mock.calls.filter(([text]) => text === bigContent).length
+
+      expect(parseCallsOnThisPayload).toBe(1)
+      expect(result.source).toBe('cherrystudio')
+      expect(result.messages).toHaveLength(1)
+    } finally {
+      parseSpy.mockRestore()
+    }
+  })
+})
+
+
+it('does not invent prompt time when the original record has none',()=>{
+ const data=parseSessionContent(JSON.stringify({type:'user',uuid:'u',parentUuid:null,message:{role:'user',content:'Selected prompt with no timestamp'}}),'claude')
+ expect(data.messages[0]).toMatchObject({timestamp:'',time:'Time not recorded'})
+ expect(data.prompts[0]).toMatchObject({timestamp:'',time:'Time not recorded'})
 })

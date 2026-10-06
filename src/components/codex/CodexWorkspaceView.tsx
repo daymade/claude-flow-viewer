@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import type { FileStore } from '../../lib/fs-access'
 import type { SearchJumpTarget } from '../../hooks/useSearchController'
-import { parseSessionContent } from '../../lib/parser'
+import { parseFetchedSessionContent } from '../../lib/parser'
 import {
   buildCodexTaskInsights,
   codexLineageSummary,
@@ -152,7 +152,7 @@ export function CodexWorkspaceView({
     Promise.all(
       missingSessionIds.map(async (sessionId) => {
         const content = await fileStore.readSessionContent(project.encodedName, sessionId)
-        return [sessionId, parseSessionContent(content, 'codex')] as const
+        return [sessionId, parseFetchedSessionContent(content, 'codex')] as const
       }),
     ).then((entries) => {
       if (cancelled) return

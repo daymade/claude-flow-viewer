@@ -1,6 +1,5 @@
 import { useRef, useCallback, useMemo, useState, useEffect } from 'react'
 import type { SessionData, SessionMessage, FilterState, PromptIndexEntry } from '../../types/session'
-import type { SearchJumpTarget } from '../../hooks/useSearchController'
 import { extractTimelineEvents } from '../../lib/timeline'
 import { Timeline } from './Timeline'
 import { useHoverCard, HoverCard } from '../shared/HoverCard'
@@ -22,11 +21,13 @@ import {
   PlanEndMarker,
 } from './MessageRenderers'
 
+export interface ReaderJumpTarget {messageIndex:number;promptNum?:number}
+
 export interface SessionViewProps {
   data: SessionData
   filter: FilterState
   searchQuery: string
-  activeSearchTarget?: SearchJumpTarget | null
+  activeSearchTarget?: ReaderJumpTarget | null
   showTimeline?: boolean
   showPromptIndex?: boolean
   header?: React.ReactNode
@@ -379,8 +380,13 @@ function renderAnchoredMessage(
     >
       {'timestamp' in msg && msg.timestamp && <time className="block text-[10px] text-stone-400 font-mono mt-2" dateTime={msg.timestamp}>{/^\d{4}-\d\d-\d\dT/.test(msg.timestamp) ? new Date(msg.timestamp).toLocaleString(undefined,{hour12:false}) : msg.timestamp}</time>}
       {content}
+      <SourceRecordDetails msg={msg}/>
     </div>
   )
+}
+
+function SourceRecordDetails({msg}:{msg:SessionMessage}) {
+  return msg.sourceRecord ? <details className="ml-6 my-2 text-[11px] text-stone-400"><summary className="cursor-pointer">Original native record</summary><pre className="p-3 whitespace-pre-wrap break-words max-h-80 overflow-auto bg-stone-50">{JSON.stringify(msg.sourceRecord,null,2)}</pre></details> : null
 }
 
 // ─── Tool Group (collapsed consecutive tool calls) ───
@@ -409,7 +415,7 @@ function ToolGroup({ messages, filter }: { messages: SessionMessage[]; filter: F
         {messages.map((m, j) => {
           if (m.kind === 'ai-tool-use' && !filter.toolCalls) return null
           if (m.kind === 'tool-result' && !filter.toolResults) return null
-          return <MessageBlock key={j} msg={m} filter={filter} searchQuery="" />
+          return <div key={j}><MessageBlock msg={m} filter={filter} searchQuery="" /><SourceRecordDetails msg={m}/></div>
         })}
       </div>
     </details>

@@ -20,7 +20,7 @@ it('uses the full reader without the standalone AppState and loads its bound ext
 
 it('retains the standalone controlled search target instead of choosing the first match',()=>{
  const data:SessionData={source:'claude',messages:[{kind:'ai-text',text:'match one'},{kind:'ai-text',text:'match two'}],prompts:[],heatmap:[],markers:{compacts:0,plans:0,clears:0,forks:0}}
- const {container}=render(<SessionReader data={data} searchQuery="match" activeSearchTarget={{chunkId:'second',projectEncoded:'p',sessionId:'s',messageIndex:1}} showToolbar={false}/>)
+ const {container}=render(<SessionReader data={data} searchQuery="match" activeSearchTarget={{messageIndex:1}} showToolbar={false}/>)
  expect(container.querySelector('[data-message-index="1"]')?.className).toContain('ring-1')
  expect(container.querySelector('[data-message-index="0"]')?.className).not.toContain('ring-1')
 })

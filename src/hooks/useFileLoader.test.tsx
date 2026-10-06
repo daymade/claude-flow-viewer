@@ -5,7 +5,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 
 import { AppContext, initialState, type AppState } from './useSessionStore'
 import { useFileLoader } from './useFileLoader'
-import { parseSessionContent } from '../lib/parser'
+import { parseFetchedSessionContent } from '../lib/parser'
 import { openDirectoryPicker, tryAutoLoad } from '../lib/fs-access'
 import type { SessionData } from '../types/session'
 
@@ -18,10 +18,10 @@ vi.mock('../lib/fs-access', () => ({
 }))
 
 vi.mock('../lib/parser', () => ({
-  parseSessionContent: vi.fn(),
+  parseFetchedSessionContent: vi.fn(),
 }))
 
-const mockedParseSessionContent = vi.mocked(parseSessionContent)
+const mockedParseSessionContent = vi.mocked(parseFetchedSessionContent)
 
 afterEach(() => {
   vi.clearAllMocks()
@@ -39,7 +39,7 @@ function createParsedData(source: SessionData['source']): SessionData {
 }
 
 describe('useFileLoader', () => {
-  it('passes the project source into parseSessionContent when loading a session', async () => {
+  it('passes the project source into parseFetchedSessionContent when loading a session', async () => {
     const readSessionContent = vi.fn().mockResolvedValue('{"type":"session_meta"}')
     const dispatch = vi.fn()
     const data = createParsedData('codex')
@@ -106,7 +106,7 @@ describe('useFileLoader', () => {
     expect(historySpy).toHaveBeenCalled()
   })
 
-  it('passes the Cherry Studio source into parseSessionContent when loading a session', async () => {
+  it('passes the Cherry Studio source into parseFetchedSessionContent when loading a session', async () => {
     const readSessionContent = vi.fn().mockResolvedValue('{"type":"session_meta"}')
     const dispatch = vi.fn()
     const data = createParsedData('cherrystudio')
