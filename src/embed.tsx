@@ -8,10 +8,14 @@ import './embed.css'
 export function ReaderEmbed() {
   const raw=new URLSearchParams(location.search).get('endpoint') ?? ''
   const expectedSession=new URLSearchParams(location.search).get('session')
+  // Optional opaque binding token supplied by the host: echoed in cfv:ready so a
+  // delayed ready from an old navigation cannot bless a new load of the same
+  // WindowProxy/endpoint, and checked on incoming cfv:focus when present.
+  const channel=new URLSearchParams(location.search).get('channel')
   const endpoint=raw.startsWith('/api/') && !raw.includes('\\') && !raw.includes('#') ? raw : null
   const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(''), [busy,setBusy]=useState(false)
   const [target,setTarget]=useState<ReaderJumpTarget|null>(null)
-  const generation=useRef(0), current=useRef<Page|null>(null)
+  const generation=useRef(0), current=useRef<Page|null>(null), navigationSequence=useRef(0)
   const read=useCallback(async (mode:string,anchor?:string)=>{
     if (!endpoint) {setError('No bound session endpoint');return}
     const version=++generation.current, previous=current.current
@@ -32,7 +36,9 @@ export function ReaderEmbed() {
       const merged=mode==='earlier' && previous ? {...next,records:[...next.records,...previous.records],next_offset:previous.next_offset,has_later:previous.has_later} : mode==='later' && previous ? {...next,offset:previous.offset,has_earlier:previous.has_earlier,records:[...previous.records,...next.records]} : next
       current.current=merged;setPage(merged)
       const data=adapt(merged), index=anchor ? data.messages.findIndex(message=>message.sourceRecordId===anchor) : mode==='latest' ? data.messages.length-1 : 0
-      setTarget(index>=0 ? {messageIndex:index} : null)
+      // Explicit host navigation (cfv:focus → 'question') gets a fresh stable
+      // token per request so repeated jumps to the same position still count.
+      setTarget(index>=0 ? {messageIndex:index, ...(mode==='question' ? {requestId:`nav-${++navigationSequence.current}`} : {})} : null)
     } catch(e) {if(version===generation.current)setError(e instanceof Error ? e.message : String(e))}
     finally {if(version===generation.current)setBusy(false)}
   },[endpoint,expectedSession])
@@ -40,12 +46,13 @@ export function ReaderEmbed() {
   useEffect(()=>{
     const receive=(event:MessageEvent)=>{
       if(event.origin!==location.origin || event.source!==parent || event.data?.type!=='cfv:focus' || event.data.endpoint!==endpoint)return
+      if(event.data.channel!=null && event.data.channel!==channel)return
       if(typeof event.data.recordId==='string')void read('question',event.data.recordId)
     }
     addEventListener('message',receive)
-    parent.postMessage({type:'cfv:ready',endpoint},location.origin)
+    parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel},location.origin)
     return()=>removeEventListener('message',receive)
-  },[endpoint,read])
+  },[endpoint,expectedSession,channel,read])
   const readToolResult=useCallback(async (relativePath:string)=>{
     const response=await fetch(endpoint+'/tool-output?path='+encodeURIComponent(relativePath),{credentials:'same-origin'})
     if(!response.ok)throw new Error(await response.text())
@@ -60,7 +67,7 @@ export function ReaderEmbed() {
     </header>
     <div className="embed-status" role="status">{busy?'读取中 · ':''}{page ? `第 ${page.total ? page.offset+1 : 0}–${page.next_offset} 条 / 共 ${page.total} 条 · 搜索已加载范围` : '正在读取绑定会话…'}</div>
     {error && <p role="alert" className="embed-error">{error}</p>}
-    {page && <SessionReader data={adapt(page)} activeSearchTarget={target} readToolResult={readToolResult} />}
+    {page && <SessionReader data={adapt(page)} activeSearchTarget={target} readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} />}
     {page && <details className="embed-source"><summary>来源与读取边界</summary><p>{page.boundary}</p><p>{page.provider} · {page.session_id} · {new Date(page.read_at).toLocaleString(undefined,{hour12:false})}</p></details>}
   </div>
 }

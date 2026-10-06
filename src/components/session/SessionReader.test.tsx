@@ -39,3 +39,56 @@ it('keeps search navigation inside its reader and exposes the start of an oversi
  await waitFor(()=>expect(reader.scrollTop).toBe(400))
  expect(outerScroll).not.toHaveBeenCalled()
 })
+
+const FOCUS_DATA:SessionData={source:'claude',messages:[{kind:'ai-text',text:'match first'},{kind:'ai-text',text:'unrelated'},{kind:'ai-text',text:'match pending question'}],prompts:[],heatmap:[],markers:{compacts:0,plans:0,clears:0,forks:0}}
+const ringAt=(container:HTMLElement,index:number)=>container.querySelector(`[data-message-index="${index}"]`)?.className ?? ''
+
+it('lets a new external target override the internal Find, and Find + Next still work afterwards',()=>{
+ const {container,rerender}=render(<SessionReader data={FOCUS_DATA}/>)
+ fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'match'}})
+ expect(ringAt(container,0)).toContain('ring-1')
+ expect(ringAt(container,2)).not.toContain('ring-1')
+
+ rerender(<SessionReader data={FOCUS_DATA} activeSearchTarget={{messageIndex:2}}/>)
+ expect(ringAt(container,2)).toContain('ring-1')
+ expect(ringAt(container,0)).not.toContain('ring-1')
+
+ // The internal Find was suspended: re-entering it starts from the first match again.
+ fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'match'}})
+ expect(ringAt(container,0)).toContain('ring-1')
+ fireEvent.click(screen.getByRole('button',{name:'Next'}))
+ expect(ringAt(container,2)).toContain('ring-1')
+})
+
+it('counts repeated same-index external navigation as new only when the request id changes',()=>{
+ const {container,rerender}=render(<SessionReader data={FOCUS_DATA} activeSearchTarget={{messageIndex:2,requestId:'r1'}}/>)
+ expect(ringAt(container,2)).toContain('ring-1')
+
+ fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'match'}})
+ expect(ringAt(container,0)).toContain('ring-1')
+
+ // A fresh object carrying the same request id is the same navigation: no incidental reset.
+ rerender(<SessionReader data={FOCUS_DATA} activeSearchTarget={{messageIndex:2,requestId:'r1'}}/>)
+ expect(ringAt(container,0)).toContain('ring-1')
+
+ // A new request id for the same index suspends the internal Find again.
+ rerender(<SessionReader data={FOCUS_DATA} activeSearchTarget={{messageIndex:2,requestId:'r2'}}/>)
+ expect(ringAt(container,2)).toContain('ring-1')
+ expect(ringAt(container,0)).not.toContain('ring-1')
+})
+
+it('does not reset the internal Find when an identical positional target is re-rendered',()=>{
+ const {container,rerender}=render(<SessionReader data={FOCUS_DATA}/>)
+ fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'match'}})
+ expect(ringAt(container,0)).toContain('ring-1')
+
+ // First sight of this position is a navigation and wins over the Find.
+ rerender(<SessionReader data={FOCUS_DATA} activeSearchTarget={{messageIndex:2}}/>)
+ expect(ringAt(container,2)).toContain('ring-1')
+
+ // A re-rendered identical positional target must not reset a new Find.
+ fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'match'}})
+ expect(ringAt(container,0)).toContain('ring-1')
+ rerender(<SessionReader data={FOCUS_DATA} activeSearchTarget={{messageIndex:2}}/>)
+ expect(ringAt(container,0)).toContain('ring-1')
+})

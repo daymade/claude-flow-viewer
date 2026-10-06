@@ -570,6 +570,7 @@ export function AppShell() {
                 activeSearchTarget={activeSearchTarget}
                 showToolbar={false}
                 readToolResult={state.fileStore && state.activeProjectEncoded && state.activeSessionId ? relative => state.fileStore!.readToolResult(state.activeProjectEncoded!, state.activeSessionId!, relative) : null}
+                resourceScope={state.activeProjectEncoded && state.activeSessionId ? `${state.activeSessionData.source}/${state.activeProjectEncoded}/${state.activeSessionId}` : null}
               />
             )}
           </div>
