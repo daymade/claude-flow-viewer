@@ -1002,7 +1002,7 @@ describe('parseSessionContent', () => {
       }
     })
 
-    it('normal (non-persisted) tool results still truncate to 500 chars', () => {
+    it('normal (non-persisted) tool results retain their full text', () => {
       const longResult = 'x'.repeat(600)
       const content = jsonl(
         {
@@ -1017,8 +1017,7 @@ describe('parseSessionContent', () => {
       const toolResults = result.messages.filter(m => m.kind === 'tool-result')
       expect(toolResults).toHaveLength(1)
       if (toolResults[0].kind === 'tool-result') {
-        expect(toolResults[0].content.length).toBeLessThan(600)
-        expect(toolResults[0].content).toContain('... (600 chars)')
+        expect(toolResults[0].content).toBe(longResult)
         expect(toolResults[0].externalFile).toBeUndefined()
       }
     })

@@ -10,21 +10,11 @@ import { Sidebar } from '../sidebar/Sidebar'
 import { CodexWorkspaceView } from '../codex/CodexWorkspaceView'
 import { SkillRecommendationsPanel } from '../recommendations/SkillRecommendationsPanel'
 import { SearchResultsPanel } from '../search/SearchResultsPanel'
-import { SessionView } from '../session/SessionView'
+import { SessionReader } from '../session/SessionReader'
+import { SessionToolbar } from '../session/SessionToolbar'
 import { UserInputsWorkspace } from '../user-inputs/UserInputsWorkspace'
 import type { UserInputRecord } from '../../lib/user-inputs'
-import type { FilterState, ResolvedSessionRef } from '../../types/session'
-
-const FILTER_LABELS: { key: keyof FilterState; label: string }[] = [
-  { key: 'thinking', label: 'Thinking' },
-  { key: 'toolCalls', label: 'Tool Calls' },
-  { key: 'toolResults', label: 'Results' },
-  { key: 'aiText', label: 'AI Text' },
-  { key: 'team', label: 'Team' },
-  { key: 'branches', label: 'Branches' },
-  { key: 'markers', label: 'Markers' },
-  { key: 'timeline', label: 'Timeline' },
-]
+import type { ResolvedSessionRef } from '../../types/session'
 
 const SIDEBAR_MIN = 200
 const SIDEBAR_MAX = 600
@@ -541,21 +531,7 @@ export function AppShell() {
 
           {/* Filter toggles */}
           {showMessageFilters ? (
-            <div data-export-remove className="flex items-center gap-1 text-[11px] flex-wrap justify-start sm:ml-auto sm:justify-end">
-              {FILTER_LABELS.map(({ key, label }) => (
-                <label key={key} className={`cursor-pointer flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors select-none ${
-                  state.filter[key] ? 'bg-stone-100 text-stone-700' : 'text-stone-400 hover:text-stone-500 hover:bg-stone-50'
-                }`}>
-                  <input
-                    type="checkbox"
-                    checked={state.filter[key]}
-                    onChange={() => dispatch({ type: 'TOGGLE_FILTER', key })}
-                    className="accent-stone-600 w-3 h-3"
-                  />
-                  <span>{label}</span>
-                </label>
-              ))}
-            </div>
+            <SessionToolbar filter={state.filter} onToggle={key => dispatch({type:'TOGGLE_FILTER',key})} />
           ) : null}
         </div>}
 
@@ -587,11 +563,13 @@ export function AppShell() {
                 onSelectSession={handleSelectSession}
               />
             ) : (
-              <SessionView
+              <SessionReader
                 data={state.activeSessionData}
                 filter={state.filter}
                 searchQuery={state.searchQuery}
                 activeSearchTarget={activeSearchTarget}
+                showToolbar={false}
+                readToolResult={state.fileStore && state.activeProjectEncoded && state.activeSessionId ? relative => state.fileStore!.readToolResult(state.activeProjectEncoded!, state.activeSessionId!, relative) : null}
               />
             )}
           </div>

@@ -4,6 +4,7 @@ import type { SearchJumpTarget } from '../../hooks/useSearchController'
 import { extractTimelineEvents } from '../../lib/timeline'
 import { Timeline } from './Timeline'
 import { useHoverCard, HoverCard } from '../shared/HoverCard'
+import { SessionResources, type ReadToolResult } from './SessionResources'
 import {
   PromptBlock,
   AiTextBlock,
@@ -21,7 +22,7 @@ import {
   PlanEndMarker,
 } from './MessageRenderers'
 
-interface SessionViewProps {
+export interface SessionViewProps {
   data: SessionData
   filter: FilterState
   searchQuery: string
@@ -30,6 +31,7 @@ interface SessionViewProps {
   showPromptIndex?: boolean
   header?: React.ReactNode
   readerMode?: boolean
+  readToolResult?: ReadToolResult | null
 }
 
 export function SessionView({
@@ -41,6 +43,7 @@ export function SessionView({
   showPromptIndex = true,
   header = null,
   readerMode = false,
+  readToolResult = null,
 }: SessionViewProps) {
   const contentRef = useRef<HTMLDivElement>(null)
   const [activePromptNums, setActivePromptNums] = useState<Set<number>>(new Set())
@@ -180,7 +183,7 @@ export function SessionView({
   }, [rendered])
 
   return (
-    <div className="flex-1 flex min-w-0 min-h-0 overflow-hidden">
+    <SessionResources.Provider value={readToolResult}><div className="flex-1 flex min-w-0 min-h-0 overflow-hidden">
       <div
         className="min-h-0 flex-1 overflow-y-auto bg-[#FAFAF8] focus:outline-none"
         ref={contentRef}
@@ -215,7 +218,7 @@ export function SessionView({
           />
         </div>
       )}
-    </div>
+    </div></SessionResources.Provider>
   )
 }
 
@@ -331,6 +334,7 @@ function renderMessages(
 
     // Detect consecutive tool calls + results and group them
     if (!forceExpandedTools && (msg.kind === 'ai-tool-use' || msg.kind === 'tool-result')) {
+      const groupStart = i
       const group: SessionMessage[] = []
       while (i < messages.length && (messages[i].kind === 'ai-tool-use' || messages[i].kind === 'tool-result')) {
         group.push(messages[i])
@@ -342,7 +346,7 @@ function renderMessages(
         nodes.push(<ToolGroup key={`tg-${i}`} messages={group} filter={filter} />)
       } else {
         for (let j = 0; j < group.length; j++) {
-          nodes.push(renderAnchoredMessage(group[j], i + j, filter, searchQuery, highlightedMessageIndex, `t-${i}-${j}`, readerMode))
+          nodes.push(renderAnchoredMessage(group[j], groupStart + j, filter, searchQuery, highlightedMessageIndex, `t-${i}-${j}`, readerMode))
         }
       }
     } else {
@@ -370,8 +374,10 @@ function renderAnchoredMessage(
     <div
       key={key}
       data-message-index={messageIndex}
+      data-source-record-id={msg.sourceRecordId}
       className={forceVisible ? 'scroll-mt-28 rounded-2xl bg-amber-50/60 ring-1 ring-amber-200 px-2 py-1' : 'scroll-mt-28'}
     >
+      {'timestamp' in msg && msg.timestamp && <time className="block text-[10px] text-stone-400 font-mono mt-2" dateTime={msg.timestamp}>{/^\d{4}-\d\d-\d\dT/.test(msg.timestamp) ? new Date(msg.timestamp).toLocaleString(undefined,{hour12:false}) : msg.timestamp}</time>}
       {content}
     </div>
   )

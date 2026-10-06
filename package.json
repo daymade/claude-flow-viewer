@@ -20,7 +20,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:reader": "tsc -b && vite build --config vite.reader.config.ts && node scripts/build-reader.mjs"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19",

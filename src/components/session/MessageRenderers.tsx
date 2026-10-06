@@ -3,7 +3,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { SessionMessage, FilterState } from '../../types/session'
 import { formatTokens } from '../../lib/timeline'
-import { useAppState } from '../../hooks/useSessionStore'
+import { useSessionResources } from './SessionResources'
 
 const REMARK_PLUGINS = [remarkGfm]
 
@@ -138,7 +138,7 @@ export function ToolCallLine({ msg }: { msg: Extract<SessionMessage, { kind: 'ai
           <span className="truncate min-w-0 font-medium">{desc || msg.summary}</span>
         </summary>
         {prompt && (
-          <div className="mt-1 ml-6 pl-3 border-l border-stone-200 py-2 text-xs text-stone-500 leading-relaxed max-h-[200px] overflow-auto whitespace-pre-wrap break-words">{prompt.slice(0, 500)}{prompt.length > 500 ? '...' : ''}</div>
+          <div className="mt-1 ml-6 pl-3 border-l border-stone-200 py-2 text-xs text-stone-500 leading-relaxed max-h-[200px] overflow-auto whitespace-pre-wrap break-words">{prompt}</div>
         )}
       </details>
     )
@@ -160,29 +160,25 @@ export function ToolCallLine({ msg }: { msg: Extract<SessionMessage, { kind: 'ai
 // ━━━ L4: Tool Result ━━━
 
 export function ToolResultBlock({ msg }: { msg: Extract<SessionMessage, { kind: 'tool-result' }> }) {
-  const { state } = useAppState()
+  const readToolResult = useSessionResources()
   const [fullContent, setFullContent] = useState<string | null>(null)
   const [loadingFull, setLoadingFull] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const loadFull = useCallback(async () => {
-    if (!msg.externalFile || !state.fileStore || !state.activeProjectEncoded || !state.activeSessionId) return
+    if (!msg.externalFile || !readToolResult) return
     setLoadingFull(true)
     setLoadError(null)
     try {
       // externalFile is "tool-results/filename.txt" (relative to session dir)
-      const content = await state.fileStore.readToolResult(
-        state.activeProjectEncoded,
-        state.activeSessionId,
-        msg.externalFile,
-      )
+      const content = await readToolResult(msg.externalFile)
       setFullContent(content)
     } catch {
       setLoadError('Failed to load full content')
     } finally {
       setLoadingFull(false)
     }
-  }, [msg.externalFile, state.fileStore, state.activeProjectEncoded, state.activeSessionId])
+  }, [msg.externalFile, readToolResult])
 
   const displayContent = fullContent ?? msg.content
   const hasExternal = Boolean(msg.externalFile)
@@ -214,7 +210,7 @@ export function ToolResultBlock({ msg }: { msg: Extract<SessionMessage, { kind: 
         <div className="ml-5 mt-1">
           <button
             onClick={loadFull}
-            disabled={loadingFull}
+            disabled={loadingFull || !readToolResult}
             className="text-xs text-amber-600 hover:text-amber-700 hover:underline disabled:text-stone-400"
           >
             {loadingFull ? 'Loading...' : `Load full output (${msg.totalSize})`}
@@ -493,11 +489,5 @@ export function PlanEndMarker({ msg }: { msg: Extract<SessionMessage, { kind: 'p
 // ─── Utility ───
 
 function truncateInput(input: Record<string, unknown>): string {
-  const display: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(input)) {
-    const sv = String(v)
-    display[k] = sv.length > 300 ? sv.slice(0, 300) + '...' : v
-  }
-  const json = JSON.stringify(display, null, 2)
-  return json.length > 800 ? json.slice(0, 800) + '\n...' : json
+  return JSON.stringify(input, null, 2)
 }

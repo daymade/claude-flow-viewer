@@ -481,7 +481,7 @@ function summarizeToolCall(name: string, input: Record<string, unknown>): string
 function unwrapToolOutput(raw: unknown): { content: string; isError: boolean } {
   if (typeof raw !== 'string') {
     const content = stringifyDisplayValue(raw)
-    const display = content.slice(0, 500) + (content.length > 500 ? `... (${content.length} chars)` : '')
+    const display = content
     return { content: display, isError: false }
   }
 
@@ -512,7 +512,7 @@ function unwrapToolOutput(raw: unknown): { content: string; isError: boolean } {
     isError = true
   }
 
-  const display = content.slice(0, 500) + (content.length > 500 ? `... (${content.length} chars)` : '')
+  const display = content
   return { content: display, isError }
 }
 
@@ -520,7 +520,7 @@ function extractMcpResultContent(result: unknown): { content: string; isError: b
   if (!result || typeof result !== 'object') return unwrapToolOutput(result)
   const record = result as Record<string, unknown>
   if ('Err' in record) {
-    return { content: stringifyDisplayValue(record.Err).slice(0, 500), isError: true }
+    return { content: stringifyDisplayValue(record.Err), isError: true }
   }
 
   const ok = record.Ok
@@ -948,7 +948,7 @@ export function parseCodexSessionContent(content: string): SessionData {
         messages.push({
           kind: 'ai-thinking',
           preview: sanitizePreview(reasoning).slice(0, 120),
-          full: reasoning.slice(0, 3000) + (reasoning.length > 3000 ? `\n... (${reasoning.length} chars total)` : ''),
+          full: reasoning,
           timestamp,
         })
         break

@@ -443,7 +443,7 @@ function classifyRecord(
             totalSize: persisted.totalSize,
           })
         } else {
-          const display = full.slice(0, 500) + (full.length > 500 ? `... (${full.length} chars)` : '')
+          const display = full
           result.messages.push({
             kind: 'tool-result',
             content: display,
@@ -472,7 +472,7 @@ function classifyRecord(
           result.messages.push({
             kind: 'ai-thinking',
             preview: thinking.slice(0, 120).replace(/\n/g, ' '),
-            full: thinking.slice(0, 3000) + (thinking.length > 3000 ? `\n... (${thinking.length} chars total)` : ''),
+            full: thinking,
           })
           break
         }
@@ -534,7 +534,7 @@ export function parseClaudeSessionContent(content: string): SessionData {
       const message = rec.message as Record<string, unknown> | undefined
       const content = message?.content
       const text = typeof content === 'string' ? content : ''
-      compactSummaries.set(rec.parentUuid as string, text.slice(0, 500))
+      compactSummaries.set(rec.parentUuid as string, text)
     }
   }
 
@@ -722,7 +722,8 @@ export function parseClaudeSessionContent(content: string): SessionData {
       continue
     }
 
-    messages.push(...classified.messages)
+    const recordedTimestamp = parseTimestamp(data.timestamp) ? (typeof data.timestamp==='string' ? data.timestamp : parseTimestamp(data.timestamp)!.toISOString()) : undefined
+    messages.push(...classified.messages.map(message => ({...message, timestamp:recordedTimestamp ?? '', ...(message.kind==='user-prompt' && !recordedTimestamp ? {time:'Time not recorded'} : {})})))
 
     // 5g: Inject fork-indicator after the current record if it's a fork point
     if (tree.hasTreeData && typeof uuid === 'string' && tree.forkPoints.has(uuid)) {

@@ -16,7 +16,7 @@ import {
   type CodexThreadNode,
 } from '../../lib/codex-navigation'
 import type { FilterState, ProjectMeta, SessionData, SessionMeta } from '../../types/session'
-import { SessionView } from '../session/SessionView'
+import { SessionReader } from '../session/SessionReader'
 
 type ViewMode = 'overview' | 'structure' | 'diagnostics'
 
@@ -440,7 +440,7 @@ function ReadableConversationView({
   return (
     <div className="flex h-full min-h-0 flex-col bg-[#FAFAF8]">
       <div className="flex min-h-0 flex-1">
-        <SessionView
+        <SessionReader
           data={activeData}
           filter={readerFilter}
           searchQuery={searchQuery}
@@ -449,6 +449,7 @@ function ReadableConversationView({
           showPromptIndex={false}
           header={header}
           readerMode
+          showToolbar={false}
         />
       </div>
     </div>
