@@ -505,22 +505,87 @@ function classifyRecord(
 // --- Main parsers ---
 
 export function parseClaudeSessionContent(content: string): SessionData {
-  // Step 1: Parse all lines into records
+  return parseSessionCore(content, null).data
+}
+
+// --- Incremental continuation ---
+
+/**
+ * Serializable snapshot of the parser's accumulators, letting a later run parse
+ * only the current turn plus appended bytes instead of the whole file.
+ * All offsets are JS string indices into the exact content string that was parsed.
+ * `prefixSha256` is opaque here: the caller (CLI) computes and verifies it,
+ * because this module must stay runtime-agnostic (no node:crypto in browser bundles).
+ */
+export interface ClaudeParserState {
+  version: 1
+  parserSha: string
+  prefixSha256: string
+  /** String index of the record that produced the last numbered prompt. */
+  windowOffset: number
+  /** String index one past the last complete (newline-terminated) consumed line. */
+  consumedLength: number
+  frozenMessageCount: number
+  frozenPromptCount: number
+  lastUuid: string | null
+  deliveredPromptIndex: Record<string, number[]>
+  compactBoundaries: Record<string, { trigger: 'auto' | 'manual'; preTokens: number; ts: string }>
+  compactSummaries: Record<string, string>
+}
+
+interface ParseSeed {
+  baseMessages: SessionMessage[]
+  basePrompts: PromptIndexEntry[]
+  promptCounterStart: number
+  deliveredPromptIndex: Map<string, number[]>
+  compactBoundaries: Map<string, { trigger: 'auto' | 'manual'; preTokens: number; ts: string }>
+  compactSummaries: Map<string, string>
+}
+
+interface CoreOutcome {
+  data: SessionData
+  windowOffset: number
+  consumedLength: number
+  frozenMessageCount: number
+  frozenPromptCount: number
+  lastUuid: string | null
+  deliveredPromptIndex: Map<string, number[]>
+  compactBoundaries: Map<string, { trigger: 'auto' | 'manual'; preTokens: number; ts: string }>
+  compactSummaries: Map<string, string>
+}
+
+function parseSessionCore(content: string, seed: ParseSeed | null): CoreOutcome {
+  // Step 1: Parse all lines into records, tracking each record's string offset
+  // (the incremental window boundary is the offset of the last prompt's record).
   const lines = content.split('\n')
   const records: Record<string, unknown>[] = []
+  const offsets = new WeakMap<Record<string, unknown>, number>()
+  let lastUuid: string | null = null
+  let lineStart = 0
 
   for (const line of lines) {
+    const start = lineStart
+    lineStart += line.length + 1
     if (!line.trim()) continue
     try {
-      records.push(JSON.parse(line))
+      const record = JSON.parse(line)
+      records.push(record)
+      offsets.set(record, start)
+      if (typeof record.uuid === 'string') lastUuid = record.uuid
     } catch {
       continue
     }
   }
 
+  // A final line without a terminating newline is not consumed: it may still be
+  // mid-write and will be re-read once complete.
+  const consumedLength = content.endsWith('\n') ? content.length : content.length - lines[lines.length - 1].length
+
   // Step 2: Pre-scan for compact_boundary and isCompactSummary records
-  const compactBoundaries = new Map<string, { trigger: 'auto' | 'manual'; preTokens: number; ts: string }>()
-  const compactSummaries = new Map<string, string>() // keyed by parentUuid (= boundary uuid) -> summary text
+  // (seeded with the frozen region's maps on continuation; window records re-add
+  // identical key/value pairs, which is idempotent)
+  const compactBoundaries = new Map<string, { trigger: 'auto' | 'manual'; preTokens: number; ts: string }>(seed?.compactBoundaries ?? [])
+  const compactSummaries = new Map<string, string>(seed?.compactSummaries ?? []) // keyed by parentUuid (= boundary uuid) -> summary text
 
   for (const rec of records) {
     if (rec.type === 'system' && rec.subtype === 'compact_boundary' && typeof rec.uuid === 'string') {
@@ -544,6 +609,9 @@ export function parseClaudeSessionContent(content: string): SessionData {
   // queued_command attachments whose text later landed as a real user record must not
   // double-render; the real record wins and the attachment copy is skipped.
   const deliveredPromptIndex = new Map<string, number[]>()
+  if (seed) {
+    for (const [key, secs] of seed.deliveredPromptIndex) deliveredPromptIndex.set(key, [...secs])
+  }
   for (const rec of records) {
     if (rec.type !== 'user' || rec.isMeta) continue
     if (classifyUserMessage(rec)?.type !== 'real-prompt') continue
@@ -623,11 +691,18 @@ export function parseClaudeSessionContent(content: string): SessionData {
   }
 
   // Step 5: Iterate records and build messages
-  const messages: SessionMessage[] = []
-  const prompts: PromptIndexEntry[] = []
-  const promptCounter = { value: 0 }
+  const messages: SessionMessage[] = seed ? [...seed.baseMessages] : []
+  const prompts: PromptIndexEntry[] = seed ? [...seed.basePrompts] : []
+  const promptCounter = { value: seed?.promptCounterStart ?? 0 }
+
+  // Records that produced the last numbered prompt mark the incremental window:
+  // everything before that record is frozen output; the record itself and all
+  // later ones are re-processed on continuation.
+  let windowMark: { offset: number; messageCount: number; promptCount: number } | null = null
 
   for (const data of reorderedRecords) {
+    const iterationMessageBase = messages.length
+    const iterationPromptBase = promptCounter.value
     const uuid = data.uuid as string | undefined
 
     // 5a: Detect compact_boundary records and emit compact-boundary message
@@ -691,6 +766,7 @@ export function parseClaudeSessionContent(content: string): SessionData {
               timestamp,
               decision,
             })
+            windowMark = { offset: offsets.get(data) ?? 0, messageCount: iterationMessageBase, promptCount: iterationPromptBase }
           }
         }
       }
@@ -727,6 +803,9 @@ export function parseClaudeSessionContent(content: string): SessionData {
     const recorded = extractTimestamp(data)
     const recordedTimestamp = Number.isNaN(recorded.getTime()) ? undefined : (typeof data.timestamp==='string' ? data.timestamp : recorded.toISOString())
     messages.push(...classified.messages.map(message => ({...message, timestamp:recordedTimestamp ?? '', ...(message.kind==='user-prompt' && !recordedTimestamp ? {time:'Time not recorded'} : {})})))
+    if (promptCounter.value > iterationPromptBase) {
+      windowMark = { offset: offsets.get(data) ?? 0, messageCount: iterationMessageBase, promptCount: iterationPromptBase }
+    }
 
     // 5g: Inject fork-indicator after the current record if it's a fork point
     if (tree.hasTreeData && typeof uuid === 'string' && tree.forkPoints.has(uuid)) {
@@ -799,7 +878,97 @@ export function parseClaudeSessionContent(content: string): SessionData {
     else if (msg.kind === 'fork-indicator' && msg.reason === 'user-decision') markers.forks++
   }
 
-  return { source: 'claude', messages, prompts, heatmap: computeHeatmap(messages), markers }
+  const data: SessionData = { source: 'claude', messages, prompts, heatmap: computeHeatmap(messages), markers }
+  return {
+    data,
+    windowOffset: windowMark ? windowMark.offset : 0,
+    consumedLength,
+    frozenMessageCount: windowMark ? windowMark.messageCount : 0,
+    frozenPromptCount: windowMark ? windowMark.promptCount : 0,
+    lastUuid,
+    deliveredPromptIndex,
+    compactBoundaries,
+    compactSummaries,
+  }
+}
+
+function toParserState(outcome: CoreOutcome, parserSha: string, baseOffset: number, fallbackLastUuid: string | null): ClaudeParserState {
+  return {
+    version: 1,
+    parserSha,
+    prefixSha256: '',
+    windowOffset: baseOffset + outcome.windowOffset,
+    consumedLength: baseOffset + outcome.consumedLength,
+    frozenMessageCount: outcome.frozenMessageCount,
+    frozenPromptCount: outcome.frozenPromptCount,
+    lastUuid: outcome.lastUuid ?? fallbackLastUuid,
+    deliveredPromptIndex: Object.fromEntries(outcome.deliveredPromptIndex),
+    compactBoundaries: Object.fromEntries(outcome.compactBoundaries),
+    compactSummaries: Object.fromEntries(outcome.compactSummaries),
+  }
+}
+
+export function parseClaudeSessionWithState(content: string, parserSha = ''): { data: SessionData; state: ClaudeParserState } {
+  const outcome = parseSessionCore(content, null)
+  return { data: outcome.data, state: toParserState(outcome, parserSha, 0, null) }
+}
+
+/**
+ * Continue a previous parse when the source only gained complete lines on the
+ * active conversation path. Returns null — meaning the caller must fall back to
+ * a full parse — when anything could retroactively change already-published
+ * output: the source shrank, nothing was appended, or a new record's effective
+ * parent points into the frozen region (a fork from history; the common
+ * non-linear case, tool_result children of window tool_uses, stays incremental).
+ */
+export function continueClaudeSessionWithState(
+  content: string,
+  previous: { messages: SessionMessage[]; prompts: PromptIndexEntry[] },
+  state: ClaudeParserState,
+): { data: SessionData; state: ClaudeParserState } | null {
+  if (state.version !== 1) return null
+  if (!Number.isInteger(state.windowOffset) || !Number.isInteger(state.consumedLength)) return null
+  if (state.windowOffset < 0 || state.windowOffset > state.consumedLength || state.consumedLength >= content.length) return null
+  if (!Array.isArray(previous.messages) || !Array.isArray(previous.prompts)) return null
+  if (state.frozenMessageCount > previous.messages.length || state.frozenPromptCount > previous.prompts.length) return null
+
+  const windowUuids = new Set<string>()
+  for (const line of content.slice(state.windowOffset, state.consumedLength).split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const u = (JSON.parse(line) as Record<string, unknown>).uuid
+      if (typeof u === 'string') windowUuids.add(u)
+    } catch { /* window lines were validated when first consumed */ }
+  }
+  let running = state.lastUuid
+  for (const line of content.slice(state.consumedLength).split('\n')) {
+    if (!line.trim()) continue
+    let record: Record<string, unknown>
+    try { record = JSON.parse(line) } catch { continue } // unconsumed partial tail
+    const uuid = record.uuid
+    if (typeof uuid !== 'string') continue
+    const rawParent = record.parentUuid
+    const logicalParent = record.logicalParentUuid
+    const effectiveParent = (rawParent === null || rawParent === undefined) && typeof logicalParent === 'string'
+      ? logicalParent
+      : rawParent
+    const isCompactBoundary = record.type === 'system' && record.subtype === 'compact_boundary'
+    if (typeof effectiveParent === 'string' && effectiveParent !== running && !windowUuids.has(effectiveParent) && !isCompactBoundary) {
+      return null
+    }
+    windowUuids.add(uuid)
+    running = uuid
+  }
+
+  const outcome = parseSessionCore(content.slice(state.windowOffset), {
+    baseMessages: previous.messages.slice(0, state.frozenMessageCount),
+    basePrompts: previous.prompts.slice(0, state.frozenPromptCount),
+    promptCounterStart: state.frozenPromptCount,
+    deliveredPromptIndex: new Map(Object.entries(state.deliveredPromptIndex).map(([key, secs]) => [key, [...secs]])),
+    compactBoundaries: new Map(Object.entries(state.compactBoundaries)),
+    compactSummaries: new Map(Object.entries(state.compactSummaries)),
+  })
+  return { data: outcome.data, state: toParserState(outcome, state.parserSha, state.windowOffset, state.lastUuid) }
 }
 
 /**
