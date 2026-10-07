@@ -108,7 +108,7 @@ Provider details:
 
 Handles Claude Code's tree-structured conversations:
 
-- **Active path**: Traced from tip (last record) to root via `parentUuid` chain. Multiple disconnected trees arise from `/clear` commands — each tree gets its own tip trace.
+- **Active path**: Traced from tip (last record) to root via `parentUuid` chain. Root resolution is memoized (`findRoot`): each node's root is computed once and cached, replacing the naive O(records × depth) walk that dominated parse time on long sessions. Only acyclic walks are cached — a walk that hits a parent cycle keeps its per-start-node resolution, preserving the pre-memoization behavior on corrupt input. Multiple disconnected trees arise from `/clear` commands — each tree gets its own tip trace.
 - **`logicalParentUuid`**: `compact_boundary` records have `parentUuid: null` but `logicalParentUuid` connecting them to pre-compact records. The tree parser uses this to bridge the gap.
 - **Fork detection**: Parent nodes with >1 child where some children are off the active path → abandoned branches collected via BFS subtree traversal.
 - **Tool result siblings**: Leaf tool_result children of active nodes are added to the active path to prevent false fork detection when multiple tool calls are chained in a single assistant turn.
@@ -116,6 +116,18 @@ Handles Claude Code's tree-structured conversations:
 **Fork Reason Classification**:
 - `'user-decision'`: User actively rewound the conversation or interrupted Claude
 - `'tool-error'`: Automatic retry after tool failure (hidden from display to match CLI behavior)
+
+### Incremental continuation (`scripts/reader-parser.ts`)
+
+`npm run build:reader` also emits the shared `@daymade/session-reader` package used by
+downstream fleets. Its `scripts/reader-parser.ts` CLI can continue an append-only session
+from a frozen prefix instead of re-parsing the whole file: a version-2 state file
+(`ClaudeParserState` in `src/lib/providers/claude.ts`) binds the consumed prefix by hashes
+and the window head by uuid/text, and the continuation re-parses only the current turn plus
+new bytes. The contract is *byte-identical-or-fallback* — any fork from frozen history,
+stale or tampered state, or a session-identity mismatch returns null and the CLI falls back
+to a full parse, so published output always equals a full parse. Contract tests live in
+`src/lib/providers/claude-incremental.test.ts` and `scripts/test-incremental-cli.mjs`.
 
 ### Session Markers (`SessionMarkers` in `src/types/session.ts`)
 
