@@ -1049,9 +1049,19 @@ export function continueClaudeSessionWithState(
     try { headRecord = JSON.parse(headLine) } catch { return null }
     if (typeof state.windowRecordUuid === 'string') {
       if (headRecord.uuid !== state.windowRecordUuid) return null
-    } else if (state.frozenPromptCount > 0) {
-      const headText = promptTextOfRecord(headRecord)
-      if (headText === null || headText !== previous.prompts[state.frozenPromptCount]?.fullText) return null
+      // Text check alongside the uuid: genuine states always satisfy it
+      // (windowMark is only set at prompt-producing records, and
+      // outputSha256 binds previous.prompts), and it kills the uuid-path
+      // forgery where a state writer points windowOffset at a non-prompt
+      // record and re-stamps the unkeyed hashes around it. uuid-less heads
+      // are exempt: identical-text queued attachments make the head text
+      // ambiguous by position — rolling the offset back to the previous
+      // same-text record satisfies the check while shifting numbering, so
+      // asserting it would false-fallback genuine continuations.
+      if (state.frozenPromptCount > 0) {
+        const headText = promptTextOfRecord(headRecord)
+        if (headText === null || headText !== previous.prompts[state.frozenPromptCount]?.fullText) return null
+      }
     }
   }
 
@@ -1102,16 +1112,28 @@ export function continueClaudeSessionWithState(
       ? logicalParent
       : rawParent
     const isCompactBoundary = record.type === 'system' && record.subtype === 'compact_boundary'
-    // The parent check applies to uuid-less records too: they cannot be chained
-    // to, but their own parent can point into frozen history — a late compact
-    // summary whose boundary is frozen must reach a full parse to be merged.
+    // A window re-parse cannot see the frozen region, so a late-fork child
+    // arriving in the append would flip full parse's tip onto the abandoned
+    // branch — nothing incremental can reproduce that. Decline conservatively.
+    if (typeof effectiveParent === 'string' && state.lateForkUuids.includes(effectiveParent)) {
+      return null
+    }
+    // Records whose effective parent points into frozen history must reach a
+    // full parse. uuid-less records cannot be chained to, but their own parent
+    // can — a late compact summary whose boundary is frozen must be merged.
+    // The running-tip parent is also legitimate: attachments (uuid-less) and
+    // progress records chain to the current tip without advancing it.
     if (typeof effectiveParent === 'string' && effectiveParent !== running && !windowUuids.has(effectiveParent) && !isCompactBoundary) {
       return null
     }
     // A real delivery whose text matches a frozen queued-attachment prompt is
     // deduped by full parse (the attachment copy is skipped) but the frozen
     // copy is already published — only a full parse produces the right output.
-    const promptText = frozenQueued.length > 0 ? promptTextOfRecord(record) : null
+    // Real deliveries only: another queued attachment of the same text renders
+    // as its own prompt in full parse (a duplicate attachment is not deduped),
+    // so matching those here would force a perf-only false fallback.
+    const isQueuedAttachment = record.type === 'attachment'
+    const promptText = !isQueuedAttachment && frozenQueued.length > 0 ? promptTextOfRecord(record) : null
     if (promptText !== null) {
       const norm = normalizePromptText(promptText)
       const secs = extractTimestamp(record).getTime() / 1000
@@ -1135,7 +1157,19 @@ export function continueClaudeSessionWithState(
     compactSummaries: new Map(Object.entries(state.compactSummaries)),
     lateForkUuids: new Set(state.lateForkUuids),
   })
-  return { data: outcome.data, state: toParserState(outcome, state.parserSha, state.windowOffset, state.lastUuid) }
+  const nextState = toParserState(outcome, state.parserSha, state.windowOffset, state.lastUuid)
+  // The skip set survives: a skip is only correct while the frozen region
+  // hides the fork's tip re-evaluation, and the next continuation freezes
+  // exactly the same region (windowOffset is frozen, never advanced).
+  // Recomputing over the window alone would see no pre-window parents and
+  // silently drop the set, resurrecting the abandoned branch one
+  // continuation later.
+  nextState.lateForkUuids = [...state.lateForkUuids]
+  // The chain anchor survives too: the window re-parse may end on uuid-less
+  // records (queued attachments), making outcome.lastUuid stale relative to
+  // the consumed prefix the next backward scan walks.
+  nextState.lastUuid = running
+  return { data: outcome.data, state: nextState }
 }
 
 /**
