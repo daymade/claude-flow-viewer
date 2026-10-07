@@ -33,24 +33,40 @@ function validateRecords(text:string,lineBase:number):boolean{
 
 const sha256=(text:string)=>createHash('sha256').update(text,'utf8').digest('hex')
 
+// Canonical content binding between the state and the previous snapshot: the
+// frozen output slice plus the three seeded maps. Recomputed at continuation
+// and stamped at state write; any incoherent field flips the hash and forces
+// a full parse. (Unkeyed by design — it binds corruption, not adversaries;
+// the cache directory is private and its snapshots are writable by the same
+// party that could write a state file.)
+const outputShaOf=(messages:unknown,prompts:unknown,deliveredPromptIndex:unknown,compactBoundaries:unknown,compactSummaries:unknown)=>
+  sha256(JSON.stringify({messages,prompts,deliveredPromptIndex,compactBoundaries,compactSummaries}))
+
 let outcome:{data:Record<string,unknown>,state:Record<string,unknown>}|null=null
-let pendingTail=false
+// Identity and shape are always validated over the FULL content: trusting the
+// frozen prefix because a state file claims it was validated before is exactly
+// how a forged state smuggles foreign-session records past the identity check.
+let pendingTail=validateRecords(content,0)
 let mode='full'
 if(statePath&&previousPath&&parserSha){
   try{
     const state=JSON.parse(await readFile(statePath,'utf8'))
     const previous=JSON.parse(await readFile(previousPath,'utf8'))
-    if(state?.version===1&&state.parserSha===parserSha
+    if(state?.version===2&&state.parserSha===parserSha
       &&typeof state.consumedLength==='number'&&content.length>state.consumedLength
-      &&sha256(content.slice(0,state.consumedLength))===state.prefixSha256){
-      pendingTail=validateRecords(content.slice(state.consumedLength),0)
+      &&sha256(content.slice(0,state.consumedLength))===state.prefixSha256
+      &&Array.isArray(previous?.messages)&&Array.isArray(previous?.prompts)
+      &&outputShaOf(
+        previous.messages.slice(0,state.frozenMessageCount),
+        previous.prompts.slice(0,state.frozenPromptCount),
+        state.deliveredPromptIndex,state.compactBoundaries,state.compactSummaries,
+      )===state.outputSha256){
       outcome=continueClaudeSessionWithState(content,previous,state) as typeof outcome
       mode=outcome?'incremental':'full(fork-or-history-fallback)'
     }
   }catch{outcome=null}
 }
 if(!outcome){
-  pendingTail=validateRecords(content,0)
   outcome=parseClaudeSessionWithState(content,parserSha??'') as typeof outcome
 }
 const {data,state}=outcome as NonNullable<typeof outcome>
@@ -62,6 +78,11 @@ if(statePath){
   // older state beside a newer snapshot, which the next continuation still
   // handles correctly (frozen output is immutable, it just re-parses more).
   state.prefixSha256=sha256(content.slice(0,state.consumedLength as number))
+  state.outputSha256=outputShaOf(
+    (data.messages as unknown[]).slice(0,state.frozenMessageCount as number),
+    (data.prompts as unknown[]).slice(0,state.frozenPromptCount as number),
+    state.deliveredPromptIndex,state.compactBoundaries,state.compactSummaries,
+  )
   if(parserSha)state.parserSha=parserSha
   await writeFile(statePath+'.tmp',JSON.stringify(state),{mode:0o600})
   await rename(statePath+'.tmp',statePath)
