@@ -139,17 +139,24 @@ export function analyzeConversationTree(records: Record<string, unknown>[]): Tre
     const visited = new Set<string>()
     let cur: string | null = uuid
     let root = uuid
+    let cyclic = false
     while (cur) {
       const cached = rootCache.get(cur)
       if (cached !== undefined) { root = cached; break }
-      if (visited.has(cur)) { root = cur; break } // cycle guard
+      if (visited.has(cur)) { root = cur; cyclic = true; break } // cycle guard
       visited.add(cur)
       path.push(cur)
       const parent = parentOf.get(cur)
       if (parent === undefined || parent === null) { root = cur; break }
       cur = parent
     }
-    for (const u of path) rootCache.set(u, root)
+    // Only acyclic resolutions may be cached. A walk that ends in a parent
+    // cycle resolves to the first repeat *of that walk* — which varies by
+    // start node (the pre-memoization behavior, preserved for corrupt input).
+    // Caching one start's resolution would merge those walks into one root.
+    if (!cyclic) {
+      for (const u of path) rootCache.set(u, root)
+    }
     return root
   }
 
