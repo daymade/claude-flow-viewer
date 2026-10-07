@@ -61,6 +61,53 @@ const anchorCalls = (fetchMock:ReturnType<typeof vi.fn>,endpoint:string) =>
   fetchMock.mock.calls.filter(([input])=>String(input).startsWith(endpoint) && String(input).includes('anchor='))
 const ringAt = (index:number) => document.querySelector(`[data-message-index="${index}"]`)?.className ?? ''
 
+it.each(['claude','codex'] as const)('starts the %s conversation view with tool streams hidden and keeps toolbar choices through paging and refresh',async(provider)=>{
+  const conversationPage={...page,provider,total:86,offset:80,next_offset:85,has_earlier:true,has_later:true,records:[
+    {kind:'flow-message',id:'question',message:{kind:'user-prompt',promptNum:1,text:'What changed?',images:[],time:'00:00',decision:'none'}},
+    {kind:'flow-message',id:'thinking',message:{kind:'ai-thinking',preview:'thinking fixture',full:'thinking fixture full'}},
+    {kind:'flow-message',id:'call',message:{kind:'ai-tool-use',name:'Read',summary:'read fixture',input:{}}},
+    {kind:'flow-message',id:'reply',message:{kind:'ai-text',text:'The change is ready.'}},
+    {kind:'flow-message',id:'output',message:{kind:'tool-result',content:'fixture tool output',isError:false}},
+  ]}
+  vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
+    const offset=new URL(String(input),location.origin).searchParams.get('offset')
+    const next=offset==='0' ? {...conversationPage,offset:0,next_offset:80,has_earlier:false,records:[{kind:'flow-message',id:'earlier',message:{kind:'ai-text',text:'Earlier reply.'}}]} : offset==='85' ? {...conversationPage,offset:85,next_offset:86,has_later:false,records:[{kind:'flow-message',id:'later',message:{kind:'ai-text',text:'Later reply.'}}]} : conversationPage
+    return {ok:true,json:async()=>next} as Response
+  }))
+  await mountEmbed(`/?endpoint=/api/sessions/conversation-${provider}&session=sess-1&view=conversation`)
+  const checked=(label:string)=>(screen.getByRole('checkbox',{name:label}) as HTMLInputElement).checked
+  for(const label of ['Thinking','Tool Calls','Results'])expect(checked(label)).toBe(false)
+  for(const label of ['AI Text','Team','Branches','Markers','Timeline'])expect(checked(label)).toBe(true)
+  expect(screen.getAllByText('What changed?').length).toBeGreaterThan(0)
+  expect(screen.getByText('The change is ready.')).toBeTruthy()
+  expect(screen.queryByText('fixture tool output')).toBeNull()
+  expect(ringAt(3)).toContain('ring-1')
+  fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+  expect(screen.getByText('fixture tool output')).toBeTruthy()
+  for(const name of ['加载更早的对话','继续查看','从头查看','刷新到最新']){
+    fireEvent.click(screen.getByRole('button',{name}))
+    await flush()
+    expect(checked('Results')).toBe(true)
+    expect(checked('Tool Calls')).toBe(false)
+  }
+  expect(ringAt(3)).toContain('ring-1')
+  fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+  expect(screen.queryByText('fixture tool output')).toBeNull()
+  await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint:`/api/sessions/conversation-${provider}`,recordId:'output'})})
+  await flush()
+  expect(screen.getByText('fixture tool output')).toBeTruthy()
+  expect(checked('Results')).toBe(false)
+})
+
+it.each(['','&view=unknown'])('preserves the legacy embed filter when no conversation view is selected (%s)',async(view)=>{
+  stubFetch()
+  await mountEmbed(`/?endpoint=/api/sessions/legacy-${view ? 'unknown' : 'default'}&session=sess-1${view}`)
+  expect((screen.getByRole('checkbox',{name:'Thinking'}) as HTMLInputElement).checked).toBe(false)
+  for(const label of ['Tool Calls','Results','AI Text','Team','Branches','Markers','Timeline']){
+    expect((screen.getByRole('checkbox',{name:label}) as HTMLInputElement).checked).toBe(true)
+  }
+})
+
 it('announces readiness with the bound endpoint, expected session and channel',async()=>{
   stubFetch()
   const received:unknown[]=[]

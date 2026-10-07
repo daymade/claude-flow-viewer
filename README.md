@@ -36,6 +36,16 @@ npm run build
 
 ## Usage
 
+### Embedded Reader
+
+`npm run build:reader` builds the shared Reader package, including `embed.html`.
+
+嵌入页可追加 `view=conversation`，初次打开时隐藏 Thinking、Tool Calls 和 Results；工具栏可重新开启，刷新与翻页保留当前过滤设置。未传该参数时使用原有默认显示。
+
+```text
+embed.html?endpoint=/api/sessions/example&channel=example&session=example&view=conversation
+```
+
 ### Development Mode
 
 ```bash
