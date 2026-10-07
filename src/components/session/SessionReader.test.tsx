@@ -6,6 +6,23 @@ import type {SessionData} from '../../types/session'
 afterEach(cleanup)
 Object.assign(globalThis,{ResizeObserver:class{observe(){} disconnect(){}},IntersectionObserver:class{observe(){} disconnect(){}}})
 HTMLElement.prototype.scrollIntoView=vi.fn()
+it('seeds only the initial filter and preserves toolbar choices when data or the seed changes',()=>{
+ const data:SessionData={source:'claude',messages:[{kind:'ai-text',text:'visible reply'},{kind:'ai-tool-use',name:'Read',summary:'read fixture',input:{}},{kind:'tool-result',content:'fixture output',isError:false}],prompts:[],heatmap:[],markers:{compacts:0,plans:0,clears:0,forks:0}}
+ const {rerender}=render(<SessionReader data={data} initialFilter={{toolCalls:false,toolResults:false}}/>)
+ const checked=(label:string)=>(screen.getByRole('checkbox',{name:label}) as HTMLInputElement).checked
+ expect(checked('Thinking')).toBe(false)
+ expect(checked('Tool Calls')).toBe(false)
+ expect(checked('Results')).toBe(false)
+ for(const label of ['AI Text','Team','Branches','Markers','Timeline'])expect(checked(label)).toBe(true)
+ expect(screen.queryByText('fixture output')).toBeNull()
+ fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+ expect(screen.getByText('fixture output')).toBeTruthy()
+ rerender(<SessionReader data={{...data,messages:[...data.messages,{kind:'ai-text',text:'new page'}]}} initialFilter={{toolCalls:true,toolResults:false}}/>)
+ expect(checked('Tool Calls')).toBe(false)
+ expect(checked('Results')).toBe(true)
+ expect(screen.getByText('fixture output')).toBeTruthy()
+})
+
 it('uses the full reader without the standalone AppState and loads its bound external tool output',async()=>{
  const load=vi.fn(async()=> 'FULL external output END')
  const data:SessionData={source:'claude',messages:[{kind:'user-prompt',promptNum:1,text:'Find the selected question',images:[],time:'2026-10-05',decision:'none'},{kind:'tool-result',content:'preview',isError:false,externalFile:'tool-results/a.txt'}],prompts:[{num:1,preview:'Find',fullText:'Find the selected question',time:'2026-10-05',decision:'none'}],heatmap:[1],markers:{compacts:0,plans:0,clears:0,forks:0}}

@@ -18,11 +18,11 @@ function navigationIdentity(target: ReaderJumpTarget | null): string | null {
     : `pos:${target.messageIndex}:${target.promptNum ?? ''}`
 }
 
-export function SessionReader({ filter: controlledFilter, searchQuery: controlledQuery, onToggleFilter, showToolbar = true, ...props }:
+export function SessionReader({ filter: controlledFilter, initialFilter, searchQuery: controlledQuery, onToggleFilter, showToolbar = true, ...props }:
   Omit<SessionViewProps, 'filter' | 'searchQuery'> & {
-    filter?: FilterState; searchQuery?: string; onToggleFilter?: (key: keyof FilterState) => void; showToolbar?: boolean
+    filter?: FilterState; initialFilter?: Partial<FilterState>; searchQuery?: string; onToggleFilter?: (key: keyof FilterState) => void; showToolbar?: boolean
   }) {
-  const [filter, setFilter] = useState(READER_FILTER)
+  const [filter, setFilter] = useState(() => ({...READER_FILTER, ...initialFilter}))
   const [query, setQuery] = useState('')
   const [hit, setHit] = useState(0)
   const currentFilter = controlledFilter ?? filter

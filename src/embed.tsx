@@ -5,6 +5,7 @@ import {normalizeConversationPage as adapt,type ConversationPage as Page} from '
 import type { ReaderJumpTarget } from './components/session/SessionView'
 import './index.css'
 import './embed.css'
+const CONVERSATION_FILTER = {thinking:false,toolCalls:false,toolResults:false}
 export function ReaderEmbed() {
   const raw=new URLSearchParams(location.search).get('endpoint') ?? ''
   const expectedSession=new URLSearchParams(location.search).get('session')
@@ -12,6 +13,7 @@ export function ReaderEmbed() {
   // delayed ready from an old navigation cannot bless a new load of the same
   // WindowProxy/endpoint, and checked on incoming cfv:focus when present.
   const channel=new URLSearchParams(location.search).get('channel')
+  const conversationView=new URLSearchParams(location.search).get('view')==='conversation'
   const endpoint=raw.startsWith('/api/') && !raw.includes('\\') && !raw.includes('#') ? raw : null
   const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(''), [busy,setBusy]=useState(false)
   const [target,setTarget]=useState<ReaderJumpTarget|null>(null)
@@ -35,13 +37,18 @@ export function ReaderEmbed() {
       if(previous && ['earlier','later'].includes(mode) && next.session_id!==previous.session_id)throw new Error('Selected session identity changed')
       const merged=mode==='earlier' && previous ? {...next,records:[...next.records,...previous.records],next_offset:previous.next_offset,has_later:previous.has_later} : mode==='later' && previous ? {...next,offset:previous.offset,has_earlier:previous.has_earlier,records:[...previous.records,...next.records]} : next
       current.current=merged;setPage(merged)
-      const data=adapt(merged), index=anchor ? data.messages.findIndex(message=>message.sourceRecordId===anchor) : mode==='latest' ? data.messages.length-1 : 0
+      const data=adapt(merged)
+      let index=anchor ? data.messages.findIndex(message=>message.sourceRecordId===anchor) : mode==='latest' ? data.messages.length-1 : 0
+      if(conversationView && !anchor){
+        const conversationIndices=data.messages.flatMap((message,index)=>message.kind==='ai-text' || message.kind==='user-prompt' ? [index] : [])
+        index=(mode==='latest' ? conversationIndices[conversationIndices.length-1] : conversationIndices[0]) ?? -1
+      }
       // Explicit host navigation (cfv:focus → 'question') gets a fresh stable
       // token per request so repeated jumps to the same position still count.
       setTarget(index>=0 ? {messageIndex:index, ...(mode==='question' ? {requestId:`nav-${++navigationSequence.current}`} : {})} : null)
     } catch(e) {if(version===generation.current)setError(e instanceof Error ? e.message : String(e))}
     finally {if(version===generation.current)setBusy(false)}
-  },[endpoint,expectedSession])
+  },[endpoint,expectedSession,conversationView])
   useEffect(()=>{void read('latest');const counter=generation;return()=>{counter.current++}},[read])
   useEffect(()=>{
     const receive=(event:MessageEvent)=>{
@@ -67,7 +74,7 @@ export function ReaderEmbed() {
     </header>
     <div className="embed-status" role="status">{busy?'读取中 · ':''}{page ? `第 ${page.total ? page.offset+1 : 0}–${page.next_offset} 条 / 共 ${page.total} 条 · 搜索已加载范围` : '正在读取绑定会话…'}</div>
     {error && <p role="alert" className="embed-error">{error}</p>}
-    {page && <SessionReader data={adapt(page)} activeSearchTarget={target} readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} />}
+    {page && <SessionReader data={adapt(page)} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} />}
     {page && <details className="embed-source"><summary>来源与读取边界</summary><p>{page.boundary}</p><p>{page.provider} · {page.session_id} · {new Date(page.read_at).toLocaleString(undefined,{hour12:false})}</p></details>}
   </div>
 }

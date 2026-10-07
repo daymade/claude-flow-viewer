@@ -25,6 +25,7 @@ npx vitest run src/components/sidebar/Sidebar.test.tsx
 
 ## Local Runtime
 
+- Embed conversation view is opt-in via `view=conversation`. Seed filters in the shared `SessionReader`; keep the standard viewer and unspecified embed defaults unchanged.
 - There is no separate backend process to start. `npm run dev` and `npm run preview` both run the frontend and the local Node-side API in one process.
 - Use the URL printed by Vite. The default dev port is `5173`, but Vite may move to `5174` or another free port when the default is occupied.
 - The local API is mounted by `vite-plugin-claude-data.ts`; it serves scan/session/tool-result endpoints and the SQLite-backed search endpoints.
