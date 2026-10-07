@@ -124,17 +124,33 @@ export function analyzeConversationTree(records: Record<string, unknown>[]): Tre
   // 2a: Identify root uuids of each disconnected component.
   // A root is a user/assistant record whose parent chain (through all record types)
   // leads to null (no parent) or to a uuid not present in parentOf.
+  // Memoized: parentOf is frozen during this scan, so every node's root is
+  // computed once — the naive per-record walk is O(records x depth) and was the
+  // measured dominant parse cost on long sessions (71.8s of a 78s parse on a
+  // 65k-record single-tree session). Cycle nodes (corrupt input) all resolve to
+  // the cycle entry detected first, instead of each start node resolving to its
+  // own first repeat; both are graceful degradations, and the active-path walk
+  // below keeps its own cycle guard.
+  const rootCache = new Map<string, string>()
   function findRoot(uuid: string): string {
+    const hit = rootCache.get(uuid)
+    if (hit !== undefined) return hit
+    const path: string[] = []
     const visited = new Set<string>()
     let cur: string | null = uuid
+    let root = uuid
     while (cur) {
-      if (visited.has(cur)) break // cycle guard
+      const cached = rootCache.get(cur)
+      if (cached !== undefined) { root = cached; break }
+      if (visited.has(cur)) { root = cur; break } // cycle guard
       visited.add(cur)
+      path.push(cur)
       const parent = parentOf.get(cur)
-      if (parent === undefined || parent === null) return cur
+      if (parent === undefined || parent === null) { root = cur; break }
       cur = parent
     }
-    return cur || uuid
+    for (const u of path) rootCache.set(u, root)
+    return root
   }
 
   // Group user/assistant records by their tree root
