@@ -168,3 +168,191 @@ it('stays backwards compatible when no channel is bound',async()=>{
   expect(anchorCalls(fetchMock,'/api/sessions/t4')).toHaveLength(1)
   await waitFor(()=>expect(ringAt(1)).toContain('ring-1'))
 })
+
+// Local file references in transcripts must never navigate the embed: the host
+// does not serve them and the iframe would be replaced by a browser error
+// page. The shell blocks exactly those clicks, keeps the mounted reader and
+// its state, and reports the boundary with per-record provenance. The link
+// tests pin the page to the real production mount point /reader/embed.html,
+// where plain relative hrefs would otherwise resolve under /reader/…. All
+// fixture paths are synthetic (/synthetic/local/…, /Users/test/…); the shape
+// mirrors the real failure without copying an actual user path.
+const linkPage={
+  provider:'claude',
+  session_id:'sess-1',
+  records:[
+    {kind:'flow-message',id:'rec-link-a',message:{kind:'ai-text',text:'先看 [补齐分析](/synthetic/local/research/broader_competitors.md) 再讨论。'}},
+    {kind:'flow-message',id:'rec-link-b',message:{kind:'ai-text',text:'另一份 [补齐分析](../notes/second.md) 与 [编码路径](%2FUsers%2Ftest%2Fsecret.md)。'}},
+    {kind:'flow-message',id:'rec-link-c',message:{kind:'ai-text',text:'[外部文档](https://example.com/Users/test/x.md) [章节](#section) [接口](/api/sessions/abc) [Reader](/reader/embed.html) [文件协议](file:///Users/test/y.md)'}},
+    {kind:'flow-message',id:'rec-link-d',message:{kind:'ai-text',text:`讨论 [明确文件](/Users/test/report.md) 与 [绝对接口](${location.origin}/api/sessions/abc) 加 [绝对阅读页](${location.origin}/reader/embed.html)。`}},
+    {kind:'flow-message',id:'rec-link-e',message:{kind:'ai-text',text:'相对形状 [裸文件名](report.md)、[当前目录](./report.md) 与 [子目录](notes/report.md)。'}},
+    {kind:'flow-message',id:'rec-link-f',message:{kind:'ai-text',text:'家目录 [私人笔记](~/notes.md)。'}},
+  ],
+  total:6,offset:0,next_offset:6,has_earlier:false,has_later:false,
+  read_at:'2026-10-05T00:00:00Z',boundary:'synthetic test boundary',
+}
+
+function stubLinkFetch() {
+  const fetchMock=vi.fn(async (input:RequestInfo|URL)=>{
+    const url=String(input)
+    if(url.includes('/tool-output'))return {ok:true,json:async()=>({content:'FULL'})} as Response
+    return {ok:true,json:async()=>linkPage} as Response
+  })
+  vi.stubGlobal('fetch',fetchMock)
+  return fetchMock
+}
+
+// A real cancelable click through the DOM, exactly as a user click arrives.
+const clickAnchor=async (anchor:Element)=>{
+  const event=new MouseEvent('click',{bubbles:true,cancelable:true})
+  await act(async()=>{anchor.dispatchEvent(event)})
+  return event
+}
+const linkIn=(name:string,recordId:string)=>
+  screen.getAllByRole('link',{name}).find(anchor=>anchor.closest('[data-source-record-id]')?.getAttribute('data-source-record-id')===recordId)!
+
+it('blocks a confirmed local file link without remounting the reader, resetting state, or fetching the file',async()=>{
+  const fetchMock=stubLinkFetch()
+  await mountEmbed('/reader/embed.html?endpoint=/api/sessions/local-links&session=sess-1')
+  const anchor=await waitFor(()=>linkIn('明确文件','rec-link-d'))
+  const readerNode=document.querySelector('[data-session-reader]')
+  const scroller=document.querySelector('[data-primary-scroll]') as HTMLElement
+  scroller.scrollTop=123
+  fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+  fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'讨论'}})
+  expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
+  const callsBefore=fetchMock.mock.calls.length
+
+  const event=await clickAnchor(anchor)
+  expect(event.defaultPrevented).toBe(true)
+
+  // Same mounted reader node, same scroll, filter, Find and loaded range.
+  expect(document.querySelector('[data-session-reader]')).toBe(readerNode)
+  expect(scroller.scrollTop).toBe(123)
+  expect((screen.getByRole('checkbox',{name:'Results'}) as HTMLInputElement).checked).toBe(false)
+  expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('讨论')
+  expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
+  // No refetch of the session and never a fetch of the referenced file.
+  expect(fetchMock.mock.calls.length).toBe(callsBefore)
+  expect(fetchMock.mock.calls.some(([input])=>String(input).includes('report.md')||String(input).includes('/Users/'))).toBe(false)
+
+  // Dismissible boundary notice; path and identities stay folded in 引用来源.
+  expect(screen.getByText('明确文件：本地文件引用未绑定预览。')).toBeTruthy()
+  expect(screen.getByText('路径：/Users/test/report.md')).toBeTruthy()
+  expect(screen.getByText('来源记录：rec-link-d')).toBeTruthy()
+  expect(screen.getByText('会话：sess-1')).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('button',{name:'关闭'}))
+  expect(screen.queryByText('明确文件：本地文件引用未绑定预览。')).toBeNull()
+  expect(document.querySelector('[data-session-reader]')).toBe(readerNode)
+})
+
+it('blocks unknown same-origin references and keeps the original href verbatim in per-record provenance',async()=>{
+  const fetchMock=stubLinkFetch()
+  await mountEmbed('/reader/embed.html?endpoint=/api/sessions/local-links-unknown&session=sess-1')
+  const readerNode=document.querySelector('[data-session-reader]')
+
+  // An absolute same-origin path the host does not serve is an unbound
+  // reference, not a confirmed local file.
+  const absolute=await waitFor(()=>linkIn('补齐分析','rec-link-a'))
+  const callsBefore=fetchMock.mock.calls.length
+  const event=await clickAnchor(absolute)
+  expect(event.defaultPrevented).toBe(true)
+  expect(screen.getByText('补齐分析：该引用未绑定预览。')).toBeTruthy()
+  expect(screen.getByText('路径：/synthetic/local/research/broader_competitors.md')).toBeTruthy()
+  expect(screen.getByText('来源记录：rec-link-a')).toBeTruthy()
+
+  // A relative reference keeps the author's original href verbatim — the
+  // browser-resolved pathname must not be presented as a local file path.
+  const event2=await clickAnchor(linkIn('补齐分析','rec-link-b'))
+  expect(event2.defaultPrevented).toBe(true)
+  expect(screen.getByText('路径：../notes/second.md')).toBeTruthy()
+  expect(screen.getByText('来源记录：rec-link-b')).toBeTruthy()
+  // The same label in another record carries its own provenance; nothing crosses.
+  expect(screen.queryByText('来源记录：rec-link-a')).toBeNull()
+  expect(screen.queryByText('路径：/synthetic/local/research/broader_competitors.md')).toBeNull()
+
+  // Blocking never reads the referenced file and the reader survives both clicks.
+  expect(fetchMock.mock.calls.length).toBe(callsBefore)
+  expect(fetchMock.mock.calls.some(([input])=>String(input).includes('second.md')||String(input).includes('broader_competitors'))).toBe(false)
+  expect(document.querySelector('[data-session-reader]')).toBe(readerNode)
+})
+
+it('blocks encoded and file-scheme references with an explicit boundary instead of a guess',async()=>{
+  stubLinkFetch()
+  await mountEmbed('/reader/embed.html?endpoint=/api/sessions/local-links-encoded&session=sess-1')
+  const encoded=await screen.findByRole('link',{name:'编码路径'})
+  const event=await clickAnchor(encoded)
+  expect(event.defaultPrevented).toBe(true)
+  expect(screen.getByText('编码路径：本地文件引用未绑定预览。')).toBeTruthy()
+  expect(screen.getByText('路径：/Users/test/secret.md')).toBeTruthy()
+  expect(screen.getByText('来源记录：rec-link-b')).toBeTruthy()
+
+  // react-markdown sanitizes the file: URL to an empty href; the shell still
+  // stops the state-losing reload and reports the reference as unknown.
+  const fileScheme=screen.getByText('文件协议').closest('a')!
+  expect(fileScheme.getAttribute('href')??'').toBe('')
+  const event2=await clickAnchor(fileScheme)
+  expect(event2.defaultPrevented).toBe(true)
+  expect(screen.getByText('文件协议：该引用未绑定预览。')).toBeTruthy()
+  expect(screen.getByText('路径：unknown')).toBeTruthy()
+  expect(screen.getByText('来源记录：rec-link-c')).toBeTruthy()
+})
+
+it('keeps external links, pure fragments and host /api and /reader routes on their default behavior in relative and absolute form',async()=>{
+  stubLinkFetch()
+  await mountEmbed('/reader/embed.html?endpoint=/api/sessions/local-links-allowed&session=sess-1')
+  // Even an external https URL whose pathname contains /Users/ stays external.
+  const external=await screen.findByRole('link',{name:'外部文档'})
+  const api=screen.getByRole('link',{name:'接口'})
+  const reader=screen.getByRole('link',{name:'Reader'})
+  const absoluteApi=screen.getByRole('link',{name:'绝对接口'})
+  const absoluteReader=screen.getByRole('link',{name:'绝对阅读页'})
+  const fragment=screen.getByRole('link',{name:'章节'})
+  for(const anchor of [external,api,reader,absoluteApi,absoluteReader,fragment]){
+    const event=await clickAnchor(anchor)
+    expect(event.defaultPrevented).toBe(false)
+  }
+  expect(screen.queryByText(/未绑定预览/)).toBeNull()
+})
+
+it('blocks relative text-file shapes at the real /reader/embed.html base instead of letting them resolve into app routes',async()=>{
+  const fetchMock=stubLinkFetch()
+  await mountEmbed('/reader/embed.html?endpoint=/api/sessions/local-links-relative&session=sess-1')
+  const readerNode=document.querySelector('[data-session-reader]')
+  const scroller=document.querySelector('[data-primary-scroll]') as HTMLElement
+  scroller.scrollTop=77
+  fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+  fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'相对'}})
+  expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
+  const callsBefore=fetchMock.mock.calls.length
+
+  // At the production base these plain relative hrefs resolve under
+  // /reader/…; they must still be blocked as unbound references carrying the
+  // author's original href verbatim, never the base-derived pathname.
+  for(const [name,recordId,href] of [['裸文件名','rec-link-e','report.md'],['当前目录','rec-link-e','./report.md'],['子目录','rec-link-e','notes/report.md']] as const){
+    const event=await clickAnchor(linkIn(name,recordId))
+    expect(event.defaultPrevented).toBe(true)
+    expect(screen.getByText(`${name}：该引用未绑定预览。`)).toBeTruthy()
+    expect(screen.getByText(`路径：${href}`)).toBeTruthy()
+    expect(screen.getByText(`来源记录：${recordId}`)).toBeTruthy()
+  }
+
+  // ~ is an explicit local form: confirmed file reference, reported with the
+  // actual reference — not the /reader/~/… pathname the base would derive.
+  const tilde=await clickAnchor(linkIn('私人笔记','rec-link-f'))
+  expect(tilde.defaultPrevented).toBe(true)
+  expect(screen.getByText('私人笔记：本地文件引用未绑定预览。')).toBeTruthy()
+  expect(screen.getByText('路径：~/notes.md')).toBeTruthy()
+  expect(screen.getByText('来源记录：rec-link-f')).toBeTruthy()
+
+  // Reader node, scroll, filter, Find and loaded range survive every blocked
+  // click; blocking never refetches the session or reads the referenced file.
+  expect(document.querySelector('[data-session-reader]')).toBe(readerNode)
+  expect(scroller.scrollTop).toBe(77)
+  expect((screen.getByRole('checkbox',{name:'Results'}) as HTMLInputElement).checked).toBe(false)
+  expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('相对')
+  expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
+  expect(fetchMock.mock.calls.length).toBe(callsBefore)
+  expect(fetchMock.mock.calls.some(([input])=>String(input).includes('report.md')||String(input).includes('notes.md'))).toBe(false)
+})

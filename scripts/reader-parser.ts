@@ -46,7 +46,7 @@ let outcome:{data:Record<string,unknown>,state:Record<string,unknown>}|null=null
 // Identity and shape are always validated over the FULL content: trusting the
 // frozen prefix because a state file claims it was validated before is exactly
 // how a forged state smuggles foreign-session records past the identity check.
-let pendingTail=validateRecords(content,0)
+const pendingTail=validateRecords(content,0)
 let mode='full'
 if(statePath&&previousPath&&parserSha){
   try{
