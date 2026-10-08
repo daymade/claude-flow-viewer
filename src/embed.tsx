@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client'
-import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { SessionReader } from './components/session/SessionReader'
 import {normalizeConversationPage as adapt,type ConversationPage as Page} from './lib/reader-page'
 import type { ReaderJumpTarget } from './components/session/SessionView'
@@ -70,6 +70,14 @@ export function ReaderEmbed() {
   const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(''), [busy,setBusy]=useState(false)
   const [target,setTarget]=useState<ReaderJumpTarget|null>(null)
   const [blockedLink,setBlockedLink]=useState<BlockedLink|null>(null)
+  // Session data is bound to the page's identity: pure UI state (the
+  // blocked-link notice opening/closing, folded sources, busy/error) must not
+  // rebuild it. A fresh SessionData/messages reference would invalidate
+  // SessionReader's Find matches and SessionView's rendered memo, re-firing
+  // the [activeSearchTarget, rendered] effect and re-centering the real
+  // content scroller ([data-export-primary]) on every notice toggle. Refresh
+  // and paging publish a new page object, so they still rebuild the data.
+  const data=useMemo(()=>page ? adapt(page) : null,[page])
   const captureLinkClick=useCallback((event:ReactMouseEvent)=>{
     const anchor=event.target instanceof Element ? event.target.closest('a') : null
     if(!anchor)return
@@ -150,7 +158,7 @@ export function ReaderEmbed() {
       </details>
       <button type="button" onClick={()=>setBlockedLink(null)}>关闭</button>
     </div>}
-    {page && <SessionReader data={adapt(page)} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} />}
+    {page && data && <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} />}
     {page && <details className="embed-source"><summary>来源与读取边界</summary><p>{page.boundary}</p><p>{page.provider} · {page.session_id} · {new Date(page.read_at).toLocaleString(undefined,{hour12:false})}</p></details>}
   </div>
 }
