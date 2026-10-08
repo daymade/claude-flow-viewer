@@ -3,6 +3,21 @@ import {afterEach,it,expect,vi} from 'vitest'
 import {act} from 'react'
 import {cleanup,fireEvent,screen,waitFor} from '@testing-library/react'
 
+// Records every adapt(page) call the embed makes, so tests can prove a pure
+// UI re-render never rebuilds the SessionData/messages behind the real reader.
+const adaptSpy=vi.hoisted(()=>({calls:[] as Array<{page:unknown;data:{messages:ReadonlyArray<unknown>}}>}))
+vi.mock('./lib/reader-page',async(importOriginal)=>{
+  const actual=await importOriginal<typeof import('./lib/reader-page')>()
+  return {
+    ...actual,
+    normalizeConversationPage:(pageArg:Parameters<typeof actual.normalizeConversationPage>[0])=>{
+      const data=actual.normalizeConversationPage(pageArg)
+      adaptSpy.calls.push({page:pageArg,data})
+      return data
+    },
+  }
+})
+
 Object.assign(globalThis,{
   IS_REACT_ACT_ENVIRONMENT:true,
   ResizeObserver:class{observe(){} disconnect(){}},
@@ -355,4 +370,125 @@ it('blocks relative text-file shapes at the real /reader/embed.html base instead
   expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
   expect(fetchMock.mock.calls.length).toBe(callsBefore)
   expect(fetchMock.mock.calls.some(([input])=>String(input).includes('report.md')||String(input).includes('notes.md'))).toBe(false)
+})
+
+// The real content scroller inside the reader is [data-export-primary]; a
+// blocked-link notice opening or closing must not re-center it. This test runs
+// the real SessionReader/SessionView with an active Find, counts actual
+// scrollTop writes on that element plus the adapt(page) rebuilds behind the
+// reader, and proves refresh/paging still replace the session data.
+const scrollPage={
+  provider:'claude',
+  session_id:'sess-1',
+  records:[
+    {kind:'flow-message',id:'rec-scroll-1',message:{kind:'ai-text',text:'第一条说明。'}},
+    {kind:'flow-message',id:'rec-scroll-2',message:{kind:'ai-text',text:'中间内容 讨论 的上下文。'}},
+    {kind:'flow-message',id:'rec-scroll-3',message:{kind:'ai-text',text:'再看 [补齐分析](/Users/test/analysis.md) 并继续 讨论。'}},
+  ],
+  total:4,offset:1,next_offset:4,has_earlier:true,has_later:false,
+  read_at:'2026-10-05T00:00:00Z',boundary:'synthetic test boundary',
+}
+
+function stubScrollFetch() {
+  let latestReads=0
+  const fetchMock=vi.fn(async (input:RequestInfo|URL)=>{
+    const url=new URL(String(input),location.origin)
+    if(url.pathname.includes('/tool-output'))return {ok:true,json:async()=>({content:'FULL'})} as Response
+    if(url.searchParams.get('offset')==='0'){
+      return {ok:true,json:async()=>({...scrollPage,offset:0,next_offset:1,has_earlier:false,records:[{kind:'flow-message',id:'rec-scroll-0',message:{kind:'ai-text',text:'更早的一条。'}}]})} as Response
+    }
+    // A fresh object per read: refresh must publish a new page identity.
+    latestReads++
+    const records=scrollPage.records.map(record=>latestReads>1 && record.id==='rec-scroll-1'
+      ? {...record,message:{...record.message,text:'刷新后的正文。'}}
+      : {...record})
+    return {ok:true,json:async()=>({...scrollPage,records})} as Response
+  })
+  vi.stubGlobal('fetch',fetchMock)
+  return fetchMock
+}
+
+function countScrollTopWrites(element:HTMLElement){
+  let owner:object|null=element
+  let descriptor:PropertyDescriptor|undefined
+  while(owner && !(descriptor=Object.getOwnPropertyDescriptor(owner,'scrollTop')))owner=Object.getPrototypeOf(owner)
+  if(!descriptor?.get || !descriptor.set)throw new Error('scrollTop accessor not found')
+  const read=descriptor.get, write=descriptor.set
+  const writes:number[]=[]
+  Object.defineProperty(element,'scrollTop',{
+    configurable:true,
+    get(){return read.call(this)},
+    set(value:number){writes.push(value);write.call(this,value)},
+  })
+  return writes
+}
+
+it('keeps the real content scroller and session data stable across the blocked-link notice, and still updates on refresh and paging',async()=>{
+  stubScrollFetch()
+  // Run rAF callbacks synchronously so any scheduled scroll positioning is
+  // captured deterministically by the scrollTop write counter below.
+  vi.stubGlobal('requestAnimationFrame',(callback:FrameRequestCallback)=>{callback(performance.now());return 0})
+  vi.stubGlobal('cancelAnimationFrame',()=>{})
+  await mountEmbed('/reader/embed.html?endpoint=/api/sessions/scroll-steady&session=sess-1')
+  await waitFor(()=>expect(ringAt(2)).toContain('ring-1'))
+
+  // An active Find owns the current jump target.
+  fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'讨论'}})
+  await waitFor(()=>expect(ringAt(1)).toContain('ring-1'))
+  expect(ringAt(2)).not.toContain('ring-1')
+
+  const scroller=document.querySelector('[data-export-primary]') as HTMLElement
+  scroller.scrollTop=456
+  const writes=countScrollTopWrites(scroller)
+  const adaptCallsBefore=adaptSpy.calls.length
+  const dataBefore=adaptSpy.calls[adaptCallsBefore-1].data
+
+  const event=await clickAnchor(linkIn('补齐分析','rec-scroll-3'))
+  expect(event.defaultPrevented).toBe(true)
+  expect(screen.getByText('补齐分析：本地文件引用未绑定预览。')).toBeTruthy()
+
+  // Opening the notice is pure UI: no re-positioning of the real content
+  // scroller and no rebuild of the session data/messages behind the reader.
+  expect(writes).toEqual([])
+  expect(scroller.scrollTop).toBe(456)
+  expect(document.querySelector('[data-export-primary]')).toBe(scroller)
+  expect(adaptSpy.calls.length).toBe(adaptCallsBefore)
+
+  fireEvent.click(screen.getByRole('button',{name:'关闭'}))
+  expect(screen.queryByText('补齐分析：本地文件引用未绑定预览。')).toBeNull()
+  expect(writes).toEqual([])
+  expect(scroller.scrollTop).toBe(456)
+  expect(adaptSpy.calls.length).toBe(adaptCallsBefore)
+  expect(adaptSpy.calls[adaptSpy.calls.length-1].data).toBe(dataBefore)
+  expect(adaptSpy.calls[adaptSpy.calls.length-1].data.messages).toBe(dataBefore.messages)
+
+  // Folding the sources panel is pure UI too.
+  fireEvent.click(screen.getByText('来源与读取边界'))
+  expect(writes).toEqual([])
+  expect(adaptSpy.calls.length).toBe(adaptCallsBefore)
+
+  // The Find still owns the target and the loaded range is untouched.
+  expect(ringAt(1)).toContain('ring-1')
+  expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('讨论')
+  expect(screen.getByText(/第 2–4 条 \/ 共 4 条/)).toBeTruthy()
+
+  // A real refresh publishes a new page identity, so the session data MUST be
+  // rebuilt — the memo is bound to the page, not frozen.
+  fireEvent.click(screen.getByRole('button',{name:'刷新到最新'}))
+  await flush()
+  expect(adaptSpy.calls.length).toBeGreaterThan(adaptCallsBefore)
+  const refreshed=adaptSpy.calls[adaptSpy.calls.length-1].data
+  expect(screen.getByText('刷新后的正文。')).toBeTruthy()
+  expect(screen.queryByText('第一条说明。')).toBeNull()
+  expect(refreshed).not.toBe(dataBefore)
+  expect(refreshed.messages).not.toBe(dataBefore.messages)
+  expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('讨论')
+
+  // Paging earlier also replaces the data and extends the loaded range.
+  fireEvent.click(screen.getByRole('button',{name:'加载更早的对话'}))
+  await flush()
+  expect(adaptSpy.calls[adaptSpy.calls.length-1].data).not.toBe(refreshed)
+  expect(screen.getByText('更早的一条。')).toBeTruthy()
+  expect(screen.getByText('刷新后的正文。')).toBeTruthy()
+  expect(screen.getByText(/第 1–4 条 \/ 共 4 条/)).toBeTruthy()
 })
