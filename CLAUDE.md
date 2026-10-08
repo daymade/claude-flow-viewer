@@ -26,6 +26,7 @@ npx vitest run src/components/sidebar/Sidebar.test.tsx
 ## Local Runtime
 
 - Embed conversation view is opt-in via `view=conversation`. Seed filters in the shared `SessionReader`; keep the standard viewer and unspecified embed defaults unchanged.
+- The embed shell (`src/embed.tsx`) captures transcript anchor clicks so local file references never navigate the iframe: the host does not serve them, and navigation would replace the mounted reader with a browser error page. Host `/api`/`/reader` routes keep default behavior only when explicitly written (root-relative `/…` or absolute same-origin http(s)); a plain relative path is never promoted into an app route by the `/reader/embed.html` base. Blocking never reads the referenced file. Handle this in the embed shell, not in the shared message renderers; the classification contract and notice wording are documented in README's Embedded Reader section.
 - There is no separate backend process to start. `npm run dev` and `npm run preview` both run the frontend and the local Node-side API in one process.
 - Use the URL printed by Vite. The default dev port is `5173`, but Vite may move to `5174` or another free port when the default is occupied.
 - The local API is mounted by `vite-plugin-claude-data.ts`; it serves scan/session/tool-result endpoints and the SQLite-backed search endpoints.
