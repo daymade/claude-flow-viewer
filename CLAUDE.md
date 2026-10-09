@@ -94,6 +94,7 @@ Three implementations behind one `FileStore` interface, tried in order:
 
 Provider details:
 - `src/lib/providers/claude.ts` keeps Claude-specific tree parsing, compaction, `/clear`, and marker logic
+- Claude projections preserve the original record UUID as optional `sourceRecordId` (shared by content blocks from one record), and native `tool_use.id` / `tool_result.tool_use_id` as optional `toolUseId`. Missing IDs remain absent; never infer agent/session identity or tool pairing from names or display order. The downstream source contract is in README's Embedded Reader section.
 - `src/lib/codex-parser.ts` handles Codex `response_item` / `event_msg` normalization, including `event_msg.user_message`, `agent_message`, `mcp_tool_call_end`, `tool_search_*`, task lifecycle, tool calls/results, rollback markers, and thread metadata extraction (`primary` vs `subagent`)
 - Codex compaction `replacement_history` may be the only remaining copy of an earlier human prompt. `retainedUserInputs` preserves its exact text and ordinal while exposing only the honest session-start → compaction time range; never synthesize a per-message timestamp for it.
 - `src/lib/providers/cherrystudio.ts` parses serialized Cherry Studio payloads for both `agents.db` agent sessions and recovered regular-chat topics
@@ -123,13 +124,14 @@ Handles Claude Code's tree-structured conversations:
 
 `npm run build:reader` also emits the shared `@daymade/session-reader` package used by
 downstream fleets. Its `scripts/reader-parser.ts` CLI can continue an append-only session
-from a frozen prefix instead of re-parsing the whole file: a version-2 state file
+from a frozen prefix instead of re-parsing the whole file: a version-3 state file
 (`ClaudeParserState` in `src/lib/providers/claude.ts`) binds the consumed prefix by hashes
 and the window head by uuid/text, and the continuation re-parses only the current turn plus
 new bytes. The contract is *byte-identical-or-fallback* — any fork from frozen history,
 stale or tampered state, or a session-identity mismatch returns null and the CLI falls back
 to a full parse, so published output always equals a full parse. Contract tests live in
 `src/lib/providers/claude-incremental.test.ts` and `scripts/test-incremental-cli.mjs`.
+Older state versions fall back to full parsing so frozen messages acquire the current provenance fields.
 
 ### Session Markers (`SessionMarkers` in `src/types/session.ts`)
 

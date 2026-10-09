@@ -48,6 +48,10 @@ npm run build
 embed.html?endpoint=/api/sessions/example&channel=example&session=example&view=conversation
 ```
 
+Claude 解析消息的可选 `sourceRecordId` 保留原 JSONL 记录的 `uuid`；同一记录的多段内容共享它，它不是投影消息的唯一键。工具调用的 `toolUseId` 来自原 `tool_use.id`，工具结果来自原 `tool_result.tool_use_id`，不按显示顺序或工具名称配对。TeamMate 消息、压缩边界与分支内消息也保留各自来源记录身份；缺失的 ID 保持缺失，不据此猜测子 Agent 或会话关系。完整解析与增量续解析遵循同一来源合同。
+
+增量状态使用 `ClaudeParserState` version 3；旧状态自动退回完整解析，避免复用没有来源字段的冻结消息。构建共享包用 `npm run build:reader`，CLI 的原有参数与完整解析回退流程不变。
+
 ### Development Mode
 
 ```bash
