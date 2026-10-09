@@ -52,7 +52,7 @@ if(statePath&&previousPath&&parserSha){
   try{
     const state=JSON.parse(await readFile(statePath,'utf8'))
     const previous=JSON.parse(await readFile(previousPath,'utf8'))
-    if(state?.version===2&&state.parserSha===parserSha
+    if(state?.version===3&&state.parserSha===parserSha
       &&typeof state.consumedLength==='number'&&content.length>state.consumedLength
       &&sha256(content.slice(0,state.consumedLength))===state.prefixSha256
       &&Array.isArray(previous?.messages)&&Array.isArray(previous?.prompts)

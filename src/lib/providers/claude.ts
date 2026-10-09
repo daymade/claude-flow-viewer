@@ -354,6 +354,25 @@ function classifyRecord(
   promptCounter: { value: number } | null,
   prompts: PromptIndexEntry[] | null,
 ): ClassifyResult {
+  const result = classifyRecordContent(data, promptCounter, prompts)
+  const provenance = recordProvenance(data)
+  result.messages = result.messages.map(message => ({ ...message, ...provenance }))
+  return result
+}
+
+function recordProvenance(data: Record<string, unknown>): { sourceRecordId?: string } {
+  return typeof data.uuid === 'string' && data.uuid.trim().length > 0 ? { sourceRecordId: data.uuid } : {}
+}
+
+function toolProvenance(id: unknown): { toolUseId?: string } {
+  return typeof id === 'string' && id.trim().length > 0 ? { toolUseId: id } : {}
+}
+
+function classifyRecordContent(
+  data: Record<string, unknown>,
+  promptCounter: { value: number } | null,
+  prompts: PromptIndexEntry[] | null,
+): ClassifyResult {
   const result: ClassifyResult = { messages: [], isPrompt: false, isClear: false }
   const msgType = data.type
 
@@ -439,6 +458,7 @@ function classifyRecord(
         if (persisted) {
           result.messages.push({
             kind: 'tool-result',
+            ...toolProvenance(item.tool_use_id),
             content: persisted.preview,
             isError: Boolean(item.is_error),
             externalFile: persisted.relativePath,
@@ -448,6 +468,7 @@ function classifyRecord(
           const display = full
           result.messages.push({
             kind: 'tool-result',
+            ...toolProvenance(item.tool_use_id),
             content: display,
             isError: Boolean(item.is_error),
           })
@@ -488,6 +509,7 @@ function classifyRecord(
           const summary = toolSummary(item)
           result.messages.push({
             kind: 'ai-tool-use',
+            ...toolProvenance(item.id),
             summary,
             name: String(item.name || 'unknown'),
             input: (item.input || {}) as Record<string, unknown>,
@@ -518,7 +540,7 @@ export function parseClaudeSessionContent(content: string): SessionData {
  * because this module must stay runtime-agnostic (no node:crypto in browser bundles).
  */
 export interface ClaudeParserState {
-  version: 2
+  version: 3
   parserSha: string
   prefixSha256: string
   /** String index of the record that produced the last numbered prompt. */
@@ -732,6 +754,7 @@ function parseSessionCore(content: string, seed: ParseSeed | null): CoreOutcome 
       if (boundary) {
         messages.push({
           kind: 'compact-boundary',
+          ...recordProvenance(data),
           timestamp: boundary.ts,
           trigger: boundary.trigger,
           preTokens: boundary.preTokens,
@@ -754,7 +777,7 @@ function parseSessionCore(content: string, seed: ParseSeed | null): CoreOutcome 
       const rawText = typeof rawContent === 'string' ? rawContent : ''
       if (rawText.includes('<command-name>/clear</command-name>')) {
         const ts = extractTimestamp(data)
-        messages.push({ kind: 'clear-divider', timestamp: formatTime(ts) })
+        messages.push({ kind: 'clear-divider', ...recordProvenance(data), timestamp: formatTime(ts) })
         continue
       }
     }
@@ -778,7 +801,7 @@ function parseSessionCore(content: string, seed: ParseSeed | null): CoreOutcome 
             const time = formatTime(ts)
             const timestamp = Number.isNaN(ts.getTime()) ? '' : ts.toISOString()
             const decision = detectDecision(text, promptCounter.value)
-            messages.push({ kind: 'user-prompt', promptNum: promptCounter.value, text, images: [], time, timestamp, decision, queued: true })
+            messages.push({ kind: 'user-prompt', ...recordProvenance(data), promptNum: promptCounter.value, text, images: [], time, timestamp, decision, queued: true })
             prompts?.push({
               num: promptCounter.value,
               preview: text.slice(0, 100).replace(/\n/g, ' '),
@@ -812,9 +835,9 @@ function parseSessionCore(content: string, seed: ParseSeed | null): CoreOutcome 
       const timestamp = formatTime(ts)
       for (const pt of transitions) {
         if (pt.type === 'enter') {
-          messages.push({ kind: 'plan-start', timestamp })
+          messages.push({ kind: 'plan-start', ...recordProvenance(data), timestamp })
         } else {
-          messages.push({ kind: 'plan-end', timestamp, planPreview: pt.planPreview || '' })
+          messages.push({ kind: 'plan-end', ...recordProvenance(data), timestamp, planPreview: pt.planPreview || '' })
         }
       }
     }
@@ -867,6 +890,7 @@ function parseSessionCore(content: string, seed: ParseSeed | null): CoreOutcome 
           const hasToolResult = abandonedMessages.some(m => m.kind === 'tool-result')
           messages.push({
             kind: 'fork-indicator',
+            ...recordProvenance(data),
             abandonedMessages,
             abandonedPreview,
             timestamp,
@@ -980,7 +1004,7 @@ function parseSessionCore(content: string, seed: ParseSeed | null): CoreOutcome 
 
 function toParserState(outcome: CoreOutcome, parserSha: string, baseOffset: number, fallbackLastUuid: string | null): ClaudeParserState {
   return {
-    version: 2,
+    version: 3,
     parserSha,
     prefixSha256: '',
     outputSha256: '',
@@ -1030,7 +1054,7 @@ export function continueClaudeSessionWithState(
   previous: { messages: SessionMessage[]; prompts: PromptIndexEntry[] },
   state: ClaudeParserState,
 ): { data: SessionData; state: ClaudeParserState } | null {
-  if (state.version !== 2) return null
+  if (state.version !== 3) return null
   if (!Number.isInteger(state.windowOffset) || !Number.isInteger(state.consumedLength)) return null
   if (state.windowOffset < 0 || state.windowOffset > state.consumedLength || state.consumedLength >= content.length) return null
   if (!Array.isArray(previous.messages) || !Array.isArray(previous.prompts)) return null

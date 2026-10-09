@@ -10,10 +10,10 @@ export interface EmbeddedImage {
 
 export type SessionMessage = { sourceRecordId?: string; sourceRecord?: Record<string,unknown> } & (
   | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; timestamp?: string; decision: DecisionMarker; queued?: boolean; dupCount?: number }
-  | { kind: 'tool-result'; content: string; isError: boolean; externalFile?: string; totalSize?: string; timestamp?: string }
+  | { kind: 'tool-result'; content: string; isError: boolean; externalFile?: string; totalSize?: string; timestamp?: string; toolUseId?: string }
   | { kind: 'ai-text'; text: string; timestamp?: string }
   | { kind: 'ai-thinking'; preview: string; full: string; timestamp?: string }
-  | { kind: 'ai-tool-use'; summary: string; name: string; input: Record<string, unknown>; timestamp?: string }
+  | { kind: 'ai-tool-use'; summary: string; name: string; input: Record<string, unknown>; timestamp?: string; toolUseId?: string }
   | { kind: 'delegation-update'; timestamp: string; agentId: string; status: 'started' | 'running' | 'completed' | 'failed' | 'update'; summary: string }
   | { kind: 'team-message'; from: string; color: string; summary: string; content: string; isProtocol: boolean }
   | { kind: 'task-event'; taskId: string; status: string; summary: string; timestamp?: string }

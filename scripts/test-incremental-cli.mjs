@@ -99,6 +99,26 @@ function expectFallback(name, d, detailCheck) {
   check(name, identical && (!detailCheck || detailCheck(produced)), identical ? '' : '(output differs)')
 }
 
+// Legacy output and its binding are coherent, but lack the new provenance.
+// Even with the caller's parserSha unchanged, version 2 must reparse fully.
+{
+  const d = freshState('legacy-provenance')
+  const previous = JSON.parse(readFileSync(join(d, 'p.json'), 'utf8'))
+  for (const message of previous.messages) delete message.sourceRecordId
+  writeFileSync(join(d, 'p.json'), JSON.stringify(previous))
+  tamper(d, (s) => {
+    s.version = 2
+    s.outputSha256 = sha256(JSON.stringify({
+      messages: previous.messages.slice(0, s.frozenMessageCount),
+      prompts: previous.prompts.slice(0, s.frozenPromptCount),
+      deliveredPromptIndex: s.deliveredPromptIndex,
+      compactBoundaries: s.compactBoundaries,
+      compactSummaries: s.compactSummaries,
+    }))
+  })
+  expectFallback('legacy coherent state -> full provenance', d, out => JSON.parse(out).messages.every(m => m.sourceRecordId))
+}
+
 // C2: frozenMessageCount + 1 (outputSha must catch)
 {
   const d = freshState('c2')
