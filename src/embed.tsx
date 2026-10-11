@@ -17,8 +17,10 @@ const CONVERSATION_FILTER = {thinking:false,toolCalls:false,toolResults:false}
 // default behavior only when explicitly written — root-relative (/…) or
 // absolute same-origin http(s) URLs for the host's own /api and /reader
 // routes; a plain relative path (report.md, ./x, notes/y.md) is never
-// promoted into an app route by the base URL. External origins and pure
-// #fragments are untouched. Everything else same-origin is blocked: confirmed
+// promoted into an app route by the base URL. Pure #fragments keep their
+// default behavior. Explicit http(s) and protocol-relative
+// web links open a new tab without replacing the mounted reader. Everything
+// else same-origin is blocked: confirmed
 // filesystem paths are reported as local file references, anything else as an
 // unbound reference carrying the author's original href verbatim.
 // Blocking only reports the boundary — it never reads the referenced file.
@@ -32,7 +34,7 @@ function decodePathname(pathname:string){
 }
 function isFilesystemPath(path:string){return path.startsWith('~')||/^[A-Za-z]:[\\/]/.test(path)||FILESYSTEM_ROOTS.some(root=>path.startsWith(root))}
 function isAppRoute(path:string){return path.startsWith('/api/')||path==='/reader'||path.startsWith('/reader/')||path.startsWith('/reader.')}
-function classifyAnchor(anchor:HTMLAnchorElement):{blocked:false}|{blocked:true;kind:'file'|'unknown';reference:string|null}{
+function classifyAnchor(anchor:HTMLAnchorElement):{blocked:false;newTab?:true}|{blocked:true;kind:'file'|'unknown';reference:string|null}{
   const raw=anchor.getAttribute('href')
   if(raw==null)return{blocked:false}
   const href=raw.trim()
@@ -47,12 +49,13 @@ function classifyAnchor(anchor:HTMLAnchorElement):{blocked:false}|{blocked:true;
   let url:URL
   try{url=new URL(href,location.href)}catch{return{blocked:true,kind:'unknown',reference:null}}
   if(url.protocol==='file:')return{blocked:true,kind:'file',reference:decodePathname(url.pathname)}
-  if(url.origin!==location.origin)return{blocked:false}
   // Route first, but only for explicitly written routes: root-relative (/…)
   // or absolute same-origin http(s). A plain relative path must never become
   // an app route just because the embed page is mounted under /reader/.
   const explicitlyWritten=href.startsWith('/')||/^[a-z][a-z0-9+.-]*:/i.test(href)
-  if(explicitlyWritten&&isAppRoute(decodePathname(url.pathname)))return{blocked:false}
+  if(url.origin===location.origin&&explicitlyWritten&&isAppRoute(decodePathname(url.pathname)))return{blocked:false}
+  if((url.protocol==='http:'||url.protocol==='https:')&&(/^[a-z][a-z0-9+.-]*:/i.test(href)||href.startsWith('//')))return{blocked:false,newTab:true}
+  if(url.origin!==location.origin)return{blocked:false}
   // Every other same-origin reference is blocked as unbound, and the
   // provenance keeps the author's original href verbatim instead of
   // pretending the resolved pathname is a confirmed local file path.
@@ -78,11 +81,34 @@ export function ReaderEmbed() {
   // content scroller ([data-export-primary]) on every notice toggle. Refresh
   // and paging publish a new page object, so they still rebuild the data.
   const data=useMemo(()=>page ? adapt(page) : null,[page])
+  const webLinkAttributes=useRef(new WeakMap<HTMLAnchorElement,{original:{target:string|null;rel:string|null};applied:{target:string;rel:string}}>())
   const captureLinkClick=useCallback((event:ReactMouseEvent)=>{
     const anchor=event.target instanceof Element ? event.target.closest('a') : null
     if(!anchor)return
+    // ReactMarkdown can reuse an anchor when refreshed text changes its href.
+    // Undo only the attributes still owned by this shell before classifying
+    // the new destination; preserve any later downstream attribute changes.
+    const previous=webLinkAttributes.current.get(anchor)
+    if(previous){
+      for(const name of ['target','rel'] as const){
+        if(anchor.getAttribute(name)!==previous.applied[name])continue
+        const original=previous.original[name]
+        if(original==null)anchor.removeAttribute(name)
+        else anchor.setAttribute(name,original)
+      }
+      webLinkAttributes.current.delete(anchor)
+    }
     const verdict=classifyAnchor(anchor as HTMLAnchorElement)
-    if(!verdict.blocked)return
+    if(!verdict.blocked){
+      if(verdict.newTab){
+        const original={target:anchor.getAttribute('target'),rel:anchor.getAttribute('rel')}
+        const applied={target:'_blank',rel:[...new Set([...(original.rel??'').split(/\s+/).filter(Boolean),'noopener','noreferrer'])].join(' ')}
+        webLinkAttributes.current.set(anchor,{original,applied})
+        anchor.setAttribute('target',applied.target)
+        anchor.setAttribute('rel',applied.rel)
+      }
+      return
+    }
     event.preventDefault()
     event.stopPropagation()
     setBlockedLink({
