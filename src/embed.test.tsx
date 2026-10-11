@@ -314,21 +314,108 @@ it('blocks encoded and file-scheme references with an explicit boundary instead 
   expect(screen.getByText('来源记录：rec-link-c')).toBeTruthy()
 })
 
-it('keeps external links, pure fragments and host /api and /reader routes on their default behavior in relative and absolute form',async()=>{
+it('keeps pure fragments and host /api and /reader routes on their default behavior in relative and absolute form',async()=>{
   stubLinkFetch()
   await mountEmbed('/reader/embed.html?endpoint=/api/sessions/local-links-allowed&session=sess-1')
-  // Even an external https URL whose pathname contains /Users/ stays external.
-  const external=await screen.findByRole('link',{name:'外部文档'})
-  const api=screen.getByRole('link',{name:'接口'})
+  const api=await screen.findByRole('link',{name:'接口'})
   const reader=screen.getByRole('link',{name:'Reader'})
   const absoluteApi=screen.getByRole('link',{name:'绝对接口'})
   const absoluteReader=screen.getByRole('link',{name:'绝对阅读页'})
   const fragment=screen.getByRole('link',{name:'章节'})
-  for(const anchor of [external,api,reader,absoluteApi,absoluteReader,fragment]){
+  for(const anchor of [api,reader,absoluteApi,absoluteReader,fragment]){
     const event=await clickAnchor(anchor)
     expect(event.defaultPrevented).toBe(false)
+    expect(anchor.getAttribute('target')).toBeNull()
   }
   expect(screen.queryByText(/未绑定预览/)).toBeNull()
+})
+
+it('opens web links outside the embed while preserving the mounted reader and reading state',async()=>{
+  const fetchMock=stubLinkFetch()
+  await mountEmbed('/reader/embed.html?endpoint=/api/sessions/web-links&session=sess-1')
+  const anchor=await screen.findByRole('link',{name:'外部文档'})
+  const readerNode=document.querySelector('[data-session-reader]')
+  const scroller=document.querySelector('[data-export-primary]') as HTMLElement
+  fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+  fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'讨论'}})
+  scroller.scrollTop=123
+  const callsBefore=fetchMock.mock.calls.length
+  const dataBefore=adaptSpy.calls.length
+  for(const href of ['https://example.test/Users/test/report.html','http://127.0.0.1:61401/review.html',`${location.origin}/review.html`,'//example.test/review.html']){
+    anchor.setAttribute('href',href)
+    anchor.setAttribute('target','_self')
+    anchor.setAttribute('rel','author')
+    const event=await clickAnchor(anchor)
+    // Let the browser follow a real anchor into a separate browsing context.
+    expect(event.defaultPrevented).toBe(false)
+    expect(anchor.getAttribute('target')).toBe('_blank')
+    expect(anchor.getAttribute('rel')?.split(/\s+/)).toEqual(expect.arrayContaining(['author','noopener','noreferrer']))
+    expect(document.querySelector('[data-session-reader]')).toBe(readerNode)
+    expect(scroller.scrollTop).toBe(123)
+  }
+  expect((screen.getByRole('checkbox',{name:'Results'}) as HTMLInputElement).checked).toBe(false)
+  expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('讨论')
+  expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
+  expect(fetchMock.mock.calls.length).toBe(callsBefore)
+  expect(adaptSpy.calls.length).toBe(dataBefore)
+  expect(screen.queryByText(/未绑定预览/)).toBeNull()
+})
+
+it('preserves missing href and special-protocol behavior and blocks empty references',async()=>{
+  stubLinkFetch()
+  await mountEmbed('/reader/embed.html?endpoint=/api/sessions/web-links-boundary&session=sess-1')
+  const anchor=await screen.findByRole('link',{name:'外部文档'})
+  anchor.removeAttribute('href')
+  expect((await clickAnchor(anchor)).defaultPrevented).toBe(false)
+  expect(anchor.getAttribute('target')).toBeNull()
+  for(const href of ['mailto:reader@example.test','tel:+10000000000','?section=two']){
+    anchor.setAttribute('href',href)
+    expect((await clickAnchor(anchor)).defaultPrevented).toBe(false)
+    expect(anchor.getAttribute('target')).toBeNull()
+  }
+  for(const href of ['','   ']){
+    anchor.setAttribute('href',href)
+    expect((await clickAnchor(anchor)).defaultPrevented).toBe(true)
+    expect(screen.getByText('外部文档：该引用未绑定预览。')).toBeTruthy()
+    expect(screen.getByText('路径：unknown')).toBeTruthy()
+  }
+})
+
+it.each([{target:null,rel:null},{target:'',rel:''},{target:'named-result',rel:'author'}])('restores shell-added web attributes when a reused anchor becomes a host route (%j)',async(original)=>{
+  let currentPage={...page,records:[{kind:'flow-message',id:'reused-link',message:{kind:'ai-text',text:'[same record link](https://example.test/review.html)'}}],total:1,next_offset:1}
+  vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>currentPage} as Response)))
+  await mountEmbed(`/reader/embed.html?endpoint=/api/sessions/retarget-${original.target??'missing'}&session=sess-1`)
+  const anchor=await screen.findByRole('link',{name:'same record link'})
+  for(const name of ['target','rel'] as const){
+    if(original[name]!=null)anchor.setAttribute(name,original[name])
+  }
+  await clickAnchor(anchor)
+  expect(anchor.getAttribute('target')).toBe('_blank')
+  currentPage={...currentPage,records:[{kind:'flow-message',id:'reused-link',message:{kind:'ai-text',text:'[same record link](/api/sessions/synthetic)'}}]}
+  fireEvent.click(screen.getByRole('button',{name:'刷新到最新'}))
+  await waitFor(()=>expect(screen.getByRole('link',{name:'same record link'}).getAttribute('href')).toBe('/api/sessions/synthetic'))
+  const reused=screen.getByRole('link',{name:'same record link'})
+  expect(reused).toBe(anchor)
+  expect((await clickAnchor(reused)).defaultPrevented).toBe(false)
+  expect(reused.getAttribute('target')).toBe(original.target)
+  expect(reused.getAttribute('rel')).toBe(original.rel)
+})
+
+it('keeps downstream target and rel changes when a previously external anchor is retargeted',async()=>{
+  let currentPage={...page,records:[{kind:'flow-message',id:'reused-downstream',message:{kind:'ai-text',text:'[same record link](https://example.test/review.html)'}}],total:1,next_offset:1}
+  vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>currentPage} as Response)))
+  await mountEmbed('/reader/embed.html?endpoint=/api/sessions/retarget-downstream&session=sess-1')
+  const anchor=await screen.findByRole('link',{name:'same record link'})
+  await clickAnchor(anchor)
+  anchor.setAttribute('target','_top')
+  anchor.setAttribute('rel','alternate')
+  currentPage={...currentPage,records:[{kind:'flow-message',id:'reused-downstream',message:{kind:'ai-text',text:'[same record link](/reader/embed.html)'}}]}
+  fireEvent.click(screen.getByRole('button',{name:'刷新到最新'}))
+  await waitFor(()=>expect(anchor.getAttribute('href')).toBe('/reader/embed.html'))
+  expect(screen.getByRole('link',{name:'same record link'})).toBe(anchor)
+  expect((await clickAnchor(anchor)).defaultPrevented).toBe(false)
+  expect(anchor.getAttribute('target')).toBe('_top')
+  expect(anchor.getAttribute('rel')).toBe('alternate')
 })
 
 it('blocks relative text-file shapes at the real /reader/embed.html base instead of letting them resolve into app routes',async()=>{
