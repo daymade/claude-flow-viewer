@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as R
 import { SessionReader } from './components/session/SessionReader'
 import {normalizeConversationPage as adapt,type ConversationPage as Page} from './lib/reader-page'
 import type { ReaderJumpTarget } from './components/session/SessionView'
+import { bindEmbedEndpoint } from './lib/embed-endpoint'
 import './index.css'
 import './embed.css'
 const CONVERSATION_FILTER = {thinking:false,toolCalls:false,toolResults:false}
@@ -69,7 +70,7 @@ export function ReaderEmbed() {
   // WindowProxy/endpoint, and checked on incoming cfv:focus when present.
   const channel=new URLSearchParams(location.search).get('channel')
   const conversationView=new URLSearchParams(location.search).get('view')==='conversation'
-  const endpoint=raw.startsWith('/api/') && !raw.includes('\\') && !raw.includes('#') ? raw : null
+  const endpoint=bindEmbedEndpoint(raw,location.pathname,location.origin)
   const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(''), [busy,setBusy]=useState(false)
   const [target,setTarget]=useState<ReaderJumpTarget|null>(null)
   const [blockedLink,setBlockedLink]=useState<BlockedLink|null>(null)
