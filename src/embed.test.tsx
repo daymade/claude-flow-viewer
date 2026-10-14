@@ -132,6 +132,24 @@ it('announces readiness with the bound endpoint, expected session and channel',a
   expect(ready).toEqual([{type:'cfv:ready',endpoint:'/api/sessions/t1',session:'sess-1',channel:'ch-1'}])
 })
 
+it('reads and announces the mounted API endpoint and keeps focus bound to that exact prefix',async()=>{
+  const endpoint='/minions/api/sessions/mounted'
+  const fetchMock=stubFetch(),received:unknown[]=[]
+  const receive=(event:MessageEvent)=>received.push(event.data)
+  window.addEventListener('message',receive)
+  await mountEmbed('/minions/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'mounted-channel'}))
+  expect(String(fetchMock.mock.calls[0][0]).startsWith(endpoint+'?')).toBe(true)
+  expect(received.filter(data=>(data as {type?:string}|null)?.type==='cfv:ready')).toEqual([{type:'cfv:ready',endpoint,session:'sess-1',channel:'mounted-channel'}])
+  await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint:'/api/sessions/mounted',channel:'mounted-channel',recordId:'rec-2'})})
+  await flush()
+  expect(anchorCalls(fetchMock,endpoint)).toHaveLength(0)
+  await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint,channel:'mounted-channel',recordId:'rec-2'})})
+  await flush()
+  expect(anchorCalls(fetchMock,endpoint)).toHaveLength(1)
+  expect(ringAt(1)).toContain('ring-1')
+  window.removeEventListener('message',receive)
+})
+
 it('accepts cfv:focus with the matching channel and ignores a stale channel',async()=>{
   const fetchMock=stubFetch()
   await mountEmbed('/?endpoint=/api/sessions/t2&session=sess-1&channel=ch-2')
