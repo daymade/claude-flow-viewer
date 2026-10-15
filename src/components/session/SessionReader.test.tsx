@@ -109,3 +109,17 @@ it('does not reset the internal Find when an identical positional target is re-r
  rerender(<SessionReader data={FOCUS_DATA} activeSearchTarget={{messageIndex:2}}/>)
  expect(ringAt(container,0)).toContain('ring-1')
 })
+
+it('notifies actual Find edits synchronously, including clear, without reporting external navigation as a user edit',()=>{
+ const edits=vi.fn()
+ const {rerender}=render(<SessionReader data={FOCUS_DATA} onFindQueryChange={edits}/>)
+ expect(edits).not.toHaveBeenCalled()
+ for(const value of ['match','','pending']){
+  fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value}})
+  expect(edits).toHaveBeenLastCalledWith(value)
+ }
+ expect(edits).toHaveBeenCalledTimes(3)
+ rerender(<SessionReader data={FOCUS_DATA} onFindQueryChange={edits} activeSearchTarget={{messageIndex:2,requestId:'host-navigation'}}/>)
+ expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('')
+ expect(edits).toHaveBeenCalledTimes(3)
+})

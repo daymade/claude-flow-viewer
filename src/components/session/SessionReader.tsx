@@ -18,9 +18,9 @@ function navigationIdentity(target: ReaderJumpTarget | null): string | null {
     : `pos:${target.messageIndex}:${target.promptNum ?? ''}`
 }
 
-export function SessionReader({ filter: controlledFilter, initialFilter, searchQuery: controlledQuery, onToggleFilter, showToolbar = true, ...props }:
+export function SessionReader({ filter: controlledFilter, initialFilter, searchQuery: controlledQuery, onToggleFilter, onFindQueryChange, showToolbar = true, ...props }:
   Omit<SessionViewProps, 'filter' | 'searchQuery'> & {
-    filter?: FilterState; initialFilter?: Partial<FilterState>; searchQuery?: string; onToggleFilter?: (key: keyof FilterState) => void; showToolbar?: boolean
+    filter?: FilterState; initialFilter?: Partial<FilterState>; searchQuery?: string; onToggleFilter?: (key: keyof FilterState) => void; onFindQueryChange?: (query: string) => void; showToolbar?: boolean
   }) {
   const [filter, setFilter] = useState(() => ({...READER_FILTER, ...initialFilter}))
   const [query, setQuery] = useState('')
@@ -52,7 +52,7 @@ export function SessionReader({ filter: controlledFilter, initialFilter, searchQ
     {showToolbar && <div className="shrink-0 border-b border-stone-200 bg-white px-3 py-2 flex flex-wrap items-center gap-2">
       <SessionToolbar filter={currentFilter} onToggle={key => onToggleFilter ? onToggleFilter(key) : setFilter(old => ({...old,[key]:!old[key]}))} />
       {controlledQuery === undefined && <div className="flex items-center gap-2 w-full text-xs">
-        <input aria-label="Find in conversation" type="search" placeholder="Find in conversation" value={query} onChange={event => {setQuery(event.target.value);setHit(0)}} className="flex-1 min-w-0 border border-stone-200 rounded px-2 py-1" />
+        <input aria-label="Find in conversation" type="search" placeholder="Find in conversation" value={query} onChange={event => {const value=event.target.value;onFindQueryChange?.(value);setQuery(value);setHit(0)}} className="flex-1 min-w-0 border border-stone-200 rounded px-2 py-1" />
         {query && <><span>{matches.length ? hit % matches.length + 1 : 0}/{matches.length}</span><button disabled={!matches.length} onClick={() => setHit(old => old + 1)}>Next</button></>}
       </div>}
     </div>}
