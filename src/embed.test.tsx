@@ -597,3 +597,130 @@ it('keeps the real content scroller and session data stable across the blocked-l
   expect(screen.getByText('刷新后的正文。')).toBeTruthy()
   expect(screen.getByText(/第 1–4 条 \/ 共 4 条/)).toBeTruthy()
 })
+
+function pagingRecord(id:string,text:string,tool=false){
+  return {kind:'flow-message',id,message:tool?{kind:'ai-tool-use',name:'Read',summary:text,input:{}}:{kind:'ai-text',text}}
+}
+const pagingMiddle=Array.from({length:80},(_,index)=>pagingRecord(`middle-${index}`,index===1?'fresh middle match':`middle record ${index}`,index===0))
+const pagingEarlier=Array.from({length:80},(_,index)=>pagingRecord(`earlier-${index}`,index===0?'fresh earlier match':`earlier record ${index}`))
+const pagingLater=[pagingRecord('tail-0','fresh later match'),pagingRecord('tail-1','latest reply')]
+function pagingWindow(offset:number,records:ReturnType<typeof pagingRecord>[]){
+  return {...page,records,total:162,offset,next_offset:offset+records.length,has_earlier:offset>0,has_later:offset+records.length<162}
+}
+function deferredPagingResponse(){
+  let resolve!:(response:Response)=>void
+  const promise=new Promise<Response>(ok=>{resolve=ok})
+  return {promise,resolve}
+}
+const jsonResponse=(value:unknown)=>({ok:true,json:async()=>value}) as Response
+const findInput=()=>screen.getByLabelText('Find in conversation') as HTMLInputElement
+const embedStatus=()=>document.querySelector('.embed-status')?.textContent??''
+async function setupPagingRace(direction:'earlier'|'later',suffix:string){
+  const endpoint=`/api/sessions/find-${direction}-${suffix}`,pending=deferredPagingResponse()
+  const fetchMock=vi.fn(async(input:RequestInfo|URL)=>{
+    const url=new URL(String(input),location.origin),anchor=url.searchParams.get('anchor'),offset=url.searchParams.get('offset')
+    if(anchor==='middle-4')return jsonResponse(pagingWindow(80,pagingMiddle))
+    if(anchor==='tail-1')return jsonResponse(pagingWindow(160,pagingLater))
+    if(offset===(direction==='earlier'?'0':'160'))return pending.promise
+    return jsonResponse(pagingWindow(160,pagingLater))
+  })
+  vi.stubGlobal('fetch',fetchMock)
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',view:'conversation'}))
+  await waitFor(()=>expect(embedStatus()).toMatch(/^第 161–162 条/))
+  await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint,recordId:'middle-4'})})
+  await waitFor(()=>expect(embedStatus()).toMatch(/^第 81–160 条/))
+  expect(ringAt(4)).toContain('ring-1')
+  fireEvent.click(screen.getByRole('button',{name:direction==='earlier'?'加载更早的对话':'继续查看'}))
+  await waitFor(()=>expect(embedStatus()).toMatch(/^读取中 · 第 81–160 条/))
+  return {endpoint,fetchMock,pending,finish:()=>pending.resolve(jsonResponse(direction==='earlier'?pagingWindow(0,pagingEarlier):pagingWindow(160,pagingLater)))}
+}
+
+it.each(['earlier','later'] as const)('preserves newer Find through %s completion and retires the old positional navigation',async(direction)=>{
+  const race=await setupPagingRace(direction,'newer-query'),input=findInput(),calls=race.fetchMock.mock.calls.length
+  fireEvent.change(input,{target:{value:'fresh'}})
+  expect(input.value).toBe('fresh')
+  expect(input.disabled).toBe(false)
+  expect(screen.getByRole('button',{name:'Next'}).hasAttribute('disabled')).toBe(false)
+  expect(race.fetchMock).toHaveBeenCalledTimes(calls)
+  await act(async()=>{race.finish()})
+  await waitFor(()=>expect(embedStatus()).toMatch(direction==='earlier'?/^第 1–160 条/:/^第 81–162 条/))
+  expect(findInput()).toBe(input)
+  expect(input.value).toBe('fresh')
+  expect(screen.getByRole('button',{name:'Next'}).hasAttribute('disabled')).toBe(false)
+  expect(screen.getByText('1/2')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button',{name:'Next'}))
+  const match=document.querySelector('[data-message-index].ring-1')
+  expect(match?.getAttribute('data-source-record-id')).toBe(direction==='earlier'?'middle-1':'tail-0')
+  fireEvent.change(input,{target:{value:''}})
+  expect(document.querySelector('[data-message-index].ring-1')).toBeNull()
+  expect(race.fetchMock).toHaveBeenCalledTimes(calls)
+})
+
+it.each(['earlier','later'] as const)('preserves clear/retype and a newer zero-match Find during %s',async(direction)=>{
+  const race=await setupPagingRace(direction,'clear-retype'),calls=race.fetchMock.mock.calls.length
+  for(const value of ['fresh','','no-match-in-this-window'])fireEvent.change(findInput(),{target:{value}})
+  expect(findInput().value).toBe('no-match-in-this-window')
+  expect(screen.getByRole('button',{name:'Next'}).hasAttribute('disabled')).toBe(true)
+  await act(async()=>{race.finish()})
+  await waitFor(()=>expect(embedStatus()).not.toMatch(/^读取中/))
+  expect(findInput().value).toBe('no-match-in-this-window')
+  expect(screen.getByRole('button',{name:'Next'}).hasAttribute('disabled')).toBe(true)
+  expect(document.querySelector('[data-message-index].ring-1')).toBeNull()
+  fireEvent.change(findInput(),{target:{value:''}})
+  expect(document.querySelector('[data-message-index].ring-1')).toBeNull()
+  expect(race.fetchMock).toHaveBeenCalledTimes(calls)
+})
+
+it.each(['earlier','later'] as const)('retains ordinary %s navigation when no newer nonempty Find owns the read',async(direction)=>{
+  const race=await setupPagingRace(direction,'cleared-query')
+  fireEvent.change(findInput(),{target:{value:'fresh'}})
+  fireEvent.change(findInput(),{target:{value:''}})
+  await act(async()=>{race.finish()})
+  await waitFor(()=>expect(embedStatus()).not.toMatch(/^读取中/))
+  expect(findInput().value).toBe('')
+  expect(ringAt(direction==='earlier'?0:1)).toContain('ring-1')
+})
+
+it('lets explicit host focus invalidate pending pagination and preserves that real target after Find is cleared',async()=>{
+  const race=await setupPagingRace('earlier','host-supersedes')
+  fireEvent.change(findInput(),{target:{value:'fresh'}})
+  await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint:race.endpoint,recordId:'tail-1'})})
+  await waitFor(()=>expect(embedStatus()).toMatch(/^第 161–162 条/))
+  expect(findInput().value).toBe('')
+  expect(ringAt(1)).toContain('ring-1')
+  fireEvent.change(findInput(),{target:{value:'fresh'}})
+  await act(async()=>{race.finish()})
+  expect(embedStatus()).toMatch(/^第 161–162 条/)
+  expect(findInput().value).toBe('fresh')
+  fireEvent.change(findInput(),{target:{value:''}})
+  expect(ringAt(1)).toContain('ring-1')
+})
+
+it('keeps refresh-to-latest as explicit navigation even when Find is edited while its response is pending',async()=>{
+  const endpoint='/api/sessions/find-refresh-explicit',pending=deferredPagingResponse();let latestReads=0
+  vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL)=>{
+    const url=new URL(String(input),location.origin)
+    if(url.searchParams.get('anchor')==='middle-4')return jsonResponse(pagingWindow(80,pagingMiddle))
+    if(++latestReads>1)return pending.promise
+    return jsonResponse(pagingWindow(160,pagingLater))
+  }))
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',view:'conversation'}))
+  await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint,recordId:'middle-4'})})
+  await waitFor(()=>expect(embedStatus()).toMatch(/^第 81–160 条/))
+  fireEvent.click(screen.getByRole('button',{name:'刷新到最新'}))
+  fireEvent.change(findInput(),{target:{value:'fresh'}})
+  await act(async()=>{pending.resolve(jsonResponse(pagingWindow(160,pagingLater)))})
+  await waitFor(()=>expect(embedStatus()).toMatch(/^第 161–162 条/))
+  expect(findInput().value).toBe('')
+  expect(ringAt(1)).toContain('ring-1')
+})
+
+it('does not publish a different session from a pending page or discard the current Find on identity failure',async()=>{
+  const race=await setupPagingRace('earlier','identity-failure')
+  fireEvent.change(findInput(),{target:{value:'fresh'}})
+  await act(async()=>{race.pending.resolve(jsonResponse({...pagingWindow(0,pagingEarlier),session_id:'other-synthetic-session'}))})
+  await waitFor(()=>expect(screen.getByRole('alert').textContent).toContain('Selected session identity changed'))
+  expect(embedStatus()).toMatch(/^第 81–160 条/)
+  expect(findInput().value).toBe('fresh')
+  expect(document.querySelector('[data-source-record-id="earlier-0"]')).toBeNull()
+})

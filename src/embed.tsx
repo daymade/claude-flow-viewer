@@ -120,9 +120,11 @@ export function ReaderEmbed() {
     })
   },[])
   const generation=useRef(0), current=useRef<Page|null>(null), navigationSequence=useRef(0)
+  const findIntent=useRef({version:0,query:''})
+  const recordFindEdit=useCallback((query:string)=>{findIntent.current={version:findIntent.current.version+1,query}},[])
   const read=useCallback(async (mode:string,anchor?:string)=>{
     if (!endpoint) {setError('No bound session endpoint');return}
-    const version=++generation.current, previous=current.current
+    const version=++generation.current, previous=current.current,findVersion=findIntent.current.version
     setBusy(true);setError('')
     const query=new URLSearchParams({limit:'80',offset:mode==='earlier' ? String(Math.max(0,(previous?.offset ?? 0)-80)) : mode==='later' ? String(previous?.next_offset ?? 0) : mode==='first' ? '0' : '-1'})
     if (anchor) query.set('anchor',anchor)
@@ -139,6 +141,11 @@ export function ReaderEmbed() {
       if(previous && ['earlier','later'].includes(mode) && next.session_id!==previous.session_id)throw new Error('Selected session identity changed')
       const merged=mode==='earlier' && previous ? {...next,records:[...next.records,...previous.records],next_offset:previous.next_offset,has_later:previous.has_later} : mode==='later' && previous ? {...next,offset:previous.offset,has_earlier:previous.has_earlier,records:[...previous.records,...next.records]} : next
       current.current=merged;setPage(merged)
+      if(['earlier','later'].includes(mode) && findIntent.current.version!==findVersion && findIntent.current.query){
+        // Prepending changes message indexes; a retired navigation must not revive when Find is cleared.
+        setTarget(null)
+        return
+      }
       const data=adapt(merged)
       let index=anchor ? data.messages.findIndex(message=>message.sourceRecordId===anchor) : mode==='latest' ? data.messages.length-1 : 0
       if(conversationView && !anchor){
@@ -185,7 +192,7 @@ export function ReaderEmbed() {
       </details>
       <button type="button" onClick={()=>setBlockedLink(null)}>关闭</button>
     </div>}
-    {page && data && <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} />}
+    {page && data && <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} onFindQueryChange={recordFindEdit} readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} />}
     {page && <details className="embed-source"><summary>来源与读取边界</summary><p>{page.boundary}</p><p>{page.provider} · {page.session_id} · {new Date(page.read_at).toLocaleString(undefined,{hour12:false})}</p></details>}
   </div>
 }
