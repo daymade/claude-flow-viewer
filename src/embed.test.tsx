@@ -76,6 +76,88 @@ const anchorCalls = (fetchMock:ReturnType<typeof vi.fn>,endpoint:string) =>
   fetchMock.mock.calls.filter(([input])=>String(input).startsWith(endpoint) && String(input).includes('anchor='))
 const ringAt = (index:number) => document.querySelector(`[data-message-index="${index}"]`)?.className ?? ''
 
+const nativeRuntimeId='22222222-2222-4222-8222-222222222222'
+const nativeRuntimeWitness='a'.repeat(64)
+const nativeBinding=`native_runtime_id=${nativeRuntimeId}&native_runtime_witness=${nativeRuntimeWitness}`
+
+it('keeps the mounted runtime binding through reads, paging, refresh, focus and full tool output',async()=>{
+  const path='/minions/api/local/tasks/local-native-synthetic/conversation'
+  const endpoint=`${path}?${nativeBinding}`
+  const received:unknown[]=[]
+  const receive=(event:MessageEvent)=>received.push(event.data)
+  window.addEventListener('message',receive)
+  const middle=Array.from({length:80},(_,index)=>({kind:'flow-message',id:`runtime-${index}`,message:{kind:'ai-text',text:`Bound runtime message ${index}`}}))
+  const output={kind:'flow-message',id:'runtime-output',message:{kind:'tool-result',content:'short output',isError:false,externalFile:'tool-results/full output?x#y.txt',totalSize:'4 B'}}
+  const middlePage={...page,provider:'codex',records:[...middle,output],total:162,offset:80,next_offset:161,has_earlier:true,has_later:true,revision:'bound-revision',until:162}
+  const fetchMock=vi.fn(async(input:RequestInfo|URL)=>{
+    const url=new URL(String(input),location.origin)
+    if(url.pathname.endsWith('/tool-output'))return jsonResponse({content:'FULL BOUND OUTPUT'})
+    if(url.searchParams.get('anchor'))return jsonResponse(middlePage)
+    if(url.searchParams.get('offset')==='0')return jsonResponse({...middlePage,offset:0,next_offset:80,has_earlier:false,records:[{kind:'flow-message',id:'runtime-earlier',message:{kind:'ai-text',text:'Bound earlier message'}}]})
+    if(url.searchParams.get('offset')==='161')return jsonResponse({...middlePage,offset:161,next_offset:162,has_later:false,records:[{kind:'flow-message',id:'runtime-later',message:{kind:'ai-text',text:'Bound later message'}}]})
+    return jsonResponse(middlePage)
+  })
+  vi.stubGlobal('fetch',fetchMock)
+  try{
+    await mountEmbed('/minions/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'runtime-channel'}))
+    await screen.findByText('Bound runtime message 0')
+    expect(received.filter(data=>(data as {type?:string}|null)?.type==='cfv:ready')).toEqual([{type:'cfv:ready',endpoint,session:'sess-1',channel:'runtime-channel'}])
+    expect(new URL(String(fetchMock.mock.calls[0][0]),location.origin).searchParams.get('offset')).toBe('-1')
+
+    for(const [name,text] of [['加载更早的对话','Bound earlier message'],['继续查看','Bound later message'],['从头查看','Bound earlier message'],['刷新到最新','Bound runtime message 0']]){
+      fireEvent.click(screen.getByRole('button',{name}))
+      await screen.findByText(text)
+      await waitFor(()=>expect(screen.getByRole('button',{name:'刷新到最新'}).hasAttribute('disabled')).toBe(false))
+    }
+
+    const beforeFocus=fetchMock.mock.calls.length
+    for(const stale of [path,endpoint.replace(nativeRuntimeWitness,'b'.repeat(64))]){
+      await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint:stale,channel:'runtime-channel',recordId:'runtime-4'})})
+      await flush()
+      expect(fetchMock).toHaveBeenCalledTimes(beforeFocus)
+    }
+    await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint,channel:'runtime-channel',recordId:'runtime-4'})})
+    await waitFor(()=>expect(ringAt(4)).toContain('ring-1'))
+    expect(fetchMock).toHaveBeenCalledTimes(beforeFocus+1)
+    expect(new URL(String(fetchMock.mock.calls.at(-1)![0]),location.origin).searchParams.get('anchor')).toBe('runtime-4')
+
+    const result=screen.getByText('Result').closest('details')!
+    fireEvent.click(result.querySelector('summary')!)
+    fireEvent.click(screen.getByRole('button',{name:'Load full output (4 B)'}))
+    await screen.findByText('FULL BOUND OUTPUT')
+    const requested=fetchMock.mock.calls.map(([input])=>new URL(String(input),location.origin))
+    for(const url of requested){
+      expect(url.origin).toBe(location.origin)
+      expect(url.searchParams.getAll('native_runtime_id')).toEqual([nativeRuntimeId])
+      expect(url.searchParams.getAll('native_runtime_witness')).toEqual([nativeRuntimeWitness])
+      expect(url.pathname).toBe(url===requested.at(-1)?`${path}/tool-output`:path)
+    }
+    const earlier=requested.find(url=>url.searchParams.get('offset')==='0')!
+    expect(earlier.searchParams.get('revision')).toBe('bound-revision')
+    expect(earlier.searchParams.get('until')).toBe('162')
+    expect(requested.at(-1)!.searchParams.get('path')).toBe('tool-results/full output?x#y.txt')
+  }finally{
+    window.removeEventListener('message',receive)
+  }
+})
+
+it.each([
+  `native_runtime_id=${nativeRuntimeId}`,
+  `native_runtime_witness=${nativeRuntimeWitness}`,
+  `native_runtime_id=&native_runtime_witness=${nativeRuntimeWitness}`,
+  `native_runtime_id=null&native_runtime_witness=${nativeRuntimeWitness}`,
+  `native_runtime_id=${nativeRuntimeId}&native_runtime_witness=`,
+  `${nativeBinding}&native_runtime_witness=${nativeRuntimeWitness}`,
+  `${nativeBinding}&offset=0`,
+])('does not fetch or render a mounted endpoint with an invalid runtime binding (%s)',async(query)=>{
+  const fetchMock=stubFetch()
+  const endpoint=`/minions/api/sessions/invalid-runtime?${query}`
+  await mountEmbed('/minions/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1'}))
+  expect(screen.getByRole('alert').textContent).toBe('No bound session endpoint')
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(document.querySelector('[data-session-reader]')).toBeNull()
+})
+
 it.each(['claude','codex'] as const)('starts the %s conversation view with tool streams hidden and keeps toolbar choices through paging and refresh',async(provider)=>{
   const conversationPage={...page,provider,total:86,offset:80,next_offset:85,has_earlier:true,has_later:true,records:[
     {kind:'flow-message',id:'question',message:{kind:'user-prompt',promptNum:1,text:'What changed?',images:[],time:'00:00',decision:'none'}},

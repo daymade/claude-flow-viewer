@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as R
 import { SessionReader } from './components/session/SessionReader'
 import {normalizeConversationPage as adapt,type ConversationPage as Page} from './lib/reader-page'
 import type { ReaderJumpTarget } from './components/session/SessionView'
-import { bindEmbedEndpoint } from './lib/embed-endpoint'
+import { bindEmbedEndpoint, embedRequestUrl } from './lib/embed-endpoint'
 import './index.css'
 import './embed.css'
 const CONVERSATION_FILTER = {thinking:false,toolCalls:false,toolResults:false}
@@ -133,7 +133,7 @@ export function ReaderEmbed() {
       if(previous.until!=null)query.set('until',String(previous.until))
     }
     try {
-      const response=await fetch(endpoint+'?'+query,{credentials:'same-origin'})
+      const response=await fetch(embedRequestUrl(endpoint,query),{credentials:'same-origin'})
       if(!response.ok)throw new Error((await response.text()).slice(0,1000))
       const next:Page=await response.json()
       if(expectedSession && next.session_id!==expectedSession)throw new Error('Selected session identity changed')
@@ -170,7 +170,8 @@ export function ReaderEmbed() {
     return()=>removeEventListener('message',receive)
   },[endpoint,expectedSession,channel,read])
   const readToolResult=useCallback(async (relativePath:string)=>{
-    const response=await fetch(endpoint+'/tool-output?path='+encodeURIComponent(relativePath),{credentials:'same-origin'})
+    if(!endpoint)throw new Error('No bound session endpoint')
+    const response=await fetch(embedRequestUrl(endpoint,new URLSearchParams({path:relativePath}),'/tool-output'),{credentials:'same-origin'})
     if(!response.ok)throw new Error(await response.text())
     const output=await response.json();return String(output.content)
   },[endpoint])
