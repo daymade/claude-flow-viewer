@@ -54,6 +54,52 @@ function scrollWithinReader(container: HTMLDivElement, target: HTMLElement, bloc
   container.scrollTop = Math.max(0, offset - padding)
 }
 
+function revealReaderMatch(container: HTMLDivElement, target: HTMLElement, query: string) {
+  if (!query) return false
+  const needle = query.toLowerCase()
+  const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT)
+  let match: { node: Text; start: number; end: number } | null = null
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = node.textContent ?? ''
+    const offset = text.toLowerCase().indexOf(needle)
+    if (offset < 0) continue
+    // Case folding can change UTF-16 length (İ → i + combining dot).
+    // DOM Range offsets must stay in the original Text node's coordinates.
+    let start = 0, end = 0, folded = 0
+    for (const character of text) {
+      const next = folded + character.toLowerCase().length
+      if (next <= offset) start += character.length
+      end += character.length
+      if (next >= offset + needle.length) break
+      folded = next
+    }
+    // Prefer the complete body over a summary that may be visually truncated.
+    if (!match || !node.parentElement?.closest('summary')) match = { node: node as Text, start, end }
+    if (!node.parentElement?.closest('summary')) break
+  }
+  if (!match) return false
+  for (let parent = match.node.parentElement; parent && target.contains(parent); parent = parent.parentElement) {
+    if (parent instanceof HTMLDetailsElement) parent.open = true
+  }
+  const range = document.createRange()
+  range.setStart(match.node, match.start)
+  range.setEnd(match.node, match.end)
+  if (typeof range.getBoundingClientRect !== 'function') return false
+  // Scroll the original record/tool output's own bounded <pre> first, then
+  // the transcript. Moving only the message wrapper can leave its hit clipped.
+  for (let parent = match.node.parentElement; parent && container.contains(parent); parent = parent.parentElement) {
+    const style = getComputedStyle(parent)
+    const rect = range.getBoundingClientRect(), bounds = parent.getBoundingClientRect()
+    if (parent === container || /auto|scroll/.test(style.overflowY)) {
+      parent.scrollTop += rect.top - bounds.top - Math.max(0, (parent.clientHeight - rect.height) / 2)
+    }
+    if (/auto|scroll/.test(style.overflowX) && parent.scrollWidth > parent.clientWidth) {
+      parent.scrollLeft += rect.left - bounds.left - Math.max(0, (parent.clientWidth - rect.width) / 2)
+    }
+  }
+  return true
+}
+
 export function SessionView({
   data,
   filter,
@@ -172,12 +218,12 @@ export function SessionView({
         ? el.querySelector(`[data-prompt="${activeSearchTarget.promptNum}"]`)
         : el.querySelector(`[data-message-index="${activeSearchTarget.messageIndex}"]`)
       if (target instanceof HTMLElement) {
-        scrollWithinReader(el,target,'center')
+        if (!revealReaderMatch(el,target,searchQuery)) scrollWithinReader(el,target,'center')
       }
     })
 
     return () => cancelAnimationFrame(raf)
-  }, [activeSearchTarget, rendered])
+  }, [activeSearchTarget, rendered, searchQuery])
 
   // IntersectionObserver to track which prompts are visible
   useEffect(() => {

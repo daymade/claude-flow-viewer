@@ -16,9 +16,9 @@
 .reader-filter-panel input{width:16px;height:16px}
 @container (max-width:640px){
  .reader-find-trigger{display:inline-flex;align-items:center}
- .reader-find-panel{position:absolute;top:calc(100% + 4px);left:8px;right:8px;padding:8px;border:1px solid #e7e5e4;border-radius:10px;background:#fff;box-shadow:0 8px 24px #1c19171a}
+ .reader-find-panel{flex-basis:100%}
  .reader-find-panel:not([data-open=true]){display:none}
  .reader-find-panel input{font-size:16px;padding:0 8px}
- .session-reader-toolbar{padding:4px 8px}
+ .session-reader-toolbar{padding:4px 8px;flex-wrap:wrap}
  .reader-filter-panel{left:8px;width:calc(100% - 16px)}
 }
