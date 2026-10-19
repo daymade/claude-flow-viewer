@@ -154,3 +154,26 @@ it('discloses controls without replacing the reader, search, filter choices or s
  expect(screen.getByRole('button',{name:/^Find/}).getAttribute('aria-expanded')).toBe('false')
  expect(document.activeElement).toBe(screen.getByRole('button',{name:/^Find/}))
 })
+
+it('opens the original record for a Find hit hidden by the result filter without altering its source',async()=>{
+ const sourceRecord={type:'commandExecution',command:'cat /synthetic/worker-continuity/input.txt',commandActions:[{command:'cat /synthetic/worker-continuity/input.txt',path:'/synthetic/worker-continuity/input.txt'}],exitCode:0}
+ const data:SessionData={source:'codex',messages:[{kind:'ai-text',text:'Worker prose match'},{kind:'tool-result',content:'Process exited with code 0',isError:false,sourceRecord}],prompts:[],heatmap:[],markers:{compacts:0,plans:0,clears:0,forks:0}}
+ const {container}=render(<SessionReader data={data} initialFilter={{toolResults:false}}/>)
+ const reader=container.querySelector('[data-session-reader]')
+ const scroller=container.querySelector('[data-primary-scroll]') as HTMLElement
+ fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'Worker'}})
+ fireEvent.click(screen.getByRole('button',{name:'Next'}))
+ const native=container.querySelector('[data-message-index="1"] details:last-child') as HTMLDetailsElement
+ await waitFor(()=>expect(native.open).toBe(true))
+ expect(native.querySelector('pre')?.textContent).toBe(JSON.stringify(sourceRecord,null,2))
+ expect(filterCheckbox('Results').checked).toBe(false)
+ scroller.scrollTop=73
+ fireEvent.click(screen.getByRole('button',{name:'Filters'}))
+ fireEvent.click(screen.getByRole('button',{name:/^Find/}))
+ fireEvent.keyDown(document,{key:'Escape'})
+ expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('Worker')
+ expect(native.open).toBe(true)
+ expect(container.querySelector('[data-session-reader]')).toBe(reader)
+ expect(container.querySelector('[data-primary-scroll]')).toBe(scroller)
+ expect(scroller.scrollTop).toBe(73)
+})
