@@ -1,0 +1,24 @@
+[data-session-reader]{container-type:inline-size}
+.session-reader-toolbar{position:relative;z-index:10;display:flex;align-items:center;gap:8px;flex-shrink:0;padding:4px 12px;border-bottom:1px solid #e7e5e4;background:#fff;font-size:12px}
+.session-reader-toolbar button{min-height:44px;padding:0 12px;border:1px solid #e7e5e4;border-radius:8px;background:#fff;color:#44403c;cursor:pointer;white-space:nowrap}
+.session-reader-toolbar button:disabled{opacity:.4;cursor:default}
+.session-reader-toolbar button[aria-expanded=true]{border-color:#d6d3d1;background:#f5f5f4}
+.session-reader-toolbar :is(button,input):focus-visible{outline:2px solid #d97706;outline-offset:2px}
+.reader-find-trigger{display:none}
+.reader-control-count{margin-left:6px;font-variant-numeric:tabular-nums;color:#78716c}
+.reader-find-panel{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.reader-find-panel input{flex:1;min-width:0;min-height:44px;padding:0 12px;border:1px solid #e7e5e4;border-radius:8px;background:#fafaf8;font-size:14px}
+.reader-match-count{font-variant-numeric:tabular-nums;white-space:nowrap;color:#78716c}
+.reader-filter-panel{position:absolute;top:calc(100% + 4px);left:12px;z-index:1;width:min(360px,calc(100% - 24px));max-height:60cqh;overflow:auto;padding:8px;border:1px solid #e7e5e4;border-radius:10px;background:#fff;box-shadow:0 8px 24px #1c19171a}
+.reader-filter-panel[hidden]{display:none}
+.reader-filter-panel>div{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin:0;font-size:12px}
+.reader-filter-panel label{min-height:44px;padding:0 10px}
+.reader-filter-panel input{width:16px;height:16px}
+@container (max-width:640px){
+ .reader-find-trigger{display:inline-flex;align-items:center}
+ .reader-find-panel{position:absolute;top:calc(100% + 4px);left:8px;right:8px;padding:8px;border:1px solid #e7e5e4;border-radius:10px;background:#fff;box-shadow:0 8px 24px #1c19171a}
+ .reader-find-panel:not([data-open=true]){display:none}
+ .reader-find-panel input{font-size:16px;padding:0 8px}
+ .session-reader-toolbar{padding:4px 8px}
+ .reader-filter-panel{left:8px;width:calc(100% - 16px)}
+}

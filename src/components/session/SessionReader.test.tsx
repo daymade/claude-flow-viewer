@@ -4,18 +4,24 @@ import {render,screen,fireEvent,cleanup,waitFor} from '@testing-library/react'
 import {SessionReader} from './SessionReader'
 import type {SessionData} from '../../types/session'
 afterEach(cleanup)
+function filterCheckbox(name:string) {
+ const trigger=screen.getByRole('button',{name:'Filters'})
+ if(trigger.getAttribute('aria-expanded')!=='true')fireEvent.click(trigger)
+ return screen.getByRole('checkbox',{name}) as HTMLInputElement
+}
+
 Object.assign(globalThis,{ResizeObserver:class{observe(){} disconnect(){}},IntersectionObserver:class{observe(){} disconnect(){}}})
 HTMLElement.prototype.scrollIntoView=vi.fn()
 it('seeds only the initial filter and preserves toolbar choices when data or the seed changes',()=>{
  const data:SessionData={source:'claude',messages:[{kind:'ai-text',text:'visible reply'},{kind:'ai-tool-use',name:'Read',summary:'read fixture',input:{}},{kind:'tool-result',content:'fixture output',isError:false}],prompts:[],heatmap:[],markers:{compacts:0,plans:0,clears:0,forks:0}}
  const {rerender}=render(<SessionReader data={data} initialFilter={{toolCalls:false,toolResults:false}}/>)
- const checked=(label:string)=>(screen.getByRole('checkbox',{name:label}) as HTMLInputElement).checked
+ const checked=(label:string)=>(filterCheckbox(label) as HTMLInputElement).checked
  expect(checked('Thinking')).toBe(false)
  expect(checked('Tool Calls')).toBe(false)
  expect(checked('Results')).toBe(false)
  for(const label of ['AI Text','Team','Branches','Markers','Timeline'])expect(checked(label)).toBe(true)
  expect(screen.queryByText('fixture output')).toBeNull()
- fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+ fireEvent.click(filterCheckbox('Results'))
  expect(screen.getByText('fixture output')).toBeTruthy()
  rerender(<SessionReader data={{...data,messages:[...data.messages,{kind:'ai-text',text:'new page'}]}} initialFilter={{toolCalls:true,toolResults:false}}/>)
  expect(checked('Tool Calls')).toBe(false)
@@ -122,4 +128,29 @@ it('notifies actual Find edits synchronously, including clear, without reporting
  rerender(<SessionReader data={FOCUS_DATA} onFindQueryChange={edits} activeSearchTarget={{messageIndex:2,requestId:'host-navigation'}}/>)
  expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('')
  expect(edits).toHaveBeenCalledTimes(3)
+})
+
+it('discloses controls without replacing the reader, search, filter choices or scroll position',()=>{
+ const {container}=render(<SessionReader data={FOCUS_DATA}/>)
+ const reader=container.querySelector('[data-session-reader]')
+ const scroller=container.querySelector('[data-primary-scroll]') as HTMLElement
+ const input=screen.getByLabelText('Find in conversation') as HTMLInputElement
+ fireEvent.change(input,{target:{value:'match'}})
+ fireEvent.click(screen.getByRole('button',{name:/^Find/}))
+ const filter=filterCheckbox('Thinking')
+ fireEvent.click(filter)
+ scroller.scrollTop=73
+ for(let i=0;i<2;i++){
+  fireEvent.click(screen.getByRole('button',{name:'Filters'}))
+  fireEvent.click(screen.getByRole('button',{name:/^Find/}))
+ }
+ expect(container.querySelector('[data-session-reader]')).toBe(reader)
+ expect(container.querySelector('[data-primary-scroll]')).toBe(scroller)
+ expect(screen.getByLabelText('Find in conversation')).toBe(input)
+ expect(input.value).toBe('match')
+ expect(filter.checked).toBe(true)
+ expect(scroller.scrollTop).toBe(73)
+ fireEvent.keyDown(document,{key:'Escape'})
+ expect(screen.getByRole('button',{name:/^Find/}).getAttribute('aria-expanded')).toBe('false')
+ expect(document.activeElement).toBe(screen.getByRole('button',{name:/^Find/}))
 })
