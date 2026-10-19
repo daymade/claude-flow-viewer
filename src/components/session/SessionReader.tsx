@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { SessionView, type SessionViewProps, type ReaderJumpTarget } from './SessionView'
 import { SessionToolbar } from './SessionToolbar'
 import type { FilterState } from '../../types/session'
@@ -19,9 +19,9 @@ function navigationIdentity(target: ReaderJumpTarget | null): string | null {
     : `pos:${target.messageIndex}:${target.promptNum ?? ''}`
 }
 
-export function SessionReader({ filter: controlledFilter, initialFilter, searchQuery: controlledQuery, onToggleFilter, onFindQueryChange, showToolbar = true, ...props }:
+export function SessionReader({ filter: controlledFilter, initialFilter, searchQuery: controlledQuery, onToggleFilter, onFindQueryChange, showToolbar = true, toolbarLeading, toolbarTrailing, ...props }:
   Omit<SessionViewProps, 'filter' | 'searchQuery'> & {
-    filter?: FilterState; initialFilter?: Partial<FilterState>; searchQuery?: string; onToggleFilter?: (key: keyof FilterState) => void; onFindQueryChange?: (query: string) => void; showToolbar?: boolean
+    filter?: FilterState; initialFilter?: Partial<FilterState>; searchQuery?: string; onToggleFilter?: (key: keyof FilterState) => void; onFindQueryChange?: (query: string) => void; showToolbar?: boolean; toolbarLeading?: ReactNode; toolbarTrailing?: ReactNode
   }) {
   const [filter, setFilter] = useState(() => ({...READER_FILTER, ...initialFilter}))
   const [query, setQuery] = useState('')
@@ -31,12 +31,24 @@ export function SessionReader({ filter: controlledFilter, initialFilter, searchQ
   const findRef = useRef<HTMLInputElement>(null)
   const filterButtonRef = useRef<HTMLButtonElement>(null)
   const findButtonRef = useRef<HTMLButtonElement>(null)
+  const findPanelRef = useRef<HTMLDivElement>(null)
+  const filterPanelRef = useRef<HTMLDivElement>(null)
   const toolbarId = useId()
+  const closeDisclosures = () => {
+    toolbarRef.current?.querySelectorAll('details[open]').forEach(details => details.removeAttribute('open'))
+  }
+  const togglePanel = (next: 'find' | 'filters') => {
+    closeDisclosures()
+    setPanel(old => old === next ? null : next)
+  }
   useEffect(() => {
     if (!panel) return
     if (panel === 'find') findRef.current?.focus()
     const dismiss = (event: PointerEvent) => {
-      if (event.target instanceof Node && !toolbarRef.current?.contains(event.target)) setPanel(null)
+      if (!(event.target instanceof Node)) return
+      const activePanel = panel === 'find' ? findPanelRef : filterPanelRef
+      const trigger = panel === 'find' ? findButtonRef : filterButtonRef
+      if (!activePanel.current?.contains(event.target) && !trigger.current?.contains(event.target)) setPanel(null)
     }
     const escape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
@@ -76,16 +88,20 @@ export function SessionReader({ filter: controlledFilter, initialFilter, searchQ
     return matches.length ? {messageIndex:matches[hit % matches.length]} : null
   }, [controlledQuery, currentQuery, matches, hit, externalTarget])
   return <div className="flex min-h-0 flex-1 flex-col" data-session-reader="claude-flow-viewer">
-    {showToolbar && <div className="session-reader-toolbar" ref={toolbarRef} data-export-remove>
-      {controlledQuery === undefined && <button ref={findButtonRef} type="button" className="reader-find-trigger" aria-expanded={panel === 'find'} aria-controls={`${toolbarId}-find`} onClick={() => setPanel(old => old === 'find' ? null : 'find')}>Find{query && <span className="reader-control-count">{matches.length}</span>}</button>}
-      <button ref={filterButtonRef} type="button" className="reader-filter-trigger" aria-expanded={panel === 'filters'} aria-controls={`${toolbarId}-filters`} onClick={() => setPanel(old => old === 'filters' ? null : 'filters')}>Filters</button>
-      <div id={`${toolbarId}-filters`} className="reader-filter-panel" hidden={panel !== 'filters'}>
+    {showToolbar && <div className="session-reader-toolbar" ref={toolbarRef} data-export-remove onClickCapture={event => {
+      if (event.target instanceof Element && event.target.closest('summary')) setPanel(null)
+    }}>
+      {toolbarLeading}
+      {controlledQuery === undefined && <button ref={findButtonRef} type="button" className="reader-find-trigger" aria-expanded={panel === 'find'} aria-controls={`${toolbarId}-find`} onClick={() => togglePanel('find')}>Find{query && <span className="reader-control-count">{matches.length}</span>}</button>}
+      <button ref={filterButtonRef} type="button" className="reader-filter-trigger" aria-expanded={panel === 'filters'} aria-controls={`${toolbarId}-filters`} onClick={() => togglePanel('filters')}>Filters</button>
+      <div ref={filterPanelRef} id={`${toolbarId}-filters`} className="reader-filter-panel" hidden={panel !== 'filters'}>
         <SessionToolbar filter={currentFilter} onToggle={key => onToggleFilter ? onToggleFilter(key) : setFilter(old => ({...old,[key]:!old[key]}))} />
       </div>
-      {controlledQuery === undefined && <div id={`${toolbarId}-find`} className="reader-find-panel" data-open={panel === 'find'}>
-        <input ref={findRef} aria-label="Find in conversation" type="search" placeholder="Find in conversation" value={query} onChange={event => {const value=event.target.value;onFindQueryChange?.(value);setQuery(value);setHit(0)}} />
+      {controlledQuery === undefined && <div ref={findPanelRef} id={`${toolbarId}-find`} className="reader-find-panel" data-open={panel === 'find'}>
+        <input ref={findRef} aria-label="Find in conversation" type="search" placeholder="Find in conversation" value={query} onFocus={closeDisclosures} onChange={event => {const value=event.target.value;onFindQueryChange?.(value);setQuery(value);setHit(0)}} />
         {query && <><span className="reader-match-count">{matches.length ? hit % matches.length + 1 : 0}/{matches.length}</span><button type="button" disabled={!matches.length} onClick={() => setHit(old => old + 1)}>Next</button></>}
       </div>}
+      {toolbarTrailing}
     </div>}
     <SessionView {...props} filter={currentFilter} searchQuery={currentQuery} activeSearchTarget={target} />
   </div>
