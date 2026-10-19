@@ -156,7 +156,7 @@ it('discloses controls without replacing the reader, search, filter choices or s
 })
 
 it('opens the original record for a Find hit hidden by the result filter without altering its source',async()=>{
- const sourceRecord={type:'commandExecution',command:'cat /synthetic/worker-continuity/input.txt',commandActions:[{command:'cat /synthetic/worker-continuity/input.txt',path:'/synthetic/worker-continuity/input.txt'}],exitCode:0}
+ const sourceRecord={type:'commandExecution',command:'cat /synthetic/worker-fixture/input.txt',commandActions:[{command:'cat /synthetic/worker-fixture/input.txt',path:'/synthetic/worker-fixture/input.txt'}],exitCode:0}
  const data:SessionData={source:'codex',messages:[{kind:'ai-text',text:'Worker prose match'},{kind:'tool-result',content:'Process exited with code 0',isError:false,sourceRecord}],prompts:[],heatmap:[],markers:{compacts:0,plans:0,clears:0,forks:0}}
  const {container}=render(<SessionReader data={data} initialFilter={{toolResults:false}}/>)
  const reader=container.querySelector('[data-session-reader]')

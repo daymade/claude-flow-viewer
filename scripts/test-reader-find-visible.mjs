@@ -10,10 +10,10 @@ const root=resolve(process.argv[2]??resolve(project,'dist-reader/web'))
 const out=process.argv[3]??resolve(tmpdir(),`reader-find-${Date.now()}`)
 await mkdir(out,{recursive:true})
 const padding=Array.from({length:100},(_,i)=>`Unrelated line ${i}`).join('\n')
-const command='cat /synthetic/worker-continuity/input.txt'
+const command='cat /synthetic/worker-fixture/input.txt'
 const nativeRecord=process.env.READER_FIND_NATIVE_RECORD
  ? JSON.parse(await readFile(process.env.READER_FIND_NATIVE_RECORD,'utf8'))
- : {type:'commandExecution',padding,command,commandActions:[{command,path:'/synthetic/worker-continuity/input.txt'}]}
+ : {type:'commandExecution',padding,command,commandActions:[{command,path:'/synthetic/worker-fixture/input.txt'}]}
 const records=[
  {kind:'flow-message',id:'prose',message:{kind:'ai-text',text:'Worker visible conversation text.'}},
  {kind:'flow-message',id:'native-result',message:{kind:'tool-result',content:'Process exited with code 0',isError:false,sourceRecord:nativeRecord}},
