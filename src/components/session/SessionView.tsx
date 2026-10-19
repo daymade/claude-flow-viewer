@@ -58,12 +58,23 @@ function revealReaderMatch(container: HTMLDivElement, target: HTMLElement, query
   if (!query) return false
   const needle = query.toLowerCase()
   const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT)
-  let match: { node: Text; offset: number } | null = null
+  let match: { node: Text; start: number; end: number } | null = null
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    const offset = node.textContent?.toLowerCase().indexOf(needle) ?? -1
+    const text = node.textContent ?? ''
+    const offset = text.toLowerCase().indexOf(needle)
     if (offset < 0) continue
+    // Case folding can change UTF-16 length (İ → i + combining dot).
+    // DOM Range offsets must stay in the original Text node's coordinates.
+    let start = 0, end = 0, folded = 0
+    for (const character of text) {
+      const next = folded + character.toLowerCase().length
+      if (next <= offset) start += character.length
+      end += character.length
+      if (next >= offset + needle.length) break
+      folded = next
+    }
     // Prefer the complete body over a summary that may be visually truncated.
-    if (!match || !node.parentElement?.closest('summary')) match = { node: node as Text, offset }
+    if (!match || !node.parentElement?.closest('summary')) match = { node: node as Text, start, end }
     if (!node.parentElement?.closest('summary')) break
   }
   if (!match) return false
@@ -71,8 +82,8 @@ function revealReaderMatch(container: HTMLDivElement, target: HTMLElement, query
     if (parent instanceof HTMLDetailsElement) parent.open = true
   }
   const range = document.createRange()
-  range.setStart(match.node, match.offset)
-  range.setEnd(match.node, match.offset + query.length)
+  range.setStart(match.node, match.start)
+  range.setEnd(match.node, match.end)
   if (typeof range.getBoundingClientRect !== 'function') return false
   // Scroll the original record/tool output's own bounded <pre> first, then
   // the transcript. Moving only the message wrapper can leave its hit clipped.
