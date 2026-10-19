@@ -177,3 +177,34 @@ it('opens the original record for a Find hit hidden by the result filter without
  expect(container.querySelector('[data-primary-scroll]')).toBe(scroller)
  expect(scroller.scrollTop).toBe(73)
 })
+
+it('keeps toolbar slots and Find in one reader while switching between their disclosures',()=>{
+ const slots=()=>({toolbarLeading:<details data-leading><summary>History slot</summary><button>Earlier slot</button></details>,toolbarTrailing:<details data-trailing><summary>Source slot</summary><p>Bound source</p></details>})
+ const {container,rerender}=render(<SessionReader data={FOCUS_DATA} {...slots()}/>)
+ const reader=container.querySelector('[data-session-reader]')
+ const scroller=container.querySelector('[data-primary-scroll]') as HTMLElement
+ const leading=container.querySelector('[data-leading]') as HTMLDetailsElement
+ const trailing=container.querySelector('[data-trailing]') as HTMLDetailsElement
+ fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'match'}})
+ fireEvent.click(screen.getByRole('button',{name:/^Find/}))
+ fireEvent.click(screen.getByText('History slot'))
+ expect(screen.getByRole('button',{name:/^Find/}).getAttribute('aria-expanded')).toBe('false')
+ leading.open=true
+ fireEvent.click(screen.getByRole('button',{name:'Filters'}))
+ expect(leading.open).toBe(false)
+ expect(filterCheckbox('Thinking').checked).toBe(false)
+ trailing.open=true
+ fireEvent.click(screen.getByRole('button',{name:/^Find/}))
+ expect(trailing.open).toBe(false)
+ trailing.open=true
+ fireEvent.focus(screen.getByLabelText('Find in conversation'))
+ expect(trailing.open).toBe(false)
+ scroller.scrollTop=73
+ rerender(<SessionReader data={FOCUS_DATA} {...slots()}/>)
+ expect(container.querySelector('[data-leading]')).toBe(leading)
+ expect(container.querySelector('[data-trailing]')).toBe(trailing)
+ expect(container.querySelector('[data-session-reader]')).toBe(reader)
+ expect(container.querySelector('[data-primary-scroll]')).toBe(scroller)
+ expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('match')
+ expect(scroller.scrollTop).toBe(73)
+})

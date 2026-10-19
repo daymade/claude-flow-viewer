@@ -86,6 +86,24 @@ const nativeRuntimeId='22222222-2222-4222-8222-222222222222'
 const nativeRuntimeWitness='a'.repeat(64)
 const nativeBinding=`native_runtime_id=${nativeRuntimeId}&native_runtime_witness=${nativeRuntimeWitness}`
 
+it('keeps a history recovery action available after the initial read fails',async()=>{
+ let reads=0
+ vi.stubGlobal('fetch',vi.fn(async()=>++reads===1
+  ? {ok:false,text:async()=>'Synthetic initial read failure'} as Response
+  : {ok:true,json:async()=>page} as Response))
+ await mountEmbed('/reader/embed.html?endpoint=/api/sessions/initial-recovery&session=sess-1')
+ expect(await screen.findByRole('alert')).toHaveProperty('textContent','Synthetic initial read failure')
+ expect(document.querySelector('[data-session-reader]')).toBeNull()
+ fireEvent.click(screen.getByText('历史'))
+ fireEvent.click(screen.getByRole('button',{name:'刷新到最新'}))
+ expect(await screen.findByText('first message')).toBeTruthy()
+ expect(document.querySelector('[data-session-reader]')).not.toBeNull()
+ expect(screen.queryByRole('alert')).toBeNull()
+ expect(document.querySelectorAll('.session-reader-toolbar')).toHaveLength(1)
+ expect(document.querySelector('.session-reader-toolbar .embed-history')).not.toBeNull()
+ expect(document.querySelector('.session-reader-toolbar .embed-source')).not.toBeNull()
+})
+
 it('keeps the mounted runtime binding through reads, paging, refresh, focus and full tool output',async()=>{
   const path='/minions/api/local/tasks/local-native-synthetic/conversation'
   const endpoint=`${path}?${nativeBinding}`
@@ -656,7 +674,7 @@ it('keeps the real content scroller and session data stable across the blocked-l
   expect(adaptSpy.calls[adaptSpy.calls.length-1].data.messages).toBe(dataBefore.messages)
 
   // Folding the sources panel is pure UI too.
-  fireEvent.click(screen.getByText('来源与读取边界'))
+  fireEvent.click(screen.getByLabelText('来源与读取边界'))
   expect(writes).toEqual([])
   expect(adaptSpy.calls.length).toBe(adaptCallsBefore)
 

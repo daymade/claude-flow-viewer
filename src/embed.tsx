@@ -75,12 +75,16 @@ export function ReaderEmbed() {
   const [target,setTarget]=useState<ReaderJumpTarget|null>(null)
   const [blockedLink,setBlockedLink]=useState<BlockedLink|null>(null)
   const historyRef=useRef<HTMLDetailsElement>(null)
+  const sourceRef=useRef<HTMLDetailsElement>(null)
   useEffect(()=>{
     const dismiss=(event:PointerEvent)=>{
-      if(event.target instanceof Node && !historyRef.current?.contains(event.target))historyRef.current?.removeAttribute('open')
+      if(!(event.target instanceof Node))return
+      for(const ref of [historyRef,sourceRef])if(!ref.current?.contains(event.target))ref.current?.removeAttribute('open')
     }
     const escape=(event:KeyboardEvent)=>{
-      if(event.key==='Escape' && historyRef.current?.open){historyRef.current.open=false;historyRef.current.querySelector('summary')?.focus()}
+      if(event.key!=='Escape')return
+      const open=[historyRef,sourceRef].find(ref=>ref.current?.open)?.current
+      if(open){event.preventDefault();event.stopPropagation();open.open=false;open.querySelector('summary')?.focus()}
     }
     document.addEventListener('pointerdown',dismiss)
     document.addEventListener('keydown',escape)
@@ -187,16 +191,21 @@ export function ReaderEmbed() {
     if(!response.ok)throw new Error(await response.text())
     const output=await response.json();return String(output.content)
   },[endpoint])
-  return <div className="reader-embed" onClickCapture={captureLinkClick}>
-    <header className="embed-navigation"><strong>Claude Flow Viewer</strong>
-      <div className="embed-status" role="status">{busy?'读取中 · ':''}{page ? `第 ${page.total ? page.offset+1 : 0}–${page.next_offset} 条 / 共 ${page.total} 条 · 搜索已加载范围` : '正在读取绑定会话…'}</div>
-      <details className="embed-history" ref={historyRef}><summary>历史</summary><div className="embed-history-actions" onClick={event=>{if(event.target instanceof HTMLButtonElement)historyRef.current?.removeAttribute('open')}}>
+  const closeOtherDisclosure=(open:HTMLDetailsElement)=>{
+    if(!open.open)return
+    for(const ref of [historyRef,sourceRef])if(ref.current!==open)ref.current?.removeAttribute('open')
+  }
+  const historyControls=<details className="embed-history embed-disclosure" ref={historyRef} onToggle={event=>closeOtherDisclosure(event.currentTarget)}><summary>历史</summary><div className="embed-history-actions" onClick={event=>{if(event.target instanceof HTMLButtonElement)historyRef.current?.removeAttribute('open')}}>
       <button disabled={busy} onClick={()=>void read('first')}>从头查看</button>
       <button disabled={busy || !page?.has_earlier} onClick={()=>void read('earlier')}>加载更早的对话</button>
       <button disabled={busy || !page?.has_later} onClick={()=>void read('later')}>继续查看</button>
       <button disabled={busy} onClick={()=>void read('latest')}>刷新到最新</button>
       </div></details>
-    </header>
+  const sourceControls=page && <details className="embed-source embed-disclosure" ref={sourceRef} onToggle={event=>closeOtherDisclosure(event.currentTarget)}><summary aria-label="来源与读取边界">来源</summary><div className="embed-source-content">
+    <div className="embed-status" role="status">{busy?'读取中 · ':''}{`第 ${page.total ? page.offset+1 : 0}–${page.next_offset} 条 / 共 ${page.total} 条 · 搜索已加载范围`}</div>
+    <p>{page.boundary}</p><p>{page.provider} · {page.session_id} · {new Date(page.read_at).toLocaleString(undefined,{hour12:false})}</p>
+  </div></details>
+  return <div className="reader-embed" onClickCapture={captureLinkClick} aria-busy={busy}>
     {error && <p role="alert" className="embed-error">{error}</p>}
     {blockedLink && <div className="embed-link-notice" role="status">
       <span>{blockedLink.label}：{blockedLink.kind==='file' ? '本地文件引用未绑定预览。' : '该引用未绑定预览。'}</span>
@@ -207,8 +216,7 @@ export function ReaderEmbed() {
       </details>
       <button type="button" onClick={()=>setBlockedLink(null)}>关闭</button>
     </div>}
-    {page && data && <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} onFindQueryChange={recordFindEdit} readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} />}
-    {page && <details className="embed-source"><summary>来源与读取边界</summary><p>{page.boundary}</p><p>{page.provider} · {page.session_id} · {new Date(page.read_at).toLocaleString(undefined,{hour12:false})}</p></details>}
+    {page && data ? <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} onFindQueryChange={recordFindEdit} readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} toolbarLeading={historyControls} toolbarTrailing={sourceControls} /> : <div className="session-reader-toolbar">{historyControls}{busy && <span className="embed-status" role="status">正在读取绑定会话…</span>}</div>}
   </div>
 }
 createRoot(document.getElementById('root')!).render(<ReaderEmbed />)
