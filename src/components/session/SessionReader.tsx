@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { SessionView, type SessionViewProps, type ReaderJumpTarget } from './SessionView'
 import { SessionToolbar } from './SessionToolbar'
 import type { FilterState } from '../../types/session'
+import './SessionReader.css'
 
 const READER_FILTER: FilterState = {thinking:false,toolCalls:true,toolResults:true,aiText:true,team:true,branches:true,markers:true,timeline:true}
 
@@ -25,6 +26,32 @@ export function SessionReader({ filter: controlledFilter, initialFilter, searchQ
   const [filter, setFilter] = useState(() => ({...READER_FILTER, ...initialFilter}))
   const [query, setQuery] = useState('')
   const [hit, setHit] = useState(0)
+  const [panel, setPanel] = useState<'find' | 'filters' | null>(null)
+  const toolbarRef = useRef<HTMLDivElement>(null)
+  const findRef = useRef<HTMLInputElement>(null)
+  const filterButtonRef = useRef<HTMLButtonElement>(null)
+  const findButtonRef = useRef<HTMLButtonElement>(null)
+  const toolbarId = useId()
+  useEffect(() => {
+    if (!panel) return
+    if (panel === 'find') findRef.current?.focus()
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !toolbarRef.current?.contains(event.target)) setPanel(null)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      setPanel(null)
+      ;(panel === 'find' ? findButtonRef : filterButtonRef).current?.focus()
+    }
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [panel])
   const currentFilter = controlledFilter ?? filter
   const currentQuery = controlledQuery ?? query
   const externalTarget = props.activeSearchTarget ?? null
@@ -49,11 +76,15 @@ export function SessionReader({ filter: controlledFilter, initialFilter, searchQ
     return matches.length ? {messageIndex:matches[hit % matches.length]} : null
   }, [controlledQuery, currentQuery, matches, hit, externalTarget])
   return <div className="flex min-h-0 flex-1 flex-col" data-session-reader="claude-flow-viewer">
-    {showToolbar && <div className="shrink-0 border-b border-stone-200 bg-white px-3 py-2 flex flex-wrap items-center gap-2">
-      <SessionToolbar filter={currentFilter} onToggle={key => onToggleFilter ? onToggleFilter(key) : setFilter(old => ({...old,[key]:!old[key]}))} />
-      {controlledQuery === undefined && <div className="flex items-center gap-2 w-full text-xs">
-        <input aria-label="Find in conversation" type="search" placeholder="Find in conversation" value={query} onChange={event => {const value=event.target.value;onFindQueryChange?.(value);setQuery(value);setHit(0)}} className="flex-1 min-w-0 border border-stone-200 rounded px-2 py-1" />
-        {query && <><span>{matches.length ? hit % matches.length + 1 : 0}/{matches.length}</span><button disabled={!matches.length} onClick={() => setHit(old => old + 1)}>Next</button></>}
+    {showToolbar && <div className="session-reader-toolbar" ref={toolbarRef} data-export-remove>
+      {controlledQuery === undefined && <button ref={findButtonRef} type="button" className="reader-find-trigger" aria-expanded={panel === 'find'} aria-controls={`${toolbarId}-find`} onClick={() => setPanel(old => old === 'find' ? null : 'find')}>Find{query && <span className="reader-control-count">{matches.length}</span>}</button>}
+      <button ref={filterButtonRef} type="button" className="reader-filter-trigger" aria-expanded={panel === 'filters'} aria-controls={`${toolbarId}-filters`} onClick={() => setPanel(old => old === 'filters' ? null : 'filters')}>Filters</button>
+      <div id={`${toolbarId}-filters`} className="reader-filter-panel" hidden={panel !== 'filters'}>
+        <SessionToolbar filter={currentFilter} onToggle={key => onToggleFilter ? onToggleFilter(key) : setFilter(old => ({...old,[key]:!old[key]}))} />
+      </div>
+      {controlledQuery === undefined && <div id={`${toolbarId}-find`} className="reader-find-panel" data-open={panel === 'find'}>
+        <input ref={findRef} aria-label="Find in conversation" type="search" placeholder="Find in conversation" value={query} onChange={event => {const value=event.target.value;onFindQueryChange?.(value);setQuery(value);setHit(0)}} />
+        {query && <><span className="reader-match-count">{matches.length ? hit % matches.length + 1 : 0}/{matches.length}</span><button type="button" disabled={!matches.length} onClick={() => setHit(old => old + 1)}>Next</button></>}
       </div>}
     </div>}
     <SessionView {...props} filter={currentFilter} searchQuery={currentQuery} activeSearchTarget={target} />

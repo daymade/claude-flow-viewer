@@ -49,6 +49,12 @@ const page={
   read_at:'2026-10-05T00:00:00Z',boundary:'synthetic test boundary',
 }
 
+function filterCheckbox(name:string) {
+ const trigger=screen.getByRole('button',{name:'Filters'})
+ if(trigger.getAttribute('aria-expanded')!=='true')fireEvent.click(trigger)
+ return screen.getByRole('checkbox',{name}) as HTMLInputElement
+}
+
 function stubFetch() {
   const fetchMock=vi.fn(async (input:RequestInfo|URL)=>{
     const url=String(input)
@@ -172,14 +178,14 @@ it.each(['claude','codex'] as const)('starts the %s conversation view with tool 
     return {ok:true,json:async()=>next} as Response
   }))
   await mountEmbed(`/?endpoint=/api/sessions/conversation-${provider}&session=sess-1&view=conversation`)
-  const checked=(label:string)=>(screen.getByRole('checkbox',{name:label}) as HTMLInputElement).checked
+  const checked=(label:string)=>(filterCheckbox(label) as HTMLInputElement).checked
   for(const label of ['Thinking','Tool Calls','Results'])expect(checked(label)).toBe(false)
   for(const label of ['AI Text','Team','Branches','Markers','Timeline'])expect(checked(label)).toBe(true)
   expect(screen.getAllByText('What changed?').length).toBeGreaterThan(0)
   expect(screen.getByText('The change is ready.')).toBeTruthy()
   expect(screen.queryByText('fixture tool output')).toBeNull()
   expect(ringAt(3)).toContain('ring-1')
-  fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+  fireEvent.click(filterCheckbox('Results'))
   expect(screen.getByText('fixture tool output')).toBeTruthy()
   for(const name of ['加载更早的对话','继续查看','从头查看','刷新到最新']){
     fireEvent.click(screen.getByRole('button',{name}))
@@ -188,7 +194,7 @@ it.each(['claude','codex'] as const)('starts the %s conversation view with tool 
     expect(checked('Tool Calls')).toBe(false)
   }
   expect(ringAt(3)).toContain('ring-1')
-  fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+  fireEvent.click(filterCheckbox('Results'))
   expect(screen.queryByText('fixture tool output')).toBeNull()
   await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint:`/api/sessions/conversation-${provider}`,recordId:'output'})})
   await flush()
@@ -199,9 +205,9 @@ it.each(['claude','codex'] as const)('starts the %s conversation view with tool 
 it.each(['','&view=unknown'])('preserves the legacy embed filter when no conversation view is selected (%s)',async(view)=>{
   stubFetch()
   await mountEmbed(`/?endpoint=/api/sessions/legacy-${view ? 'unknown' : 'default'}&session=sess-1${view}`)
-  expect((screen.getByRole('checkbox',{name:'Thinking'}) as HTMLInputElement).checked).toBe(false)
+  expect((filterCheckbox('Thinking') as HTMLInputElement).checked).toBe(false)
   for(const label of ['Tool Calls','Results','AI Text','Team','Branches','Markers','Timeline']){
-    expect((screen.getByRole('checkbox',{name:label}) as HTMLInputElement).checked).toBe(true)
+    expect((filterCheckbox(label) as HTMLInputElement).checked).toBe(true)
   }
 })
 
@@ -333,7 +339,7 @@ it('blocks a confirmed local file link without remounting the reader, resetting 
   const readerNode=document.querySelector('[data-session-reader]')
   const scroller=document.querySelector('[data-primary-scroll]') as HTMLElement
   scroller.scrollTop=123
-  fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+  fireEvent.click(filterCheckbox('Results'))
   fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'讨论'}})
   expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
   const callsBefore=fetchMock.mock.calls.length
@@ -344,7 +350,7 @@ it('blocks a confirmed local file link without remounting the reader, resetting 
   // Same mounted reader node, same scroll, filter, Find and loaded range.
   expect(document.querySelector('[data-session-reader]')).toBe(readerNode)
   expect(scroller.scrollTop).toBe(123)
-  expect((screen.getByRole('checkbox',{name:'Results'}) as HTMLInputElement).checked).toBe(false)
+  expect((filterCheckbox('Results') as HTMLInputElement).checked).toBe(false)
   expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('讨论')
   expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
   // No refetch of the session and never a fetch of the referenced file.
@@ -436,7 +442,7 @@ it('opens web links outside the embed while preserving the mounted reader and re
   const anchor=await screen.findByRole('link',{name:'外部文档'})
   const readerNode=document.querySelector('[data-session-reader]')
   const scroller=document.querySelector('[data-export-primary]') as HTMLElement
-  fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+  fireEvent.click(filterCheckbox('Results'))
   fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'讨论'}})
   scroller.scrollTop=123
   const callsBefore=fetchMock.mock.calls.length
@@ -453,7 +459,7 @@ it('opens web links outside the embed while preserving the mounted reader and re
     expect(document.querySelector('[data-session-reader]')).toBe(readerNode)
     expect(scroller.scrollTop).toBe(123)
   }
-  expect((screen.getByRole('checkbox',{name:'Results'}) as HTMLInputElement).checked).toBe(false)
+  expect((filterCheckbox('Results') as HTMLInputElement).checked).toBe(false)
   expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('讨论')
   expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
   expect(fetchMock.mock.calls.length).toBe(callsBefore)
@@ -524,7 +530,7 @@ it('blocks relative text-file shapes at the real /reader/embed.html base instead
   const readerNode=document.querySelector('[data-session-reader]')
   const scroller=document.querySelector('[data-primary-scroll]') as HTMLElement
   scroller.scrollTop=77
-  fireEvent.click(screen.getByRole('checkbox',{name:'Results'}))
+  fireEvent.click(filterCheckbox('Results'))
   fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'相对'}})
   expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
   const callsBefore=fetchMock.mock.calls.length
@@ -552,7 +558,7 @@ it('blocks relative text-file shapes at the real /reader/embed.html base instead
   // click; blocking never refetches the session or reads the referenced file.
   expect(document.querySelector('[data-session-reader]')).toBe(readerNode)
   expect(scroller.scrollTop).toBe(77)
-  expect((screen.getByRole('checkbox',{name:'Results'}) as HTMLInputElement).checked).toBe(false)
+  expect((filterCheckbox('Results') as HTMLInputElement).checked).toBe(false)
   expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('相对')
   expect(screen.getByText(/第 1–6 条 \/ 共 6 条/)).toBeTruthy()
   expect(fetchMock.mock.calls.length).toBe(callsBefore)
