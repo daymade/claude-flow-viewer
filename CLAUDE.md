@@ -135,6 +135,8 @@ to a full parse, so published output always equals a full parse. Contract tests 
 `src/lib/providers/claude-incremental.test.ts` and `scripts/test-incremental-cli.mjs`.
 Older state versions fall back to full parsing so frozen messages acquire the current provenance fields.
 
+When changing the shared Reader export or its packaging, run `npm run build:reader`; source and iframe tests do not exercise the built component API. See README's Embedded Reader section for the package contract.
+
 ### Session Markers (`SessionMarkers` in `src/types/session.ts`)
 
 Counts of special events in a session: `{ compacts, plans, clears, forks }`.
