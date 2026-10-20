@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import {afterEach,it,expect,vi} from 'vitest'
 import {act} from 'react'
-import {cleanup,fireEvent,screen,waitFor} from '@testing-library/react'
+import {cleanup,fireEvent,screen,waitFor,within} from '@testing-library/react'
 
 // Records every adapt(page) call the embed makes, so tests can prove a pure
 // UI re-render never rebuilds the SessionData/messages behind the real reader.
@@ -829,4 +829,114 @@ it('does not publish a different session from a pending page or discard the curr
   expect(embedStatus()).toMatch(/^第 81–160 条/)
   expect(findInput().value).toBe('fresh')
   expect(document.querySelector('[data-source-record-id="earlier-0"]')).toBeNull()
+})
+
+// ─── Empty-range and fully-filtered guidance ───
+//
+// A native tail of reasoning/commandExecution/subAgentActivity records under
+// view=conversation (thinking/toolCalls/results off) yields zero genuinely
+// rendered transcript nodes. That is not "no data": the guidance must say the
+// filter hides everything and offer ways out, while a truly empty read range
+// gets a distinct message. All fixtures are synthetic ids/text.
+
+const nativeTailRecords=Array.from({length:80},(_,index)=>{
+  if(index%3===0)return {id:`tail-${index}`,ordinal:index,item:{type:'reasoning',content:`synthetic reasoning ${index}`,summary:''}}
+  if(index%3===1)return {id:`tail-${index}`,ordinal:index,item:{type:'commandExecution',command:`run synthetic-step-${index}`,aggregatedOutput:`synthetic output ${index}`,exitCode:0}}
+  return {id:`tail-${index}`,ordinal:index,item:{type:'subAgentActivity',agent:`synthetic-agent-${index}`,status:'running'}}
+})
+const nativeTailPage={
+  provider:'codex',session_id:'sess-1',records:nativeTailRecords,
+  total:160,offset:80,next_offset:160,has_earlier:true,has_later:false,
+  read_at:'2026-10-05T00:00:00Z',boundary:'synthetic test boundary',
+}
+const emptyActions=()=>within(document.querySelector('.reader-empty-actions') as HTMLElement)
+
+it('guides through an entirely filtered 80-record native tail: adjust filters reveals existing output, loading earlier issues once and shows the returned body',async()=>{
+  const earlierRecords=[
+    {id:'earlier-0',ordinal:0,item:{type:'userMessage',content:'synthetic earlier question'}},
+    {id:'earlier-1',ordinal:1,item:{type:'agentMessage',text:'synthetic earlier answer body'}},
+  ]
+  const fetchMock=vi.fn(async(input:RequestInfo|URL)=>{
+    const url=new URL(String(input),location.origin)
+    if(url.searchParams.get('offset')==='0')return jsonResponse({...nativeTailPage,offset:0,next_offset:80,has_earlier:false,records:earlierRecords})
+    return jsonResponse(nativeTailPage)
+  })
+  vi.stubGlobal('fetch',fetchMock)
+  const endpoint='/api/sessions/native-tail'
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',view:'conversation'}))
+
+  // Nonempty loaded range, zero genuinely rendered records: guidance, not a bare toolbar.
+  expect(await screen.findByText('当前筛选没有可见记录')).toBeTruthy()
+  expect(screen.queryByText('当前读取范围没有记录')).toBeNull()
+  expect(document.querySelectorAll('[data-message-index]')).toHaveLength(0)
+  // The loaded-range status still reports the real window: filtered-empty ≠ session empty.
+  expect(screen.getByText(/第 81–160 条 \/ 共 160 条/)).toBeTruthy()
+  expect(emptyActions().getByRole('button',{name:'加载更早的对话'})).toBeTruthy()
+
+  // 调整筛选 opens the existing Filters panel without toggling any filter;
+  // enabling Results reveals the tool output already in the loaded window.
+  fireEvent.click(screen.getByRole('button',{name:'调整筛选'}))
+  expect(screen.getByRole('button',{name:'Filters'}).getAttribute('aria-expanded')).toBe('true')
+  expect(filterCheckbox('Tool Calls').checked).toBe(false)
+  expect(filterCheckbox('Results').checked).toBe(false)
+  fireEvent.click(filterCheckbox('Results'))
+  expect(screen.getByText('synthetic output 1')).toBeTruthy()
+  expect(screen.queryByText('当前筛选没有可见记录')).toBeNull()
+
+  // Back to the filtered-empty state, then load earlier from the guidance:
+  // exactly one normal earlier request, and the returned original body renders.
+  fireEvent.click(filterCheckbox('Results'))
+  expect(await screen.findByText('当前筛选没有可见记录')).toBeTruthy()
+  const callsBefore=fetchMock.mock.calls.length
+  fireEvent.click(emptyActions().getByRole('button',{name:'加载更早的对话'}))
+  expect(await screen.findByText('synthetic earlier answer body')).toBeTruthy()
+  expect(fetchMock.mock.calls.length).toBe(callsBefore+1)
+  const earlierUrl=new URL(String(fetchMock.mock.calls.at(-1)![0]),location.origin)
+  expect(earlierUrl.searchParams.get('offset')).toBe('0')
+  expect(screen.getAllByText('synthetic earlier question').length).toBeGreaterThan(0)
+  expect(screen.queryByText('当前筛选没有可见记录')).toBeNull()
+  // The merge has no earlier pages left, so the empty-state slot is retired too.
+  expect(document.querySelector('.reader-empty-actions')).toBeNull()
+})
+
+it('renders an explicitly focused record from an otherwise fully filtered native tail',async()=>{
+  const fetchMock=vi.fn(async()=>jsonResponse(nativeTailPage))
+  vi.stubGlobal('fetch',fetchMock)
+  const endpoint='/api/sessions/native-tail-focus'
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',view:'conversation'}))
+  expect(await screen.findByText('当前筛选没有可见记录')).toBeTruthy()
+
+  // tail-1 is a commandExecution record: hidden by the conversation filter, but
+  // explicit host focus must render it through the focus bypass.
+  await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint,recordId:'tail-1'})})
+  await flush()
+  expect(screen.queryByText('当前筛选没有可见记录')).toBeNull()
+  expect(document.querySelectorAll('[data-message-index]')).toHaveLength(1)
+  expect(ringAt(1)).toContain('ring-1')
+  expect(screen.getByText('run synthetic-step-1')).toBeTruthy()
+})
+
+it('shows a distinct zero-records message and never displays success-empty while a read is in flight',async()=>{
+  const pending=deferredPagingResponse()
+  let reads=0
+  const fetchMock=vi.fn(async()=>++reads===1
+    ? jsonResponse({...page,records:[],total:0,offset:0,next_offset:0})
+    : pending.promise)
+  vi.stubGlobal('fetch',fetchMock)
+  await mountEmbed('/reader/embed.html?endpoint=/api/sessions/empty-range&session=sess-1')
+
+  // A completed read with zero records is distinct from the filtered state.
+  expect(await screen.findByText('当前读取范围没有记录')).toBeTruthy()
+  expect(screen.queryByText('当前筛选没有可见记录')).toBeNull()
+  expect(document.querySelector('.reader-empty-actions')).toBeNull()
+
+  // While the refresh is in flight the success-empty guidance is suspended.
+  fireEvent.click(screen.getByRole('button',{name:'刷新到最新'}))
+  await waitFor(()=>expect(screen.queryByText('当前读取范围没有记录')).toBeNull())
+  expect(screen.queryByText('当前筛选没有可见记录')).toBeNull()
+
+  // The returned body renders once the read completes.
+  await act(async()=>{pending.resolve(jsonResponse({...page,records:[{kind:'flow-message',id:'returned-1',message:{kind:'ai-text',text:'returned original body'}}],total:1,offset:0,next_offset:1}))})
+  expect(await screen.findByText('returned original body')).toBeTruthy()
+  expect(screen.queryByText('当前读取范围没有记录')).toBeNull()
 })

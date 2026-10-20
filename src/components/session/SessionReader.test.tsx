@@ -208,3 +208,58 @@ it('keeps toolbar slots and Find in one reader while switching between their dis
  expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('match')
  expect(scroller.scrollTop).toBe(73)
 })
+
+const EMPTY_MARKERS={compacts:0,plans:0,clears:0,forks:0}
+
+it('guides through a 3+ tool group that is entirely filtered out, and adjusting filters reveals the existing output',()=>{
+ // A grouped run of tool calls is the case where the render array holds a
+ // ToolGroup element that itself returns null: guidance must come from
+ // genuinely rendered nodes, not from the array looking nonempty.
+ const data:SessionData={source:'claude',messages:[
+  {kind:'ai-tool-use',name:'Read',summary:'read synthetic a',input:{}},
+  {kind:'tool-result',content:'synthetic group output',isError:false},
+  {kind:'ai-tool-use',name:'Edit',summary:'edit synthetic b',input:{}},
+  {kind:'tool-result',content:'edit synthetic ok',isError:false},
+  {kind:'ai-tool-use',name:'Bash',summary:'run synthetic c',input:{}},
+ ],prompts:[],heatmap:[],markers:EMPTY_MARKERS}
+ render(<SessionReader data={data} initialFilter={{toolCalls:false,toolResults:false}}/>)
+ expect(screen.queryByText(/tool calls/)).toBeNull()
+ expect(screen.getByText('当前筛选没有可见记录')).toBeTruthy()
+ expect(screen.queryByText('当前读取范围没有记录')).toBeNull()
+
+ // 调整筛选 opens the existing Filters panel without toggling any filter.
+ expect(screen.getByRole('button',{name:'Filters'}).getAttribute('aria-expanded')).toBe('false')
+ fireEvent.click(screen.getByRole('button',{name:'调整筛选'}))
+ expect(screen.getByRole('button',{name:'Filters'}).getAttribute('aria-expanded')).toBe('true')
+ expect(filterCheckbox('Thinking').checked).toBe(false)
+ expect(filterCheckbox('Tool Calls').checked).toBe(false)
+ expect(filterCheckbox('Results').checked).toBe(false)
+
+ // Enabling a filter reveals the existing tool output and retires the guidance.
+ fireEvent.click(filterCheckbox('Results'))
+ expect(screen.getByText('synthetic group output')).toBeTruthy()
+ expect(screen.queryByText('当前筛选没有可见记录')).toBeNull()
+})
+
+it('distinguishes zero loaded records from a fully filtered body and renders the host action slot',()=>{
+ const data:SessionData={source:'codex',messages:[],prompts:[],heatmap:[],markers:EMPTY_MARKERS}
+ const {rerender}=render(<SessionReader data={data} emptyStateAction={<button type="button">加载更早的对话</button>}/>)
+ expect(screen.getByText('当前读取范围没有记录')).toBeTruthy()
+ expect(screen.queryByText('当前筛选没有可见记录')).toBeNull()
+ expect(screen.getByRole('button',{name:'加载更早的对话'})).toBeTruthy()
+ // 调整筛选 belongs to the filtered state only: with zero records there is nothing to reveal.
+ expect(screen.queryByRole('button',{name:'调整筛选'})).toBeNull()
+
+ // A read still in flight is not success-empty: no guidance while pending.
+ rerender(<SessionReader data={data} pending emptyStateAction={<button type="button">加载更早的对话</button>}/>)
+ expect(screen.queryByText('当前读取范围没有记录')).toBeNull()
+ expect(screen.queryByText('当前筛选没有可见记录')).toBeNull()
+})
+
+it('keeps the healthy body free of empty-state guidance',()=>{
+ const data:SessionData={source:'claude',messages:[{kind:'user-prompt',promptNum:1,text:'synthetic question',images:[],time:'00:00',decision:'none'},{kind:'ai-text',text:'ordinary reply'}],prompts:[{num:1,preview:'synthetic question',fullText:'synthetic question',time:'00:00',decision:'none'}],heatmap:[0],markers:EMPTY_MARKERS}
+ render(<SessionReader data={data}/>)
+ expect(screen.getByText('ordinary reply')).toBeTruthy()
+ expect(screen.queryByText('当前筛选没有可见记录')).toBeNull()
+ expect(screen.queryByText('当前读取范围没有记录')).toBeNull()
+})

@@ -19,9 +19,11 @@ function navigationIdentity(target: ReaderJumpTarget | null): string | null {
     : `pos:${target.messageIndex}:${target.promptNum ?? ''}`
 }
 
-export function SessionReader({ filter: controlledFilter, initialFilter, searchQuery: controlledQuery, onToggleFilter, onFindQueryChange, showToolbar = true, toolbarLeading, toolbarTrailing, ...props }:
+export function SessionReader({ filter: controlledFilter, initialFilter, searchQuery: controlledQuery, onToggleFilter, onFindQueryChange, showToolbar = true, toolbarLeading, toolbarTrailing, emptyStateAction = null, ...props }:
   Omit<SessionViewProps, 'filter' | 'searchQuery'> & {
     filter?: FilterState; initialFilter?: Partial<FilterState>; searchQuery?: string; onToggleFilter?: (key: keyof FilterState) => void; onFindQueryChange?: (query: string) => void; showToolbar?: boolean; toolbarLeading?: ReactNode; toolbarTrailing?: ReactNode
+    /** Optional host action rendered inside the empty-state guidance (e.g. load earlier). Unset by default. */
+    emptyStateAction?: ReactNode
   }) {
   const [filter, setFilter] = useState(() => ({...READER_FILTER, ...initialFilter}))
   const [query, setQuery] = useState('')
@@ -40,6 +42,11 @@ export function SessionReader({ filter: controlledFilter, initialFilter, searchQ
   const togglePanel = (next: 'find' | 'filters') => {
     closeDisclosures()
     setPanel(old => old === next ? null : next)
+  }
+  // 调整筛选 opens the existing Filters panel; it never toggles any filter.
+  const openFilters = () => {
+    closeDisclosures()
+    setPanel('filters')
   }
   useEffect(() => {
     if (!panel) return
@@ -103,6 +110,15 @@ export function SessionReader({ filter: controlledFilter, initialFilter, searchQ
       </div>}
       {toolbarTrailing}
     </div>}
-    <SessionView {...props} filter={currentFilter} searchQuery={currentQuery} activeSearchTarget={target} />
+    <SessionView
+      {...props}
+      filter={currentFilter}
+      searchQuery={currentQuery}
+      activeSearchTarget={target}
+      filteredEmptyActions={showToolbar || emptyStateAction
+        ? <>{showToolbar && <button type="button" className="reader-empty-action" onClick={openFilters}>调整筛选</button>}{emptyStateAction}</>
+        : null}
+      rangeEmptyActions={emptyStateAction}
+    />
   </div>
 }

@@ -46,6 +46,12 @@ export interface SessionViewProps {
   readToolResult?: ReadToolResult | null
   /** Semantic identity of the session resource behind `readToolResult`. */
   resourceScope?: string | null
+  /** Optional actions rendered with the fully-filtered guidance (e.g. adjust filters, load earlier). */
+  filteredEmptyActions?: React.ReactNode
+  /** Optional actions rendered with the zero-loaded-records guidance. */
+  rangeEmptyActions?: React.ReactNode
+  /** Suppresses empty-state guidance while a read is still in flight. */
+  pending?: boolean
 }
 
 function scrollWithinReader(container: HTMLDivElement, target: HTMLElement, block: 'start' | 'center') {
@@ -111,6 +117,9 @@ export function SessionView({
   readerMode = false,
   readToolResult = null,
   resourceScope = null,
+  filteredEmptyActions = null,
+  rangeEmptyActions = null,
+  pending = false,
 }: SessionViewProps) {
   const contentRef = useRef<HTMLDivElement>(null)
   const resourcesValue = useMemo<SessionResourcesValue | null>(
@@ -141,6 +150,15 @@ export function SessionView({
     () => renderMessages(data.messages, filter, searchQuery, activeSearchTarget?.messageIndex ?? null, readerMode),
     [activeSearchTarget?.messageIndex, data.messages, filter, readerMode, searchQuery],
   )
+
+  // Emptiness is determined from genuinely rendered nodes: renderMessages only
+  // returns nodes that produce visible output, so a nonempty loaded window with
+  // zero entries is entirely filtered, not empty. A read still in flight shows
+  // neither guidance — pending and failure states stay distinct from
+  // success-empty.
+  const emptyKind = pending || rendered.length > 0
+    ? null
+    : data.messages.length > 0 ? 'filtered' : 'range'
 
   const timelineEvents = useMemo(
     () => extractTimelineEvents(data.messages),
@@ -268,6 +286,14 @@ export function SessionView({
         {header}
         <div className="py-6 px-4 max-w-4xl mx-auto sm:py-8 sm:px-8">
           {rendered}
+          {emptyKind && (
+            <div className="reader-empty-state" role="status" data-empty-state={emptyKind}>
+              <p>{emptyKind === 'filtered' ? '当前筛选没有可见记录' : '当前读取范围没有记录'}</p>
+              {(emptyKind === 'filtered' ? filteredEmptyActions : rangeEmptyActions) && (
+                <div className="reader-empty-actions">{emptyKind === 'filtered' ? filteredEmptyActions : rangeEmptyActions}</div>
+              )}
+            </div>
+          )}
         </div>
       </div>
       {showPromptIndex && (
@@ -417,14 +443,23 @@ function renderMessages(
       const toolCalls = group.filter(m => m.kind === 'ai-tool-use')
       // Group if 3+ tool calls; otherwise render individually
       if (toolCalls.length >= 3) {
-        nodes.push(<ToolGroup key={`tg-${i}`} messages={group} filter={filter} />)
+        // The group's own visibility condition is applied before adding it, so
+        // rendering and visibility stay one logic path: the returned array only
+        // ever holds nodes that genuinely render, and emptiness can be read
+        // from it directly (an element that later returns null would look
+        // truthy here while producing no visible output).
+        if (toolGroupVisible(filter)) {
+          nodes.push(<ToolGroup key={`tg-${i}`} messages={group} filter={filter} />)
+        }
       } else {
         for (let j = 0; j < group.length; j++) {
-          nodes.push(renderAnchoredMessage(group[j], groupStart + j, filter, searchQuery, highlightedMessageIndex, `t-${i}-${j}`, readerMode))
+          const node = renderAnchoredMessage(group[j], groupStart + j, filter, searchQuery, highlightedMessageIndex, `t-${i}-${j}`, readerMode)
+          if (node) nodes.push(node)
         }
       }
     } else {
-      nodes.push(renderAnchoredMessage(msg, i, filter, searchQuery, highlightedMessageIndex, i, readerMode))
+      const node = renderAnchoredMessage(msg, i, filter, searchQuery, highlightedMessageIndex, i, readerMode)
+      if (node) nodes.push(node)
       i++
     }
   }
@@ -464,12 +499,21 @@ function SourceRecordDetails({msg}:{msg:SessionMessage}) {
 
 // ─── Tool Group (collapsed consecutive tool calls) ───
 
+/**
+ * A tool group renders only when at least one tool stream is enabled. This is
+ * the single visibility condition: renderMessages applies it before adding a
+ * group, and ToolGroup keeps it as its own guard.
+ */
+function toolGroupVisible(filter: FilterState) {
+  return filter.toolCalls || filter.toolResults
+}
+
 function ToolGroup({ messages, filter }: { messages: SessionMessage[]; filter: FilterState }) {
   const toolCalls = messages.filter(m => m.kind === 'ai-tool-use') as Extract<SessionMessage, { kind: 'ai-tool-use' }>[]
   const results = messages.filter(m => m.kind === 'tool-result') as Extract<SessionMessage, { kind: 'tool-result' }>[]
   const errorCount = results.filter(r => r.isError).length
 
-  if (!filter.toolCalls && !filter.toolResults) return null
+  if (!toolGroupVisible(filter)) return null
 
   const names = toolCalls.slice(0, 4).map(t => t.name)
   const namesSummary = names.join(', ') + (toolCalls.length > 4 ? ` +${toolCalls.length - 4}` : '')
