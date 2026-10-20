@@ -38,7 +38,7 @@ npm run build
 
 ### Embedded Reader
 
-`npm run build:reader` builds the shared Reader package, including `embed.html`.
+`npm run build:reader` builds the shared Reader package, including `embed.html`, and verifies that its public React component export renders without a global React namespace.
 
 无query的 `endpoint` 保持原合同；带query时，仅允许字面两键 `native_runtime_id`（小写十六进制完整 `8-4-4-4-12` UUID，不限制version/variant）与 `native_runtime_witness`（64位小写十六进制）各一次、任意顺序完整配对，拒收缺失、空值、重复、其他键、编码键名或值、尾部分隔符、fragment及原有同源／挂载／路径逃逸违规。完整原始endpoint参与 `cfv:ready`、`cfv:focus` 与资源身份绑定，分页、刷新、anchor、tool-output请求均保留这对参数，`cfv:focus` 携带的endpoint与绑定值不完全一致时拒收且不触发读取。
 
