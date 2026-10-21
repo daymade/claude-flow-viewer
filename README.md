@@ -123,7 +123,7 @@ src/
 
 ### Session Files
 
-The viewer supports three local source layouts:
+The viewer supports these local source layouts:
 
 - Claude Code: `~/.claude/projects/{project}/{session}.jsonl`
 - Codex: `~/.codex/sessions/**/*.jsonl` plus optional `~/.codex/session_index.jsonl`
