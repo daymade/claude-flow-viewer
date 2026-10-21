@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import {afterEach,it,expect,vi} from 'vitest'
-import {render,screen,fireEvent,cleanup,waitFor} from '@testing-library/react'
+import {act,render,screen,fireEvent,cleanup,waitFor} from '@testing-library/react'
 import {SessionReader} from './SessionReader'
 import type {SessionData} from '../../types/session'
 afterEach(cleanup)
@@ -65,6 +65,79 @@ it('keeps search navigation inside its reader and exposes the start of an oversi
 
 const FOCUS_DATA:SessionData={source:'claude',messages:[{kind:'ai-text',text:'match first'},{kind:'ai-text',text:'unrelated'},{kind:'ai-text',text:'match pending question'}],prompts:[],heatmap:[],markers:{compacts:0,plans:0,clears:0,forks:0}}
 const ringAt=(container:HTMLElement,index:number)=>container.querySelector(`[data-message-index="${index}"]`)?.className ?? ''
+
+it('shows the host Find scope on real input focus with an empty query and no open Find panel',()=>{
+ const {container}=render(<SessionReader data={FOCUS_DATA} findScopeLabel="仅搜索已加载范围" toolbarTrailing={<details open><summary>Source fixture</summary><p>Bound source</p></details>}/>)
+ const input=screen.getByLabelText('Find in conversation') as HTMLInputElement
+ const scope=screen.getByText('仅搜索已加载范围')
+ const scroller=container.querySelector('[data-primary-scroll]') as HTMLElement
+ scroller.scrollTop=73
+ expect(scope.hidden).toBe(true)
+ expect(screen.getByRole('button',{name:'Find'}).getAttribute('aria-expanded')).toBe('false')
+ act(()=>input.focus())
+ expect(document.activeElement).toBe(input)
+ expect(scope.hidden).toBe(false)
+ expect(input.getAttribute('aria-describedby')).toBe(scope.id)
+ expect(container.querySelector('details')?.open).toBe(false)
+ expect(input.value).toBe('')
+ expect(screen.queryByText('0/0')).toBeNull()
+ expect(container.querySelector('[data-primary-scroll]')).toBe(scroller)
+ expect(scroller.scrollTop).toBe(73)
+})
+
+it('keeps a nonempty Find scope outside the collapsed panel used by narrow containers',()=>{
+ const {container}=render(<SessionReader data={FOCUS_DATA} findScopeLabel="仅搜索已加载范围"/>)
+ const input=screen.getByLabelText('Find in conversation') as HTMLInputElement
+ fireEvent.click(screen.getByRole('button',{name:'Find'}))
+ fireEvent.change(input,{target:{value:'match'}})
+ fireEvent.click(screen.getByRole('button',{name:'Next'}))
+ expect(screen.getByText('2/2')).toBeTruthy()
+ const scroller=container.querySelector('[data-primary-scroll]') as HTMLElement
+ scroller.scrollTop=73
+ fireEvent.click(screen.getByRole('button',{name:/^Find/}))
+ act(()=>input.blur())
+ const panel=input.closest('.reader-find-panel')!
+ const scope=screen.getByText('仅搜索已加载范围')
+ expect(panel.getAttribute('data-open')).toBe('false')
+ // Container-query painting is checked in the built iframe, not by jsdom.
+ // The scope must escape the existing narrow-container hidden panel.
+ expect(panel.contains(scope)).toBe(false)
+ expect(scope.hidden).toBe(false)
+ expect(input.value).toBe('match')
+ expect(ringAt(container,2)).toContain('ring-1')
+ expect(container.querySelector('[data-primary-scroll]')).toBe(scroller)
+ expect(scroller.scrollTop).toBe(73)
+})
+
+it('retires the Find scope after clearing and leaving the input, but retains it while focused',()=>{
+ render(<SessionReader data={FOCUS_DATA} findScopeLabel="仅搜索已加载范围"/>)
+ const input=screen.getByLabelText('Find in conversation') as HTMLInputElement
+ const scope=screen.getByText('仅搜索已加载范围')
+ fireEvent.change(input,{target:{value:'missing text'}})
+ expect(screen.getByText('0/0')).toBeTruthy()
+ expect(scope.hidden).toBe(false)
+ act(()=>input.focus())
+ fireEvent.change(input,{target:{value:''}})
+ expect(scope.hidden).toBe(false)
+ expect(screen.queryByText('0/0')).toBeNull()
+ act(()=>input.blur())
+ expect(scope.hidden).toBe(true)
+})
+
+it('leaves ordinary and controlled hosts free of an undeclared internal Find scope',()=>{
+ const {container,rerender}=render(<SessionReader data={FOCUS_DATA}/>)
+ const input=screen.getByLabelText('Find in conversation') as HTMLInputElement
+ act(()=>input.focus())
+ fireEvent.change(input,{target:{value:'match'}})
+ fireEvent.click(screen.getByRole('button',{name:'Next'}))
+ expect(ringAt(container,2)).toContain('ring-1')
+ expect(input.getAttribute('aria-describedby')).toBeNull()
+ expect(container.querySelector('.reader-find-scope')).toBeNull()
+ rerender(<SessionReader data={FOCUS_DATA} searchQuery="match" activeSearchTarget={{messageIndex:2}} findScopeLabel="External search scope"/>)
+ expect(screen.queryByLabelText('Find in conversation')).toBeNull()
+ expect(screen.queryByText('External search scope')).toBeNull()
+ expect(ringAt(container,2)).toContain('ring-1')
+})
 
 it('lets a new external target override the internal Find, and Find + Next still work afterwards',()=>{
  const {container,rerender}=render(<SessionReader data={FOCUS_DATA}/>)

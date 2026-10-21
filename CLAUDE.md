@@ -26,6 +26,7 @@ npx vitest run src/components/sidebar/Sidebar.test.tsx
 ## Local Runtime
 
 - Embed conversation view is opt-in via `view=conversation`. Seed filters and handle filtered/empty/pending transcript guidance in the shared `SessionReader`/`SessionView`; keep the standard viewer and unspecified embed defaults unchanged. The behavior and host action contract are in README's Embedded Reader section.
+- Declare the embed's loaded-window Find scope through `SessionReader`'s optional `findScopeLabel`; keep the shared component responsible for its focus/collapse visibility contract in README's Embedded Reader section.
 - Bind embed endpoints to the same-origin `/api/` namespace under the actual `/reader/embed.html` mount prefix; preserve the exact raw endpoint, including only README's permitted runtime-id/witness query pair, in `cfv:ready`, `cfv:focus`, and resource identities, retain the pair in paging/refresh/anchor/tool-output URLs, and reject `cfv:focus` messages without reading when their endpoint does not exactly match the bound endpoint.
 - The embed shell (`src/embed.tsx`) captures transcript anchor clicks so local file references never navigate the iframe: the host does not serve them, and navigation would replace the mounted reader with a browser error page. Host `/api`/`/reader` routes keep default behavior only when explicitly written (root-relative `/…` or absolute same-origin http(s)); a plain relative path is never promoted into an app route by the `/reader/embed.html` base. Other explicit http(s) and protocol-relative web links open a new tab with `noopener noreferrer`, preserving the mounted reader. Blocking never reads the referenced file. Handle this in the embed shell, not in the shared message renderers; the classification contract and notice wording are documented in README's Embedded Reader section.
 - The embed binds parsed session data to the page's identity (`useMemo` on `page`): pure UI notifications (blocked-link notice open/close, folded sources) re-render without rebuilding `SessionData`/`messages`, so they never re-fire the reader's `[activeSearchTarget, rendered]` scroll positioning on the real content scroller or disturb an active Find/host focus. Refresh and paging publish a new page object and rebuild the data.
@@ -48,7 +49,7 @@ npx vitest run src/components/sidebar/Sidebar.test.tsx
 ~/Library/Application Support/CherryStudio*/Data/agents.db
 ~/Library/Application Support/CherryStudio*/IndexedDB/**
     ↓
-FileStore (3 implementations, source-aware)
+FileStore (source-aware)
     ↓
 parser.ts: source detection + dispatch
     ↓
@@ -62,7 +63,7 @@ AppShell active session wrapper → [data-export-primary] / [data-export-live] �
 
 ### FileStore Abstraction (`src/lib/fs-access.ts`)
 
-Three implementations behind one `FileStore` interface, tried in order:
+Implementations behind one `FileStore` interface, tried in order:
 1. **APIFileStore** — Dev mode: Vite server plugin (`vite-plugin-claude-data.ts`) serves source-aware endpoints for `~/.claude` and `~/.codex`
 2. **FSAccessStore** — Production: File System Access API (`showDirectoryPicker`), user picks home directory, `.claude`, or `.codex`
 3. **InputFallbackStore** — Drag-and-drop file input fallback
@@ -141,7 +142,7 @@ When changing the shared Reader export or its packaging, run `npm run build:read
 
 Counts of special events in a session: `{ compacts, plans, clears, forks }`.
 
-**Two-tier collection**:
+**Collection stages**:
 1. **Scan-time** (API mode, Claude only): Vite plugin counts `compacts`, `plans`, `clears` via regex on raw file content. `forks` is always 0 (requires tree analysis).
 2. **Parse-time**: `parseSessionContent()` computes exact counts from parsed messages, including `forks`, and is the only marker source for Codex sessions. The `LOAD_SESSION` reducer writes these back to `SessionMeta` in the project list.
 
@@ -217,7 +218,7 @@ Current behavior is intentionally local-only:
 
 ### Right Rail: Prompt Outline + Timeline
 
-The right rail carries **two complementary navigators**. They are NOT redundant — keep both:
+The right rail carries **complementary navigators**. They are NOT redundant — keep both:
 
 - **`PromptOutline`** (in `SessionView.tsx`, `lg:` and up, 232px) — an Obsidian-style vertical table of contents. One row per user prompt: `#num` + time + a 2-line clamped preview. Click jumps to that prompt; hover opens a `HoverCard` (placement `left`) with the full text; prompts currently in the viewport are highlighted amber (from `activePromptNums`, driven by the `IntersectionObserver`).
   - This **replaced the old sticky top `PromptIndex` strip**. Do not reintroduce a horizontal anchor bar above the transcript — it stole vertical space from the content, which is the thing users actually came to read.
@@ -393,7 +394,7 @@ Key invariants:
 
 ### Modifying the Timeline
 
-The Timeline is a minimap with two coupled components:
+The Timeline couples measurement and rendering:
 1. **SessionView** (data source) — scroll tracking + DOM measurement
 2. **Timeline** (renderer) — positioned dots + viewport indicator
 
@@ -405,7 +406,7 @@ When modifying:
 
 ### Modifying the Scan Pipeline
 
-The scan pipeline has **two separate implementations** that must stay in sync, and both are source-aware:
+The scan pipeline has **separate server and browser implementations** that must stay in sync and remain source-aware:
 
 | | **Vite plugin** (`vite-plugin-claude-data.ts`) | **FSAccessStore** (`src/lib/fs-access.ts`) |
 |---|---|---|

@@ -86,6 +86,36 @@ const nativeRuntimeId='22222222-2222-4222-8222-222222222222'
 const nativeRuntimeWitness='a'.repeat(64)
 const nativeBinding=`native_runtime_id=${nativeRuntimeId}&native_runtime_witness=${nativeRuntimeWitness}`
 
+it('declares the loaded-window Find scope without another read or transcript adaptation',async()=>{
+ const fetchMock=stubFetch()
+ await mountEmbed('/reader/embed.html?endpoint=/api/sessions/find-scope&session=sess-1')
+ await screen.findByText('first message')
+ const input=screen.getByLabelText('Find in conversation') as HTMLInputElement
+ const scope=screen.getByText('仅搜索已加载范围')
+ const reader=document.querySelector('[data-session-reader]')
+ const scroller=document.querySelector('[data-primary-scroll]') as HTMLElement
+ const reads=fetchMock.mock.calls.length,adaptations=adaptSpy.calls.length
+ expect(scope.hidden).toBe(true)
+ const source=document.querySelector('.embed-source') as HTMLDetailsElement
+ source.open=true
+ scroller.scrollTop=73
+ act(()=>input.focus())
+ expect(document.activeElement).toBe(input)
+ expect(source.open).toBe(false)
+ expect(scope.hidden).toBe(false)
+ expect(scroller.scrollTop).toBe(73)
+ fireEvent.change(input,{target:{value:'not in this window'}})
+ act(()=>input.blur())
+ expect(screen.getByText('0/0')).toBeTruthy()
+ expect(scope.hidden).toBe(false)
+ expect(fetchMock).toHaveBeenCalledTimes(reads)
+ expect(adaptSpy.calls).toHaveLength(adaptations)
+ expect(document.querySelector('[data-session-reader]')).toBe(reader)
+ expect(document.querySelector('[data-primary-scroll]')).toBe(scroller)
+ fireEvent.change(input,{target:{value:''}})
+ expect(scope.hidden).toBe(true)
+})
+
 it('keeps a history recovery action available after the initial read fails',async()=>{
  let reads=0
  vi.stubGlobal('fetch',vi.fn(async()=>++reads===1

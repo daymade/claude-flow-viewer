@@ -19,14 +19,17 @@ function navigationIdentity(target: ReaderJumpTarget | null): string | null {
     : `pos:${target.messageIndex}:${target.promptNum ?? ''}`
 }
 
-export function SessionReader({ filter: controlledFilter, initialFilter, searchQuery: controlledQuery, onToggleFilter, onFindQueryChange, showToolbar = true, toolbarLeading, toolbarTrailing, emptyStateAction = null, ...props }:
+export function SessionReader({ filter: controlledFilter, initialFilter, searchQuery: controlledQuery, onToggleFilter, onFindQueryChange, findScopeLabel, showToolbar = true, toolbarLeading, toolbarTrailing, emptyStateAction = null, ...props }:
   Omit<SessionViewProps, 'filter' | 'searchQuery'> & {
     filter?: FilterState; initialFilter?: Partial<FilterState>; searchQuery?: string; onToggleFilter?: (key: keyof FilterState) => void; onFindQueryChange?: (query: string) => void; showToolbar?: boolean; toolbarLeading?: ReactNode; toolbarTrailing?: ReactNode
+    /** Host-declared scope shown during internal Find. */
+    findScopeLabel?: string
     /** Optional host action rendered inside the empty-state guidance (e.g. load earlier). Unset by default. */
     emptyStateAction?: ReactNode
   }) {
   const [filter, setFilter] = useState(() => ({...READER_FILTER, ...initialFilter}))
   const [query, setQuery] = useState('')
+  const [findFocused, setFindFocused] = useState(false)
   const [hit, setHit] = useState(0)
   const [panel, setPanel] = useState<'find' | 'filters' | null>(null)
   const toolbarRef = useRef<HTMLDivElement>(null)
@@ -73,6 +76,7 @@ export function SessionReader({ filter: controlledFilter, initialFilter, searchQ
   }, [panel])
   const currentFilter = controlledFilter ?? filter
   const currentQuery = controlledQuery ?? query
+  const showFindScope = Boolean(findScopeLabel && controlledQuery === undefined && (findFocused || currentQuery))
   const externalTarget = props.activeSearchTarget ?? null
 
   // A NEW external navigation suspends the internal Find so the host's focus
@@ -95,7 +99,7 @@ export function SessionReader({ filter: controlledFilter, initialFilter, searchQ
     return matches.length ? {messageIndex:matches[hit % matches.length]} : null
   }, [controlledQuery, currentQuery, matches, hit, externalTarget])
   return <div className="flex min-h-0 flex-1 flex-col" data-session-reader="claude-flow-viewer">
-    {showToolbar && <div className="session-reader-toolbar" ref={toolbarRef} data-export-remove onClickCapture={event => {
+    {showToolbar && <div className="session-reader-toolbar" ref={toolbarRef} data-export-remove data-find-scope={showFindScope} onClickCapture={event => {
       if (event.target instanceof Element && event.target.closest('summary')) setPanel(null)
     }}>
       {toolbarLeading}
@@ -105,10 +109,11 @@ export function SessionReader({ filter: controlledFilter, initialFilter, searchQ
         <SessionToolbar filter={currentFilter} onToggle={key => onToggleFilter ? onToggleFilter(key) : setFilter(old => ({...old,[key]:!old[key]}))} />
       </div>
       {controlledQuery === undefined && <div ref={findPanelRef} id={`${toolbarId}-find`} className="reader-find-panel" data-open={panel === 'find'}>
-        <input ref={findRef} aria-label="Find in conversation" type="search" placeholder="Find in conversation" value={query} onFocus={closeDisclosures} onChange={event => {const value=event.target.value;onFindQueryChange?.(value);setQuery(value);setHit(0)}} />
+        <input ref={findRef} aria-label="Find in conversation" aria-describedby={findScopeLabel ? `${toolbarId}-find-scope` : undefined} type="search" placeholder="Find in conversation" value={query} onFocus={() => {closeDisclosures();setFindFocused(true)}} onBlur={() => setFindFocused(false)} onChange={event => {const value=event.target.value;onFindQueryChange?.(value);setQuery(value);setHit(0)}} />
         {query && <><span className="reader-match-count">{matches.length ? hit % matches.length + 1 : 0}/{matches.length}</span><button type="button" disabled={!matches.length} onClick={() => setHit(old => old + 1)}>Next</button></>}
       </div>}
       {toolbarTrailing}
+      {controlledQuery === undefined && findScopeLabel && <span id={`${toolbarId}-find-scope`} className="reader-find-scope" hidden={!showFindScope}>{findScopeLabel}</span>}
     </div>}
     <SessionView
       {...props}
