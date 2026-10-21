@@ -158,7 +158,7 @@ Counts of special events in a session: `{ compacts, plans, clears, forks }`.
 ### Supporting Modules
 
 - `src/lib/decision-detector.ts` — Classifies user prompt decisions: `'interrupt'` (contains `[Request interrupted by user]`), `'correction'` (promptNum > 1 + narrow English/Chinese agent-correction patterns), or `'none'`. Keep Chinese patterns about the interaction itself; generic domain negation must not become feedback.
-- `src/lib/heatmap.ts` — Per-prompt intensity scoring (0–1). Weights: tool calls +1, errors +3, forks +5, thinking +length/1000, compact +2. **It currently has NO renderer.** All three parsers still compute it into `SessionData.heatmap`, but the sidebar heat-bar it used to feed was deleted in the content-first pass (a blue gradient bar under every row was colour noise in the rail). The data is retained because it is cheap and a better home may exist (e.g. intensity shading on the right-rail outline). **Do not assume it is displayed anywhere — pick a consumer before relying on it, or retire the module.**
+- `src/lib/heatmap.ts` — Defines per-prompt intensity scoring for `SessionData.heatmap`. **Pick a renderer before relying on these scores, or retire the module**; a populated data field does not prove it is displayed.
 - `src/lib/timeline.ts` — Extracts `TimelineEvent[]` from messages, computes time gaps, formats tokens/durations
 - `src/lib/codex-navigation.ts` — SSOT for the `Codex` sidebar task tree: builds root/delegated hierarchy, filters whole task paths, preserves active lineage, and selects the latest root tasks for scan-time display
 - `src/lib/codex-learning.ts` — Extracts learning-oriented `Codex` branch summaries: key moments, decision points, hidden-noise buckets, and role/status labels for the current active rollout
@@ -174,7 +174,7 @@ Counts of special events in a session: `{ compacts, plans, clears, forks }`.
 
 ### Search Flow
 
-The search box drives two independent lanes. Full-text search answers "where is this content mentioned"; the resolve lane answers "open this exact session by its id". They are separate on purpose — a UUID tokenizes into hex trigram noise inside FTS and can never be recalled that way, so identifier navigation must NOT be solved by tuning FTS ranking. Do not merge the lanes.
+The search box keeps content search and identifier navigation independent. Full-text search answers "where is this content mentioned"; the resolve lane answers "open this exact session by its id". They are separate on purpose — a UUID tokenizes into hex trigram noise inside FTS and can never be recalled that way, so identifier navigation must NOT be solved by tuning FTS ranking. Do not merge the lanes.
 
 **Resolve lane (known-item / identifier navigation):**
 - `src/lib/session-identifier.ts` `detectSessionIdentifier()` is the SSOT that decides whether the query IS an identifier: a bare UUID, a Cherry agent id (`session_<epoch>_<random>`), a `topic:` id, a `.jsonl` path, or a `#/…` hash. The bare-UUID and agent-id forms must be the ENTIRE trimmed input, so a normal phrase that merely embeds one never hijacks the lane.
@@ -182,7 +182,7 @@ The search box drives two independent lanes. Full-text search answers "where is 
 - `resolveSession` maps a bare id → `ResolvedSessionRef` by pure filesystem probe (`/api/resolve-session` for the API store; in-memory handle maps for the browser stores), bypassing the 50-cap. Browser stores return null for Cherry (needs the local server).
 - Opening a resolved session dispatches `UPSERT_SESSION_META` BEFORE `loadSession` so `AppShell` can derive `activeSession` even when the target is beyond the 50-cap (Codex would otherwise render through the wrong view).
 
-**Full-text lane** is a two-layer system:
+**Full-text input and workflow** have separate owners:
 
 1. `useSessionStore` still owns the raw input string (`searchQuery`)
 2. `src/hooks/useSearchController.ts` owns the live search workflow: server availability check, ranked results, the active jump target, and the resolve lane (independent of search-backend availability, so it still works in browser mode)
@@ -232,7 +232,7 @@ Rule of thumb: **outline = read & jump by text; timeline = where am I + what str
 The timeline is a **fixed-height minimap** that fills the viewport height and never scrolls itself. All events are absolutely positioned by their actual DOM location in the content area.
 
 > **CRITICAL INVARIANT — the Timeline root MUST have a real height (`h-full`).**
-> Every child inside it (track line, playhead, time anchors, all event markers) is `position: absolute`, so the root has **zero in-flow content**. Drop `h-full` and the root silently collapses to `height: 0` — every `top: X%` marker then resolves against 0 and the whole minimap piles into a garbled ~14px smear at the top. It fails *silently*: no error, no test failure, it just looks like a broken smudge. Its wrapper must also stretch (`hidden md:flex min-h-0`). This has already broken once.
+> Every child inside it (track line, playhead, time anchors, all event markers) is `position: absolute`, so the root has **zero in-flow content**. Drop `h-full` and the root silently collapses to `height: 0` — every `top: X%` marker then resolves against 0 and the whole minimap piles into a garbled ~14px smear at the top. It fails *silently*: no error, no test failure, it just looks like a broken smudge. Its wrapper must also stretch (`hidden md:flex min-h-0`).
 >
 > Marker time labels are suppressed inside `LABEL_SAFE_ZONE` (top/bottom 8.5%), because the first/last time anchors live there and would collide.
 
@@ -353,8 +353,8 @@ FilterState    — Toggle visibility of message types + timeline
 - **Light theme only** — background `#FAFAF8`, no dark mode
 - **Typography**: IBM Plex Sans (body) + JetBrains Mono (code/timestamps), loaded via Google Fonts in `index.html`, configured in `@theme` block in `index.css`
 - **Color system (SSOT — apply to every new surface)**: exactly **one neutral (`stone`) + one accent (`amber`)**.
-  - The old six-colour "functional" system (Blue=prompts, Teal=compact, Indigo=plan, Gray=clear …) is **RETIRED**. It was the single biggest source of the AI-slop look: it forced every feature to grab a hue, so colour stopped meaning anything (blue alone was used for 7 unrelated things).
-  - **Never introduce `slate` / `gray` / `blue` / `teal` / `indigo` / `sky` / `purple`.** Three neutral families (stone + slate + gray) used to coexist; there is now exactly one: **stone**.
+  - The functional palette (Blue=prompts, Teal=compact, Indigo=plan, Gray=clear …) remains **RETIRED**; do not assign a decorative hue to each feature.
+  - **Never introduce `slate` / `gray` / `blue` / `teal` / `indigo` / `sky` / `purple`.**
   - **Accent (`amber`)** — sparingly: active/selected state, links, focus rings, logo. It is what the eye should land on.
   - **Neutral (`stone`)** — everything else: text, borders, dividers, inactive controls, timeline track, marker labels.
   - **Semantic colours — the ONLY allowed exceptions, because they carry meaning a text label cannot:**
