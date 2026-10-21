@@ -9,6 +9,8 @@
 .reader-find-panel{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
 .reader-find-panel input{flex:1;min-width:0;min-height:44px;padding:0 12px;border:1px solid #e7e5e4;border-radius:8px;background:#fafaf8;font-size:14px}
 .reader-match-count{font-variant-numeric:tabular-nums;white-space:nowrap;color:#78716c}
+.session-reader-toolbar[data-find-scope=true]{flex-wrap:wrap}
+.reader-find-scope{flex-basis:100%;order:2;padding-bottom:6px;color:#78716c;line-height:1.5}
 .reader-empty-state{display:flex;flex-direction:column;align-items:center;gap:12px;padding:56px 16px;text-align:center;color:#78716c;font-size:13px;line-height:1.6}
 .reader-empty-state p{margin:0}
 .reader-empty-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}

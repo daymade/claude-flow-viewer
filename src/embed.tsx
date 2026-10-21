@@ -216,7 +216,7 @@ export function ReaderEmbed() {
       </details>
       <button type="button" onClick={()=>setBlockedLink(null)}>关闭</button>
     </div>}
-    {page && data ? <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} onFindQueryChange={recordFindEdit} readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} toolbarLeading={historyControls} toolbarTrailing={sourceControls} pending={busy} emptyStateAction={page.has_earlier ? <button type="button" className="reader-empty-action" disabled={busy} onClick={()=>void read('earlier')}>加载更早的对话</button> : null} /> : <div className="session-reader-toolbar">{historyControls}{busy && <span className="embed-status" role="status">正在读取绑定会话…</span>}</div>}
+    {page && data ? <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} onFindQueryChange={recordFindEdit} findScopeLabel="仅搜索已加载范围" readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} toolbarLeading={historyControls} toolbarTrailing={sourceControls} pending={busy} emptyStateAction={page.has_earlier ? <button type="button" className="reader-empty-action" disabled={busy} onClick={()=>void read('earlier')}>加载更早的对话</button> : null} /> : <div className="session-reader-toolbar">{historyControls}{busy && <span className="embed-status" role="status">正在读取绑定会话…</span>}</div>}
   </div>
 }
 createRoot(document.getElementById('root')!).render(<ReaderEmbed />)
