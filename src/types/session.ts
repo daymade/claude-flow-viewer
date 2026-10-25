@@ -1,3 +1,5 @@
+import type {UserInputClassification} from '../lib/user-input-classification'
+
 export type DecisionMarker = 'none' | 'interrupt' | 'correction'
 export type SessionSource = 'claude' | 'codex' | 'cherrystudio'
 export type SessionThreadKind = 'primary' | 'subagent'
@@ -9,7 +11,7 @@ export interface EmbeddedImage {
 }
 
 export type SessionMessage = { sourceRecordId?: string; sourceRecord?: Record<string,unknown> } & (
-  | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; timestamp?: string; decision: DecisionMarker; queued?: boolean; dupCount?: number }
+  | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; timestamp?: string; decision: DecisionMarker; queued?: boolean; dupCount?: number; inputClassification?: UserInputClassification }
   | { kind: 'tool-result'; content: string; isError: boolean; externalFile?: string; totalSize?: string; timestamp?: string; toolUseId?: string }
   | { kind: 'ai-text'; text: string; timestamp?: string }
   | { kind: 'ai-thinking'; preview: string; full: string; timestamp?: string }

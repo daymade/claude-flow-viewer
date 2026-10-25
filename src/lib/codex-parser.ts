@@ -10,6 +10,7 @@ import type {
 } from '../types/session'
 import { detectDecision } from './decision-detector'
 import { computeHeatmap } from './heatmap'
+import { classifyUserInputContent, type UserInputClassification } from './user-input-classification'
 
 export const CODEX_PROJECT_PREFIX = 'codex:'
 // Codex session_meta is the first JSONL line. We only need a small head window
@@ -215,6 +216,8 @@ function stringifyDisplayValue(value: unknown): string {
 }
 
 function isCodexBootstrapText(text: string): boolean {
+  // Preserve the existing raw reader suppression policy. Content classification is annotation,
+  // not permission to remove newly recognized internal source records from the conversation.
   const trimmed = text.trim()
   if (!trimmed) return true
   return trimmed.startsWith('# AGENTS.md instructions')
@@ -341,7 +344,9 @@ function parseContentParts(content: unknown): { text: string; images: EmbeddedIm
   return { text: parts.join('\n').trim(), images }
 }
 
-function extractPromptFromMessage(record: Record<string, unknown>): { text: string; images: EmbeddedImage[] } | null {
+interface CodexPrompt { text: string; images: EmbeddedImage[]; inputClassification: UserInputClassification }
+
+function extractPromptFromMessage(record: Record<string, unknown>): CodexPrompt | null {
   if (record.type !== 'response_item') return null
   const payload = record.payload
   if (!payload || typeof payload !== 'object') return null
@@ -349,11 +354,12 @@ function extractPromptFromMessage(record: Record<string, unknown>): { text: stri
   if (item.type !== 'message' || item.role !== 'user') return null
 
   const { text, images } = parseContentParts(item.content)
-  if (!text || isCodexBootstrapText(text)) return null
-  return { text, images }
+  const inputClassification = classifyUserInputContent(item.content)
+  if ((!text && !images.length) || isCodexBootstrapText(text) && !images.length) return null
+  return { text, images, inputClassification }
 }
 
-function extractPromptFromEvent(event: Record<string, unknown>): { text: string; images: EmbeddedImage[] } | null {
+function extractPromptFromEvent(event: Record<string, unknown>): CodexPrompt | null {
   if (event.type !== 'user_message') return null
   const textParts: string[] = []
   const messageText = typeof event.message === 'string' ? event.message.trim() : ''
@@ -388,8 +394,9 @@ function extractPromptFromEvent(event: Record<string, unknown>): { text: string;
   }
 
   const text = textParts.join('\n').trim()
-  if (!text || isCodexBootstrapText(text)) return null
-  return { text, images }
+  if ((!text && !images.length) || isCodexBootstrapText(text) && !images.length) return null
+  const inputClassification = classifyUserInputContent(images.length ? [{type:'text',text}, ...images.map(image=>({type:'image',url:image.dataUrl}))] : text)
+  return { text, images, inputClassification }
 }
 
 /**
@@ -865,11 +872,11 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
   let promptCounter = 0
   let pendingInterrupt = false
   const seenPrompts: Array<{ text: string; timestampMs: number }> = []
-  const pushPrompt = (prompt: { text: string; images: EmbeddedImage[] }, timestampDate: Date, provenance: CodexRecordProvenance) => {
+  const pushPrompt = (prompt: CodexPrompt, timestampDate: Date, provenance: CodexRecordProvenance) => {
     const textKey = normalizePromptText(prompt.text)
-    if (!textKey) return false
+    if (!textKey && !prompt.images.length) return false
     const timestampMs = timestampDate.getTime()
-    const isDuplicate = seenPrompts.some((seen) =>
+    const isDuplicate = Boolean(textKey) && seenPrompts.some((seen) =>
       seen.text === textKey && Math.abs(seen.timestampMs - timestampMs) <= 1000
     )
     if (isDuplicate) return false
@@ -888,6 +895,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
       time: formatTime(timestampDate),
       timestamp,
       decision,
+      inputClassification: prompt.inputClassification,
     })
     prompts.push({
       num: promptCounter,
