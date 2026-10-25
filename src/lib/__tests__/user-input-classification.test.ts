@@ -36,7 +36,7 @@ describe('shared user input content interpretation', () => {
     for (const value of [undefined,null]) expect(classify(value)).toEqual({kind:'unknown',reason:'missing'})
     for (const value of ['', ' \n', [], [{type:'skill',name:'fixture'}]]) expect(classify(value)).toEqual({kind:'unknown',reason:'empty'})
     for (const value of [1, {}, [null], [{type:'text',text:4}], [{type:'unfamiliar',text:'unverified'}], [{type:'image'}], [{text:'ordinary'},null]]) expect(classify(value)).toEqual({kind:'unknown',reason:'malformed'})
-    for (const value of ['<hook_prompt>Incomplete', '<peer-message from="fixture">Incomplete', '<send_user_message_question_reply>Incomplete', 'Message Type: MESSAGE\nTask name: fixture']) expect(classify(value)).toEqual({kind:'unknown',reason:'malformed'})
+    for (const value of ['<hook_prompt>Incomplete', '<peer-message from="fixture">Incomplete', '<send_user_message_question_reply>Incomplete', 'Message Type: MESSAGE\nTask name: fixture', '<skill>Incomplete', '<environment_context>Incomplete', bootstrap[1]+'\n<permissions instructions>Incomplete']) expect(classify(value)).toEqual({kind:'unknown',reason:'malformed'})
     for (const value of [[], null, [{...reply,answer:null}], [{...reply,questionItemId:'not-json'}], [{...reply,questionItemId:'["request_user_input_async", "fixture", 0]'}], [{...reply,questionItemId:'["foreign","fixture",0]'}]]) expect(classify(envelope(value))).toEqual({kind:'unknown',reason:'malformed'})
   })
   it('recognizes canonical image-only input without loading an attachment', () => {

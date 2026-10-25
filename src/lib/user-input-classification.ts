@@ -53,7 +53,11 @@ function classifyText(value: string): UserInputClassification {
   let consumed = Boolean(heading)
   while (remaining) {
     const block = remaining.match(/^<(skill|skills_instructions|environment_context|permissions|collaboration_mode|system|developer|user_instructions|turn_aborted)\b[^>]*>[\s\S]*?<\/\1>/)
-    if (!block) break
+    if (!block) {
+      const unclosed = remaining.match(/^<(skill|skills_instructions|environment_context|permissions|collaboration_mode|system|developer|user_instructions|turn_aborted)\b/)
+      if (unclosed && !remaining.includes(`</${unclosed[1]}>`)) return result('unknown', 'malformed')
+      break
+    }
     consumed = true
     remaining = remaining.slice(block[0].length).trim()
   }
