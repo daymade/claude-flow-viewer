@@ -216,8 +216,18 @@ function stringifyDisplayValue(value: unknown): string {
 }
 
 function isCodexBootstrapText(text: string): boolean {
-  const classification = classifyUserInputContent(text)
-  return !text.trim() || classification.reason === 'bootstrap'
+  // Preserve the existing raw reader suppression policy. Content classification is annotation,
+  // not permission to remove newly recognized internal source records from the conversation.
+  const trimmed = text.trim()
+  if (!trimmed) return true
+  return trimmed.startsWith('# AGENTS.md instructions')
+    || trimmed.startsWith('# CLAUDE.md')
+    || trimmed.startsWith('# AGENTS.md')
+    || trimmed.startsWith('<skill>')
+    || trimmed.startsWith('<skills_instructions>')
+    || trimmed.startsWith('<environment_context>')
+    || trimmed.startsWith('<permissions instructions>')
+    || trimmed.startsWith('<turn_aborted>')
 }
 
 function extractDelegationUpdate(text: string): Extract<SessionMessage, { kind: 'delegation-update' }> | null {
@@ -345,7 +355,7 @@ function extractPromptFromMessage(record: Record<string, unknown>): CodexPrompt 
 
   const { text, images } = parseContentParts(item.content)
   const inputClassification = classifyUserInputContent(item.content)
-  if ((!text && !images.length) || inputClassification.reason === 'bootstrap') return null
+  if ((!text && !images.length) || isCodexBootstrapText(text) && !images.length) return null
   return { text, images, inputClassification }
 }
 

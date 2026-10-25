@@ -22,7 +22,7 @@ const bootstrap = [
 
 describe('shared user input content interpretation', () => {
   it('keeps ordinary, short, quoted and explained messages', () => {
-    for (const text of ['继续', '好', 'Please continue.', 'Explain <peer-message> tags.', '`<hook_prompt>`', '> <peer-message>Quoted</peer-message>\nExplain it.', '{"answer":"example","question":"example"}', envelope(reply)+'\nExplain this format.', ...internal.filter(t=>t.startsWith('<')).map(t=>t+'\nPlease explain this example.'), '<custom>Application input</custom>', '<environment_context>example</environment_context>\nExplain it.']) {
+    for (const text of ['继续', '好', 'Please continue.', 'Explain <peer-message> tags.', '`<hook_prompt>`', '> <peer-message>Quoted</peer-message>\nExplain it.', '{"answer":"example","question":"example"}', envelope(reply)+'\nExplain this format.', ...internal.filter(t=>t.startsWith('<')).map(t=>t+'\nPlease explain this example.'), '<custom>Application input</custom>', '<peer-message-example>Application input</peer-message-example>', '<skill-example>Application input</skill-example>', '<environment_context>example</environment_context>\nExplain it.']) {
       expect(classify(text), text).toEqual({kind:'ordinary', reason:'text'})
     }
   })
@@ -31,6 +31,16 @@ describe('shared user input content interpretation', () => {
     for (const text of bootstrap) expect(classify(text), text).toEqual({kind:'internal', reason:'bootstrap'})
     for (const value of [[reply], reply, [{questionItemId:reply.questionItemId, question:reply.question, answer:reply.answer}], [{...reply,answer:''}]]) expect(classify(envelope(value))).toEqual({kind:'control',reason:'question-reply'})
     expect(classify('# Context from my IDE setup:\nFile: fixture\n## My request for Codex:\n'+envelope([reply])).kind).toBe('control')
+  })
+  it('ends at the first complete frame even when a human explanation includes a second same-tag example', () => {
+    for (const tag of ['peer-message','hook_prompt','codex_delegation','codex_internal_context','subagent_notification']) {
+      const first = `<${tag}>old example</${tag}>`, second = `<${tag}>new example</${tag}>`
+      expect(classify(`${first}\nPlease replace the previous example with ${second}`)).toEqual({kind:'ordinary',reason:'text'})
+      expect(classify(`<${tag}>outer ${second} remaining</${tag}>`).kind).toBe('internal')
+      expect(classify(first).kind).toBe('internal')
+    }
+    expect(classify(envelope([reply])+'\nPlease explain '+envelope([reply]))).toEqual({kind:'ordinary',reason:'text'})
+    expect(classify(envelope([{...reply,answer:'Literal </send_user_message_question_reply> and <send_user_message_question_reply> plus \\"quoted\\" text'}]))).toEqual({kind:'control',reason:'question-reply'})
   })
   it('keeps absent, empty, malformed controls and unsupported content explicitly unknown', () => {
     for (const value of [undefined,null]) expect(classify(value)).toEqual({kind:'unknown',reason:'missing'})
@@ -68,5 +78,16 @@ describe('shared user input content interpretation', () => {
     const raw = parseCodexSessionContent(JSON.stringify({type:'response_item',timestamp:'2026-01-01T00:00:00Z',payload:{type:'message',role:'user',content:image}})).messages[0]
     expect(native.kind==='user-prompt' && native.inputClassification).toEqual({kind:'ordinary',reason:'attachment'})
     expect(raw.kind==='user-prompt' && raw.inputClassification).toEqual({kind:'ordinary',reason:'attachment'})
+  })
+  it('annotates newly recognized bootstrap kinds without expanding historical raw suppression', () => {
+    for (const tag of ['collaboration_mode','system','developer','user_instructions']) {
+      const text = `<${tag}>Synthetic original body</${tag}>`, content = [{type:'text',text}]
+      const record = {type:'response_item',timestamp:'2026-01-01T00:00:00Z',payload:{type:'message',role:'user',content}}
+      const raw = parseCodexSessionContent(JSON.stringify(record)).messages
+      expect(raw).toHaveLength(1)
+      expect(raw[0]).toMatchObject({kind:'user-prompt',text,sourceRecord:record,inputClassification:{kind:'internal',reason:'bootstrap'}})
+      expect(parseCodexNativeRecords([{id:'fixture',ordinal:1,item:{type:'userMessage',content}}]).messages).toHaveLength(1)
+    }
+    for (const text of bootstrap) expect(parseCodexSessionContent(JSON.stringify({type:'response_item',timestamp:'2026-01-01T00:00:00Z',payload:{type:'message',role:'user',content:[{type:'text',text}]}})).messages).toHaveLength(0)
   })
 })

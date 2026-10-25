@@ -8,11 +8,8 @@ const result = (kind: UserInputClassification['kind'], reason: UserInputClassifi
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0
 
-function questionReply(text: string): boolean {
-  const envelope = text.match(/^<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>$/)
-  if (!envelope) return false
+function questionReply(payload: unknown): boolean {
   try {
-    const payload: unknown = JSON.parse(envelope[1])
     const replies = Array.isArray(payload) ? payload : [payload]
     return replies.length > 0 && replies.every(reply => {
       if (!object(reply) || typeof reply.answer !== 'string' || typeof reply.question !== 'string' || typeof reply.questionItemId !== 'string') return false
@@ -23,6 +20,44 @@ function questionReply(text: string): boolean {
   } catch { return false }
 }
 
+/** End of the first JSON value, respecting quoted tag examples and escaped quotes. */
+function jsonValueEnd(text: string): number | null {
+  const start = text.search(/\S/)
+  if (start < 0) return null
+  if (!['[', '{', '"'].includes(text[start])) {
+    const scalar = text.slice(start).match(/^(?:null|true|false|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/)
+    return scalar ? start + scalar[0].length : null
+  }
+  const closers: string[] = []
+  let quoted = false, escaped = false
+  for (let at = start; at < text.length; at++) {
+    const char = text[at]
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') { quoted = false; if (!closers.length) return at + 1 }
+    } else if (char === '"') quoted = true
+    else if (char === '[' || char === '{') closers.push(char === '[' ? ']' : '}')
+    else if (char === ']' || char === '}') {
+      if (closers.pop() !== char) return null
+      if (!closers.length) return at + 1
+    }
+  }
+  return null
+}
+
+/** The first balanced top-level frame ends before any following human explanation. */
+function frameEnd(text: string, tag: string): number | null {
+  const tokens = new RegExp(`<(/?)${tag}(?=[\\s>])[^>]*>`, 'gi')
+  let depth = 0
+  for (const token of text.matchAll(tokens)) {
+    if (token[1] && !new RegExp(`^</${tag}\\s*>$`, 'i').test(token[0])) return null
+    depth += token[1] ? -1 : 1
+    if (depth === 0) return token.index + token[0].length
+  }
+  return null
+}
+
 function classifyText(value: string): UserInputClassification {
   let text = value.trim()
   if (!text) return result('unknown', 'empty')
@@ -31,11 +66,24 @@ function classifyText(value: string): UserInputClassification {
     const marker = '\n## My request for Codex:\n', at = text.lastIndexOf(marker)
     if (at >= 0) text = text.slice(at + marker.length).trim()
   }
-  if (questionReply(text)) return result('control', 'question-reply')
-  if (/^<send_user_message_question_reply>[\s\S]*<\/send_user_message_question_reply>$/.test(text)) return result('unknown', 'malformed')
-  const frame = text.match(/^<(peer-message|codex_delegation|codex_internal_context|hook_prompt|subagent_notification)\b[^>]*>[\s\S]*<\/\1>$/i)
-  if (frame) return result('internal', frame[1].toLowerCase() === 'hook_prompt' ? 'hook' : 'peer')
-  const opener = text.match(/^<(send_user_message_question_reply|peer-message|codex_delegation|codex_internal_context|hook_prompt|subagent_notification)\b/i)
+  const questionOpen = '<send_user_message_question_reply>', questionClose = '</send_user_message_question_reply>'
+  if (text.startsWith(questionOpen)) {
+    const body = text.slice(questionOpen.length), end = jsonValueEnd(body)
+    if (end === null) return result('unknown', 'malformed')
+    const after = body.slice(end).trimStart()
+    if (!after.startsWith(questionClose)) return result('unknown', 'malformed')
+    if (after.slice(questionClose.length).trim()) return result('ordinary', 'text')
+    try { return questionReply(JSON.parse(body.slice(0, end))) ? result('control', 'question-reply') : result('unknown', 'malformed') }
+    catch { return result('unknown', 'malformed') }
+  }
+  const frame = text.match(/^<(peer-message|codex_delegation|codex_internal_context|hook_prompt|subagent_notification)(?=[\s>])[^>]*>/i)
+  if (frame) {
+    const end = frameEnd(text, frame[1])
+    if (end === null) return result('unknown', 'malformed')
+    if (text.slice(end).trim()) return result('ordinary', 'text')
+    return result('internal', frame[1].toLowerCase() === 'hook_prompt' ? 'hook' : 'peer')
+  }
+  const opener = text.match(/^<(send_user_message_question_reply|peer-message|codex_delegation|codex_internal_context|hook_prompt|subagent_notification)(?=[\s>]|$)/i)
   if (opener && !text.toLowerCase().includes(`</${opener[1].toLowerCase()}>`)) return result('unknown', 'malformed')
   // The transport has a finite header and a terminal Payload section; mentions/quotes do not match.
   if (/^Message Type: (?:NEW_TASK|MESSAGE|FINAL_ANSWER)\r?\n(?:Task name: [^\r\n]+\r?\n)?(?:Sender: [^\r\n]+\r?\n)?Payload:[\s\S]*$/.test(text)) return result('internal', 'peer')
@@ -52,9 +100,9 @@ function classifyText(value: string): UserInputClassification {
   }
   let consumed = Boolean(heading)
   while (remaining) {
-    const block = remaining.match(/^<(skill|skills_instructions|environment_context|permissions|collaboration_mode|system|developer|user_instructions|turn_aborted)\b[^>]*>[\s\S]*?<\/\1>/)
+    const block = remaining.match(/^<(skill|skills_instructions|environment_context|permissions|collaboration_mode|system|developer|user_instructions|turn_aborted)(?=[\s>])[^>]*>[\s\S]*?<\/\1>/)
     if (!block) {
-      const unclosed = remaining.match(/^<(skill|skills_instructions|environment_context|permissions|collaboration_mode|system|developer|user_instructions|turn_aborted)\b/)
+      const unclosed = remaining.match(/^<(skill|skills_instructions|environment_context|permissions|collaboration_mode|system|developer|user_instructions|turn_aborted)(?=[\s>]|$)/)
       if (unclosed && !remaining.includes(`</${unclosed[1]}>`)) return result('unknown', 'malformed')
       break
     }
