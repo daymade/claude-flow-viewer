@@ -61,6 +61,10 @@ Claude 解析消息的可选 `sourceRecordId` 保留原 JSONL 记录的 `uuid`�
 
 增量状态使用 `ClaudeParserState` version 3；旧状态自动退回完整解析，避免复用没有来源字段的冻结消息。构建共享包用 `npm run build:reader`，CLI 的原有参数与完整解析回退流程不变。
 
+共享包导出 `classifyUserInputContent(content)` 与 `classifyUserInputs(batch)`，Codex raw/native 的 `user-prompt.inputClassification` 使用同一内容规则：`ordinary`、`internal`、`control` 或 `unknown`，附 `reason`。它解释内容，不认证操作者；原记录、来源 ID、顺序与正文保持不变。短“继续”、带人话解释的 JSON/XML 示例及 Reader 支持的 image/input_image 输入属于 ordinary；完整的协作、Hook、bootstrap 与原生问答控制包分别标注。缺失、空或不支持的内容保留 unknown；消费者判断“当前请求”时不能跳过较新的 unknown 而继续接受旧请求。
+
+已在服务端绑定来源的消费者可执行 `node <package>/server/classify-user-inputs.mjs`（包子路径 `@daymade/session-reader/classify-user-inputs`），通过 stdin 发送一份 `{ "version": 1, "inputs": [{ "id": "source-record-id", "content": [{ "type": "text", "text": "继续" }] }] }`。stdout 返回 `{ "version": 1, "classifications": [{ "id": "source-record-id", "kind": "ordinary", "reason": "text" }] }`，保持 ID 与输入顺序。单批上限 1000 条、stdin 上限 16 MiB；版本、ID 或 envelope 畸形时非零退出且不输出成功结果。它不读取会话文件，调用者必须独立验证源会话与记录绑定，不接收客户端自报的分类。
+
 ### Development Mode
 
 ```bash

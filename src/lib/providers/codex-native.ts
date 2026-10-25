@@ -1,6 +1,7 @@
 import type { SessionData, SessionMessage, PromptIndexEntry, EmbeddedImage } from '../../types/session'
 import { detectDecision } from '../decision-detector'
 import {computeHeatmap} from '../heatmap'
+import {classifyUserInputContent} from '../user-input-classification'
 
 export interface NativeConversationRecord {
   id: string
@@ -22,7 +23,9 @@ export function parseCodexNativeRecords(records: NativeConversationRecord[]): Se
     const item = record.item, type = item.type
     const base = {sourceRecordId:record.id,sourceRecord:item, ...(record.timestamp ? {timestamp:record.timestamp} : {})}
     if (type === 'userMessage') {
-      const parts = Array.isArray(item.content) ? item.content : [item.content]
+      const content = item.content === undefined ? item.text : item.content
+      const inputClassification = classifyUserInputContent(content)
+      const parts = Array.isArray(content) ? content : [content]
       const images: EmbeddedImage[] = []
       const text = parts.map(part => {
         if (part && typeof part === 'object' && ['image','input_image'].includes(part.type)) {
@@ -36,7 +39,7 @@ export function parseCodexNativeRecords(records: NativeConversationRecord[]): Se
       }).filter(Boolean).join('\n')
       const promptNum=++count, decision=detectDecision(text,promptNum)
       const time=record.timestamp ? new Date(record.timestamp).toLocaleString(undefined,{hour12:false}) : 'Time not recorded'
-      messages.push({...base,kind:'user-prompt',promptNum,text,images,time,decision})
+      messages.push({...base,kind:'user-prompt',promptNum,text,images,time,decision,inputClassification})
       prompts.push({num:promptNum,preview:text.slice(0,100),fullText:text,time,decision,...(record.timestamp ? {timestamp:record.timestamp} : {})})
     } else if (type === 'agentMessage') {
       let text=display(item.text)
