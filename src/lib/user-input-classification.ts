@@ -119,7 +119,7 @@ export function classifyUserInputContent(content: unknown): UserInputClassificat
   if (typeof content === 'string') return classifyText(content)
   const parts = Array.isArray(content) ? content : [content]
   const texts: string[] = []
-  let attachment = false, malformed = false
+  let attachment = false, localAttachment = false, malformed = false
   for (const part of parts) {
     if (typeof part === 'string') { texts.push(part); continue }
     if (!object(part)) { malformed = true; continue }
@@ -127,9 +127,14 @@ export function classifyUserInputContent(content: unknown): UserInputClassificat
     if ((part.type === undefined || ['text', 'input_text', 'output_text'].includes(String(part.type))) && typeof part.text === 'string') { texts.push(part.text); continue }
     // These image shapes are supported by the native and rollout Reader adapters.
     if (['image', 'input_image'].includes(String(part.type)) && (nonempty(part.url) || nonempty(part.image_url) || typeof part.data === 'string' && part.data.startsWith('data:image/'))) { attachment = true; continue }
+    if (['localImage', 'local_image'].includes(String(part.type)) && nonempty(part.path)) { attachment = true; localAttachment = true; continue }
     malformed = true
   }
   if (malformed) return result('unknown', 'malformed')
+  if (localAttachment && texts.join('\n').trim()) {
+    const interpretation = classifyText(texts.join('\n'))
+    if (interpretation.kind !== 'ordinary') return interpretation
+  }
   if (attachment) return result('ordinary', 'attachment')
   return classifyText(texts.join('\n'))
 }
