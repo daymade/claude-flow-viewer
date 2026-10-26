@@ -131,7 +131,7 @@ export function ReaderEmbed() {
     event.stopPropagation()
     const sourceRecordId=anchor.closest('[data-source-record-id]')?.getAttribute('data-source-record-id')??null
     const owners=page?.records.filter(record=>record.id===sourceRecordId
-      ||record.kind==='flow-message'&&record.message.sourceRecordId===sourceRecordId)??[]
+      ||'message' in record&&record.kind==='flow-message'&&record.message.sourceRecordId===sourceRecordId)??[]
     const recordId=owners.length===1?owners[0].id:null
     const reference=anchor.getAttribute('href')
     if(hostFiles&&endpoint&&channel&&expectedSession&&page?.session_id===expectedSession
