@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {SessionReader, classifyUserInputContent, classifyUserInputs} from '../dist-reader/reader.mjs';
+import {SessionReader, classifyUserInputContent, classifyUserInputs, parseCodexNativeRecords, parseCodexSessionContent} from '../dist-reader/reader.mjs';
 import {spawnSync} from 'node:child_process';
 
 // Exercise the built public export without a global React namespace. Source
@@ -13,7 +13,25 @@ assert.ok(html.includes('Package API body'), 'The built Reader export must rende
 assert.ok(!html.includes('data-empty-state'), 'A healthy body must not render empty guidance');
 console.log('PASS built Reader export renders without a global React namespace');
 assert.equal(classifyUserInputContent('继续').kind, 'ordinary');
-const batch={version:1,inputs:[{id:'ordinary',content:'继续'},{id:'internal',content:'<hook_prompt>Fixture check.</hook_prompt>'},{id:'missing'}]};
+const batch={version:1,inputs:[{id:'ordinary',content:'继续'},{id:'internal',content:'<hook_prompt>Fixture check.</hook_prompt>'},{id:'missing'},
+  {id:'native-image',content:[{type:'localImage',path:'/synthetic/attachment.png',detail:null}]},
+  {id:'rollout-image',content:[{type:'local_image',path:'/synthetic/attachment.png'}]},
+  {id:'missing-image-path',content:[{type:'localImage'}]},
+  {id:'runtime-image',content:[{type:'localImage',path:'/synthetic/attachment.png'},{type:'text',text:'<system>Fixture rules.</system>'}]}]};
+assert.deepEqual(classifyUserInputs(batch).classifications.slice(3).map(({kind,reason})=>({kind,reason})),[
+  {kind:'ordinary',reason:'attachment'},{kind:'ordinary',reason:'attachment'},
+  {kind:'unknown',reason:'malformed'},{kind:'internal',reason:'bootstrap'}]);
+for(const type of ['localImage','local_image']) {
+  const content=[{type,path:'/synthetic/attachment.png'},{type:'text',text:'Describe this image.'}];
+  const item={type:'userMessage',content},record={id:'local-image-fixture',ordinal:1,item};
+  const native=parseCodexNativeRecords([record]).messages[0];
+  const rawRecord={type:'response_item',payload:{type:'message',role:'user',content}};
+  const raw=parseCodexSessionContent(JSON.stringify(rawRecord)).messages[0];
+  for(const message of [native,raw]) assert.equal(message.text,'[Image]\nDescribe this image.');
+  assert.equal(native.sourceRecord,item);
+  assert.equal(native.sourceRecordId,record.id);
+  assert.deepEqual(raw.sourceRecord,rawRecord);
+}
 const cli=spawnSync(process.execPath,['dist-reader/server/classify-user-inputs.mjs'],{input:JSON.stringify(batch),encoding:'utf8'});
 assert.equal(cli.status,0,cli.stderr);
 assert.deepEqual(JSON.parse(cli.stdout),classifyUserInputs(batch));

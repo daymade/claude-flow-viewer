@@ -322,6 +322,11 @@ function parseContentParts(content: unknown): { text: string; images: EmbeddedIm
       continue
     }
 
+    if (type === 'localImage' || type === 'local_image') {
+      parts.push(typeof part.path === 'string' && part.path.trim() ? '[Image]' : stringifyDisplayValue(part))
+      continue
+    }
+
     if (type.includes('image')) {
       const dataUrl =
         typeof part.image_url === 'string' ? part.image_url
