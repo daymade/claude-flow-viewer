@@ -380,6 +380,55 @@ const clickAnchor=async (anchor:Element)=>{
 const linkIn=(name:string,recordId:string)=>
   screen.getAllByRole('link',{name}).find(anchor=>anchor.closest('[data-source-record-id]')?.getAttribute('data-source-record-id')===recordId)!
 
+it('hands an opted-in file click to the bound host with its record and authored href, without reading or replacing the reader',async()=>{
+ const fetchMock=stubLinkFetch(),messages=vi.spyOn(window,'postMessage')
+ await mountEmbed('/reader/embed.html?endpoint=/api/sessions/host-file&session=sess-1&channel=file-channel&file_links=host')
+ const anchor=await waitFor(()=>linkIn('裸文件名','rec-link-e'))
+ const reader=document.querySelector('[data-session-reader]'),scroller=document.querySelector('[data-primary-scroll]') as HTMLElement
+ scroller.scrollTop=87
+ fireEvent.change(screen.getByLabelText('Find in conversation'),{target:{value:'相对形状'}})
+ const reads=fetchMock.mock.calls.length,adaptations=adaptSpy.calls.length
+ messages.mockClear()
+ const event=await clickAnchor(anchor)
+ expect(event.defaultPrevented).toBe(true)
+ expect(messages).toHaveBeenCalledExactlyOnceWith({type:'cfv:open-file',version:1,endpoint:'/api/sessions/host-file',channel:'file-channel',session:'sess-1',recordId:'rec-link-e',revision:null,reference:'report.md'},location.origin)
+ expect(document.querySelector('[data-session-reader]')).toBe(reader)
+ expect(scroller.scrollTop).toBe(87)
+ expect((screen.getByLabelText('Find in conversation') as HTMLInputElement).value).toBe('相对形状')
+ expect(fetchMock.mock.calls.length).toBe(reads)
+ expect(adaptSpy.calls.length).toBe(adaptations)
+ expect(document.querySelector('.embed-link-notice')).toBeNull()
+ messages.mockRestore()
+})
+
+it.each([false,true])('uses only a unique loaded page coordinate for parsed originals; ambiguous=%s',async ambiguous=>{
+ const original={...linkPage,provider:'codex',revision:'a'.repeat(64),records:[
+  {kind:'flow-message',id:'original:21',message:{kind:'ai-text',sourceRecordId:'codex-record-90',text:'[原报告](/Users/test/report.md)'}},
+  ...(ambiguous?[{kind:'flow-message',id:'original:22',message:{kind:'ai-text',sourceRecordId:'codex-record-90',text:'same raw record'}}]:[]),
+ ]}
+ vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>original})))
+ const messages=vi.spyOn(window,'postMessage')
+ await mountEmbed('/reader/embed.html?endpoint=/api/sessions/original-file&session=sess-1&channel=original-channel&file_links=host')
+ const anchor=await screen.findByRole('link',{name:'原报告'})
+ messages.mockClear();await clickAnchor(anchor)
+ const files=messages.mock.calls.filter(([data])=>data?.type==='cfv:open-file')
+ if(ambiguous){expect(files).toHaveLength(0);expect(screen.getByText('原报告：本地文件引用未绑定预览。')).toBeTruthy()}
+ else expect(files).toEqual([[{type:'cfv:open-file',version:1,endpoint:'/api/sessions/original-file',channel:'original-channel',session:'sess-1',recordId:'original:21',revision:'a'.repeat(64),reference:'/Users/test/report.md'},location.origin]])
+ messages.mockRestore()
+})
+
+it.each(['','&file_links=other','&file_links=host&channel='])('retains file blocking without a complete explicit host binding: %s',async extra=>{
+ stubLinkFetch()
+ const messages=vi.spyOn(window,'postMessage')
+ await mountEmbed('/reader/embed.html?endpoint=/api/sessions/no-host-file&session=sess-1'+extra)
+ const anchor=await waitFor(()=>linkIn('明确文件','rec-link-d'))
+ messages.mockClear()
+ await clickAnchor(anchor)
+ expect(messages.mock.calls.some(([data])=>data?.type==='cfv:open-file')).toBe(false)
+ expect(screen.getByText('明确文件：本地文件引用未绑定预览。')).toBeTruthy()
+ messages.mockRestore()
+})
+
 it('blocks a confirmed local file link without remounting the reader, resetting state, or fetching the file',async()=>{
   const fetchMock=stubLinkFetch()
   await mountEmbed('/reader/embed.html?endpoint=/api/sessions/local-links&session=sess-1')
