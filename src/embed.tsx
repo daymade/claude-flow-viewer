@@ -129,13 +129,16 @@ export function ReaderEmbed() {
     }
     event.preventDefault()
     event.stopPropagation()
-    const recordId=anchor.closest('[data-source-record-id]')?.getAttribute('data-source-record-id')??null
+    const sourceRecordId=anchor.closest('[data-source-record-id]')?.getAttribute('data-source-record-id')??null
+    const owners=page?.records.filter(record=>record.id===sourceRecordId
+      ||record.kind==='flow-message'&&record.message.sourceRecordId===sourceRecordId)??[]
+    const recordId=owners.length===1?owners[0].id:null
     const reference=anchor.getAttribute('href')
     if(hostFiles&&endpoint&&channel&&expectedSession&&page?.session_id===expectedSession
-      &&recordId&&page.records.some(record=>record.id===recordId)&&reference?.trim()){
+      &&recordId&&reference?.trim()){
       // The host must re-read this exact source record before granting a file
       // preview. Preserve the rendered author's href, never the resolved URL.
-      parent.postMessage({type:'cfv:open-file',version:1,endpoint,channel,session:expectedSession,recordId,reference},location.origin)
+      parent.postMessage({type:'cfv:open-file',version:1,endpoint,channel,session:expectedSession,recordId,revision:page.revision??null,reference},location.origin)
       setBlockedLink(null)
       return
     }
@@ -143,7 +146,7 @@ export function ReaderEmbed() {
       label:anchor.textContent?.trim()||'（无标签链接）',
       kind:verdict.kind,
       reference:verdict.reference,
-      recordId,
+      recordId:sourceRecordId,
     })
   },[hostFiles,endpoint,channel,expectedSession,page])
   const generation=useRef(0), current=useRef<Page|null>(null), navigationSequence=useRef(0)

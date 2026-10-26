@@ -52,7 +52,7 @@ Find 输入框聚焦或搜索词非空时，嵌入页在工具栏显示「仅搜
 
 正文中的本地文件引用链接会被嵌入页拦住，不发起导航；当前会话、已加载范围、过滤、Find 与滚动位置保持不动。拦截提示的展开、关闭与「来源与读取边界」折叠只是界面状态：会话数据按页身份保持稳定，不会因此重新定位真实内容滚动区，进行中的 Find 或宿主 focus 不被打断；「刷新到最新」与翻页仍会按新页更新数据。明确本地形式——`~`、盘符、原始或编码解出的文件系统根路径、`file:` 链接——按本地文件引用处理，显示可关闭的「本地文件引用未绑定预览」提示，引用来源展示实际引用，不把嵌入页基准地址解析出的路径当作文件路径。宿主的 `/api`、`/reader` 路由只在显式书写时维持原行为：以 `/` 开头的根相对地址，或绝对同源的 http(s) 链接；`report.md`、`./report.md`、`notes/report.md` 这类普通相对路径不会被基准地址提升为应用路由，与其余无法识别的同源引用一样显示「该引用未绑定预览」，折叠的引用来源逐字保留原始 href、来源记录与会话。其余显式 http(s) 与协议相对网页链接以 `noopener noreferrer` 在新标签打开，保留当前 Reader；纯 `#` 锚点维持原行为。
 
-宿主可显式追加 `file_links=host` 接收只读文件导航请求。仅当前页已核会话、非空 channel 和来源记录完整时，嵌入页向同源 parent 发送 `{type:"cfv:open-file",version:1,endpoint,channel,session,recordId,reference}`；`reference` 是被点击 anchor 的原始 `href` 属性，不是浏览器解析后的地址。Reader 不读取文件，也不授予路径权限。宿主必须核对发送 iframe、origin、完整 endpoint/channel/session，再从精确原记录重新核验引用、读取服务端绑定的不透明文件标识；旧来源或未绑定引用不得回退为任意路径读取。未启用或绑定不完整时保留原拦截提示。
+宿主可显式追加 `file_links=host` 接收只读文件导航请求。仅当前页已核会话、非空 channel 和来源记录完整时，嵌入页向同源 parent 发送 `{type:"cfv:open-file",version:1,endpoint,channel,session,recordId,revision,reference}`；`reference` 是被点击 anchor 的原始 `href` 属性，不是浏览器解析后的地址。`recordId` 来自当前已加载页的唯一记录：以记录 ID 或官方解析器保留的 `message.sourceRecordId` 对应被点击正文，重复归属拒绝交接；`revision` 保留当前页版本，缺失为 null，不猜测原生 UUID 或跨版本坐标。Reader 不读取文件，也不授予路径权限。宿主必须核对发送 iframe、origin、完整 endpoint/channel/session，再从精确原记录重新核验引用、读取服务端绑定的不透明文件标识；旧来源或未绑定引用不得回退为任意路径读取。未启用或绑定不完整时保留原拦截提示。
 
 ```text
 /reader/embed.html?endpoint=/api/sessions/example&channel=example&session=example&view=conversation
