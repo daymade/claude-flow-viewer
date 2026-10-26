@@ -67,6 +67,13 @@ describe('shared user input content interpretation', () => {
       for (const path of [undefined, null, '', '  ', 42, {}, []]) {
         const invalid = path === undefined ? {type} : {type,path}
         expect(classify([invalid, {type:'text',text:'Describe this image.'}])).toEqual({kind:'unknown',reason:'malformed'})
+        const content = [invalid, {type:'text',text:'Describe this image.'}]
+        const native = parseCodexNativeRecords([{id:'invalid-image',ordinal:1,item:{type:'userMessage',content}}]).messages[0]
+        const raw = parseCodexSessionContent(JSON.stringify({type:'response_item',payload:{type:'message',role:'user',content}})).messages[0]
+        for (const message of [native,raw]) {
+          expect(message).toMatchObject({kind:'user-prompt',inputClassification:{kind:'unknown',reason:'malformed'}})
+          expect(message.kind==='user-prompt' && message.text).not.toContain('[Image]')
+        }
       }
       for (const text of [...internal, ...bootstrap, envelope([reply]), '<system>Incomplete']) {
         expect(classify([image, {type:'text',text}])).toEqual(classify(text))
@@ -78,7 +85,7 @@ describe('shared user input content interpretation', () => {
       const native = parseCodexNativeRecords([record]).messages[0]
       const rawRecord = {type:'response_item',timestamp:'2026-01-01T00:00:00Z',payload:{type:'message',role:'user',content}}
       const raw = parseCodexSessionContent(JSON.stringify(rawRecord)).messages[0]
-      for (const message of [native,raw]) expect(message).toMatchObject({kind:'user-prompt',inputClassification:{kind:'ordinary',reason:'attachment'}})
+      for (const message of [native,raw]) expect(message).toMatchObject({kind:'user-prompt',text:'[Image]\nDescribe this image.',images:[],inputClassification:{kind:'ordinary',reason:'attachment'}})
       expect(native.sourceRecord).toBe(record.item)
       expect(native.sourceRecordId).toBe(record.id)
       expect(raw.sourceRecord).toEqual(rawRecord)

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {SessionReader, classifyUserInputContent, classifyUserInputs} from '../dist-reader/reader.mjs';
+import {SessionReader, classifyUserInputContent, classifyUserInputs, parseCodexNativeRecords, parseCodexSessionContent} from '../dist-reader/reader.mjs';
 import {spawnSync} from 'node:child_process';
 
 // Exercise the built public export without a global React namespace. Source
@@ -21,6 +21,17 @@ const batch={version:1,inputs:[{id:'ordinary',content:'继续'},{id:'internal',c
 assert.deepEqual(classifyUserInputs(batch).classifications.slice(3).map(({kind,reason})=>({kind,reason})),[
   {kind:'ordinary',reason:'attachment'},{kind:'ordinary',reason:'attachment'},
   {kind:'unknown',reason:'malformed'},{kind:'internal',reason:'bootstrap'}]);
+for(const type of ['localImage','local_image']) {
+  const content=[{type,path:'/synthetic/attachment.png'},{type:'text',text:'Describe this image.'}];
+  const item={type:'userMessage',content},record={id:'local-image-fixture',ordinal:1,item};
+  const native=parseCodexNativeRecords([record]).messages[0];
+  const rawRecord={type:'response_item',payload:{type:'message',role:'user',content}};
+  const raw=parseCodexSessionContent(JSON.stringify(rawRecord)).messages[0];
+  for(const message of [native,raw]) assert.equal(message.text,'[Image]\nDescribe this image.');
+  assert.equal(native.sourceRecord,item);
+  assert.equal(native.sourceRecordId,record.id);
+  assert.deepEqual(raw.sourceRecord,rawRecord);
+}
 const cli=spawnSync(process.execPath,['dist-reader/server/classify-user-inputs.mjs'],{input:JSON.stringify(batch),encoding:'utf8'});
 assert.equal(cli.status,0,cli.stderr);
 assert.deepEqual(JSON.parse(cli.stdout),classifyUserInputs(batch));
