@@ -1,6 +1,7 @@
+import type {SessionMessage} from '../src/types/session'
 import {readFile,writeFile,rename} from 'node:fs/promises'
 import {createHash} from 'node:crypto'
-import {parseClaudeSessionWithState,continueClaudeSessionWithState} from '../src/lib/providers/claude'
+import {parseClaudeSessionWithState,continueClaudeSessionWithState,buildClaudeSourceAnchors} from '../src/lib/providers/claude'
 
 // reader-parser <source> <target> <session> [statePath previousPath parserSha]
 // Without the optional trio: full parse, no state (the original contract).
@@ -71,7 +72,7 @@ if(!outcome){
 }
 const {data,state}=outcome as NonNullable<typeof outcome>
 if(statePath)process.stderr.write(`reader-parser: ${mode}\n`)
-await writeFile(target+'.tmp',JSON.stringify({...data,pendingTail}),{mode:0o600})
+await writeFile(target+'.tmp',JSON.stringify({...data,pendingTail,sourceAnchors:buildClaudeSourceAnchors(content,data.messages as SessionMessage[],session)}),{mode:0o600})
 await rename(target+'.tmp',target)
 if(statePath){
   // State is stamped after the output rename: a crash between the two leaves an

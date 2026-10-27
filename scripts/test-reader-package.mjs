@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {SessionReader, classifyUserInputContent, classifyUserInputs, parseCodexNativeRecords, parseCodexSessionContent} from '../dist-reader/reader.mjs';
+import {SessionReader, classifyUserInputContent, classifyUserInputs, parseCodexNativeRecords, parseCodexSessionContent, parseClaudeSessionContent, buildClaudeSourceAnchors, normalizeConversationPage, resolveConversationAnchor} from '../dist-reader/reader.mjs';
 import {spawnSync} from 'node:child_process';
 
 // Exercise the built public export without a global React namespace. Source
@@ -39,3 +39,14 @@ const invalid=spawnSync(process.execPath,['dist-reader/server/classify-user-inpu
 assert.notEqual(invalid.status,0);
 assert.equal(invalid.stdout,'');
 console.log('PASS built classification SDK and CLI preserve batch results and fail closed');
+
+const sourceId='11111111-2222-3333-4444-555555555555';
+const sourceContent=JSON.stringify({type:'assistant',uuid:sourceId,message:{role:'assistant',content:[{type:'text',text:'Record context'},{type:'tool_use',id:'tool-1',name:'Agent',input:{}}]}})+'\n';
+const parsed=parseClaudeSessionContent(sourceContent);
+const sourceAnchors=buildClaudeSourceAnchors(sourceContent,parsed.messages,'package-session');
+const sourcePage={provider:'claude',session_id:'package-session',records:parsed.messages.map((message,index)=>({kind:'flow-message',id:String(index),message})),sourceAnchors};
+assert.equal(resolveConversationAnchor(sourcePage,sourceId),0);
+assert.equal(resolveConversationAnchor(sourcePage,'1'),1);
+assert.equal(normalizeConversationPage(sourcePage).messages[0].sourceRecordId,'0');
+assert.equal(buildClaudeSourceAnchors(sourceContent+sourceContent,parsed.messages,'package-session').entries.length,0);
+console.log('PASS built source-anchor SDK preserves raw context and numeric file owners');

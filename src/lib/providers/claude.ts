@@ -364,6 +364,36 @@ function recordProvenance(data: Record<string, unknown>): { sourceRecordId?: str
   return typeof data.uuid === 'string' && data.uuid.trim().length > 0 ? { sourceRecordId: data.uuid } : {}
 }
 
+export interface ClaudeSourceAnchors {
+  version: 1
+  session_id: string
+  entries: Array<{sourceRecordId: string; messageIndex: number}>
+}
+
+/** A raw-record anchor names context, not an individual tool/content block. */
+export function buildClaudeSourceAnchors(content: string, messages: SessionMessage[], sessionId: string): ClaudeSourceAnchors {
+  const counts = new Map<string, number>()
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const record: unknown = JSON.parse(line)
+      if (!record || typeof record !== 'object' || Array.isArray(record)) continue
+      const id = (record as Record<string, unknown>).uuid
+      if (typeof id === 'string' && id.trim()) counts.set(id, (counts.get(id) ?? 0) + 1)
+    } catch { /* Partial tails and omitted malformed lines grant no anchor. */ }
+  }
+  const entries: ClaudeSourceAnchors['entries'] = []
+  const indexed = new Set<string>()
+  messages.forEach((message, messageIndex) => {
+    const id = message.sourceRecordId
+    if (id && counts.get(id) === 1 && !indexed.has(id)) {
+      indexed.add(id)
+      entries.push({sourceRecordId: id, messageIndex})
+    }
+  })
+  return {version: 1, session_id: sessionId, entries}
+}
+
 function toolProvenance(id: unknown): { toolUseId?: string } {
   return typeof id === 'string' && id.trim().length > 0 ? { toolUseId: id } : {}
 }

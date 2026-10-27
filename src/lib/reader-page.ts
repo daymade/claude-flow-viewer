@@ -1,4 +1,5 @@
 import {parseCodexNativeRecords, type NativeConversationRecord} from './providers/codex-native'
+import type {ClaudeSourceAnchors} from './providers/claude'
 import {computeHeatmap} from './heatmap'
 import type {SessionData,SessionMessage} from '../types/session'
 export interface FlowConversationRecord {kind:'flow-message';id:string;message:SessionMessage;timestamp?:string|null}
@@ -6,6 +7,7 @@ export interface ConversationPage {
   provider:'claude'|'codex'; session_id:string
   records:Array<NativeConversationRecord | FlowConversationRecord>
   total:number;offset:number;next_offset:number;has_earlier:boolean;has_later:boolean
+  sourceAnchors?:ClaudeSourceAnchors
   revision?:string;until?:number;read_at:string;boundary:string
   identity?:{node:string;provider:string;session_id:string;manifest_sha256?:string;source_path?:string}
 }
@@ -38,4 +40,23 @@ export function normalizeConversationPage(page:ConversationPage):SessionData {
   })
   const prompts=promptsFromMessages(messages)
   return {source:page.provider,messages,prompts,heatmap:computeHeatmap(messages),markers:{compacts:0,plans:0,clears:0,forks:0}}
+}
+
+/** Resolve only coordinates certified by this session's official parser snapshot. */
+export function resolveConversationAnchor(page:ConversationPage,anchor:string):number {
+  if(page.provider==='codex')return normalizeConversationPage(page).messages.findIndex(message=>message.sourceRecordId===anchor)
+  const direct=page.records.flatMap((record,index)=>record.id===anchor ? [index] : [])
+  if(direct.length===1)return direct[0]
+  if(direct.length>1)return -1
+  const packet=page.sourceAnchors
+  if(!packet || packet.version!==1 || packet.session_id!==page.session_id || !Array.isArray(packet.entries))return -1
+  const matches=packet.entries.filter(entry=>entry?.sourceRecordId===anchor)
+  if(matches.length!==1)return -1
+  const coordinate=matches[0].messageIndex
+  if(!Number.isSafeInteger(coordinate) || coordinate<0)return -1
+  const records=page.records.flatMap((record,index)=>record.id===String(coordinate) ? [{record,index}] : [])
+  if(records.length!==1)return -1
+  const {record,index}=records[0]
+  if(!('message' in record) || record.kind!=='flow-message' || record.message?.sourceRecordId!==anchor)return -1
+  return index
 }
