@@ -178,7 +178,7 @@ export function ReaderEmbed() {
       }
       const data=adapt(merged)
       let index=anchor ? resolveConversationAnchor(merged,anchor) : mode==='latest' ? data.messages.length-1 : 0
-      if(anchor && index<0)throw new Error('Requested source record is not uniquely available in this reading window')
+      if(anchor && index<0){setTarget(null);throw new Error('Requested source record is not uniquely available in this reading window')}
       if(conversationView && !anchor){
         const conversationIndices=data.messages.flatMap((message,index)=>message.kind==='ai-text' || message.kind==='user-prompt' ? [index] : [])
         index=(mode==='latest' ? conversationIndices[conversationIndices.length-1] : conversationIndices[0]) ?? -1

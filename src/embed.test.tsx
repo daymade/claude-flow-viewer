@@ -1041,4 +1041,23 @@ it('shows an unavailable source anchor instead of silently focusing unrelated te
  await screen.findByText('first message')
  act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel:'anchor-proof',recordId:uuid}))
  await screen.findByText('Requested source record is not uniquely available in this reading window')
+ expect(document.querySelector('[data-message-index].ring-1')).toBeNull()
+})
+it('retires an accepted raw focus when the next page cannot certify the same source anchor',async()=>{
+ const endpoint='/api/sessions/source-anchor-retired',uuid='11111111-2222-3333-4444-555555555555'
+ const first={...page,records:[
+  {kind:'flow-message',id:'140',message:{kind:'ai-tool-use',name:'Agent',summary:'First certified Agent context',input:{description:'First certified Agent context'},sourceRecordId:uuid}},
+  {kind:'flow-message',id:'141',message:{kind:'ai-text',text:'First context tail'}},
+ ],sourceAnchors:{version:1,session_id:'sess-1',entries:[{sourceRecordId:uuid,messageIndex:140}]}}
+ let response:unknown=first
+ vi.stubGlobal('fetch',vi.fn(async()=>jsonResponse(response)))
+ await mountEmbed(`/reader/embed.html?endpoint=${endpoint}&session=sess-1&channel=retired`)
+ await screen.findByText('First certified Agent context')
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel:'retired',recordId:uuid}))
+ await waitFor(()=>expect(ringAt(0)).toContain('ring-'))
+ response={...page,records:[{kind:'flow-message',id:'140',message:{kind:'ai-text',text:'UNRELATED replacement context',sourceRecordId:uuid}}]}
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel:'retired',recordId:uuid}))
+ await screen.findByText('Requested source record is not uniquely available in this reading window')
+ expect(screen.getByText('UNRELATED replacement context')).toBeTruthy()
+ expect(ringAt(0)).not.toContain('ring-')
 })
