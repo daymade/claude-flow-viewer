@@ -1,4 +1,5 @@
 import {parseCodexNativeRecords, type NativeConversationRecord} from './providers/codex-native'
+import type {ConversationImageResources} from './image-references'
 import type {ClaudeSourceAnchors} from './providers/claude'
 import {computeHeatmap} from './heatmap'
 import type {SessionData,SessionMessage} from '../types/session'
@@ -7,6 +8,7 @@ export interface ConversationPage {
   provider:'claude'|'codex'; session_id:string
   records:Array<NativeConversationRecord | FlowConversationRecord>
   total:number;offset:number;next_offset:number;has_earlier:boolean;has_later:boolean
+  imageResources?:ConversationImageResources
   sourceAnchors?:ClaudeSourceAnchors
   revision?:string;until?:number;read_at:string;boundary:string
   identity?:{node:string;provider:string;session_id:string;manifest_sha256?:string;source_path?:string}

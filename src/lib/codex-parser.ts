@@ -323,6 +323,7 @@ function parseContentParts(content: unknown): { text: string; images: EmbeddedIm
     }
 
     if (type === 'localImage' || type === 'local_image') {
+      if(typeof part.path==='string'&&part.path.trim())images.push({mediaType:'',dataUrl:'',reference:part.path})
       parts.push(typeof part.path === 'string' && part.path.trim() ? '[Image]' : stringifyDisplayValue(part))
       continue
     }
@@ -388,6 +389,7 @@ function extractPromptFromEvent(event: Record<string, unknown>): CodexPrompt | n
           const mediaTypeMatch = item.match(/^data:([^;]+);/)
           images.push({ mediaType: mediaTypeMatch?.[1] || 'image/png', dataUrl: item })
         } else {
+          images.push({mediaType:'',dataUrl:'',reference:item})
           textParts.push(`[Image: ${filenameOf(item)}]`)
         }
         continue

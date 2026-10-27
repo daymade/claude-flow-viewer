@@ -61,6 +61,14 @@ Find 输入框聚焦或搜索词非空时，嵌入页在工具栏显示「仅搜
 
 Claude 解析消息的可选 `sourceRecordId` 保留原 JSONL 记录的 `uuid`；同一记录的多段内容共享它，它不是投影消息的唯一键。工具调用的 `toolUseId` 来自原 `tool_use.id`，工具结果来自原 `tool_result.tool_use_id`，不按显示顺序或工具名称配对。TeamMate 消息、压缩边界与分支内消息也保留各自来源记录身份；缺失的 ID 保持缺失，不据此猜测子 Agent 或会话关系。完整解析与增量续解析遵循同一来源合同。
 
+本地图片使用显式只读资源合同；原 Markdown 不改写，也不将本机文件路径当作浏览器地址。官方 `server/image-references.mjs` 接受 stdin `{version:1,page:<ConversationPage>}`，输出 `{version:1,records:[{id,references:[string]}]}`。它与渲染器共用 Markdown AST 图片／引用式图片规则，排除代码和普通链接，保留原引用（包括空格、Unicode）供宿主核对；Codex `localImage` / `local_image` 的原路径由官方解析器保留为 `user-prompt.images[].reference`。该 CLI 只解释记录，不读文件或授予权限。
+
+宿主可在同页增加 `imageResources:{version:1,session_id,revision,identity,entries}`。`identity` 必须镜像当前页的来源身份，缺失来源时显式为 null。可读 entry 为 `{recordId,reference,state:"readable",url,source:"current-file",observed_at:<ISO datetime>}`（state 可省）；不可读 entry 为 `{recordId,reference,state:"unavailable",reason}`。SDK `resolveConversationImage(page,reference,sourceRecordId,apiPrefix)` 核对同会话、同 revision、相同来源身份、唯一原记录归属、该记录经官方规则确认的 exact reference 及唯一 entry；URL 只接受当前挂载下同源 `/api/` 命名空间内的不透明地址，不接受查询、fragment 或越径。SDK `conversationImageReferences(page)` 与 CLI 共用该解释，不在宿主复制 Markdown 或原生消息解析。
+
+共享 `SessionReader` 可选 `resolveImage` 接收该已绑定资源；嵌入页自动消费同页 `imageResources`。本地图片未绑定、来源变化、文件缺失或不支持时显示具体读取边界，不向原始本机路径请求。认证资源通过 same-origin、禁止跳转的 GET 读为图片 Blob；来源／资源切换与组件退出会取消迟到读取并释放 Blob URL。宿主仍须在每次 GET 核验精确来源、原记录／引用、文件状态和允许范围，返回正确图片 MIME；图片旁显示“当前源文件”，观察时间来自 `observed_at`；这展示当前来源文件，不声称历史图像快照。合法 HTTPS 与 inline/base64 图片、普通链接及 Find 保留原行为。
+
+不可读原因使用有限码 `image_missing`、`image_not_physical`、`image_outside_scope`、`image_too_large`、`image_not_supported`、`image_changed`、`image_source_unavailable`；资源 GET 可用相同 JSON `detail` 说明失败。Reader 不因引用存在而读取任意路径，不认证执行者，也不访问图片所表示的目标。
+
 Claude 原始记录上下文定位与渲染／文件引用坐标分开。`parse-claude.mjs` 输出 `sourceAnchors: {version:1, session_id, entries:[{sourceRecordId, messageIndex}]}`；`messageIndex` 是本次完整解析 `messages` 的零基索引。同一原始记录的多个内容块定位到第一个已解析容器；全原文中重复出现的 UUID、缺失或无效 UUID、未渲染记录不产生入口。该定位只证明原记录上下文，不证明某个工具块或子 Agent 正文。增量 CLI 每次从本次完整原文重新核对唯一性，旧缓存不会认证新出现的重复 UUID。
 
 宿主分页保留原 `flow-message.id = String(messageIndex)` 和消息内原 `sourceRecordId`，连同本次同源快照的 `sourceAnchors` 交给 Reader。SDK `resolveConversationAnchor(page, anchor)` 与嵌入页共用解析：原 UUID 仅在 packet 的 session 与当前页相同、唯一入口指向本页唯一 numeric owner，且该消息原 UUID 相符时定位；缺失／过期／重复／越窗／来源不符返回 `-1`。既有 record.id 定位继续工作，`normalizeConversationPage` 的 Claude numeric `sourceRecordId` 和 `cfv:open-file` 的文件归属不变。宿主仍负责 endpoint、identity、revision/window 的完整绑定；该索引不授予文件能力、跨会话读取或执行权。

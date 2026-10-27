@@ -4,6 +4,7 @@ import { SessionReader } from './components/session/SessionReader'
 import {normalizeConversationPage as adapt,resolveConversationAnchor,type ConversationPage as Page} from './lib/reader-page'
 import type { ReaderJumpTarget } from './components/session/SessionView'
 import { bindEmbedEndpoint, embedRequestUrl } from './lib/embed-endpoint'
+import {resolveConversationImage,mergeConversationImageResources} from './lib/image-references'
 import './index.css'
 import './embed.css'
 const CONVERSATION_FILTER = {thinking:false,toolCalls:false,toolResults:false}
@@ -170,6 +171,7 @@ export function ReaderEmbed() {
       if(version!==generation.current)return
       if(previous && ['earlier','later'].includes(mode) && next.session_id!==previous.session_id)throw new Error('Selected session identity changed')
       const merged=mode==='earlier' && previous ? {...next,records:[...next.records,...previous.records],next_offset:previous.next_offset,has_later:previous.has_later} : mode==='later' && previous ? {...next,offset:previous.offset,has_earlier:previous.has_earlier,records:[...previous.records,...next.records]} : next
+      if(previous&&['earlier','later'].includes(mode))merged.imageResources=mergeConversationImageResources(previous,next)
       current.current=merged;setPage(merged)
       if(['earlier','later'].includes(mode) && findIntent.current.version!==findVersion && findIntent.current.query){
         // Prepending changes message indexes; a retired navigation must not revive when Find is cleared.
@@ -206,6 +208,11 @@ export function ReaderEmbed() {
     if(!response.ok)throw new Error(await response.text())
     const output=await response.json();return String(output.content)
   },[endpoint])
+  const resolveImage=useCallback((reference:string,recordId:string)=>{
+    if(!endpoint||!page||expectedSession!==page.session_id)return null
+    const apiPrefix=endpoint.slice(0,endpoint.indexOf('/api/')+5)
+    return resolveConversationImage(page,reference,recordId,apiPrefix)
+  },[endpoint,page,expectedSession])
   const closeOtherDisclosure=(open:HTMLDetailsElement)=>{
     if(!open.open)return
     for(const ref of [historyRef,sourceRef])if(ref.current!==open)ref.current?.removeAttribute('open')
@@ -231,7 +238,7 @@ export function ReaderEmbed() {
       </details>
       <button type="button" onClick={()=>setBlockedLink(null)}>关闭</button>
     </div>}
-    {page && data ? <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} onFindQueryChange={recordFindEdit} findScopeLabel="仅搜索已加载范围" readToolResult={readToolResult} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} toolbarLeading={historyControls} toolbarTrailing={sourceControls} pending={busy} emptyStateAction={page.has_earlier ? <button type="button" className="reader-empty-action" disabled={busy} onClick={()=>void read('earlier')}>加载更早的对话</button> : null} /> : <div className="session-reader-toolbar">{historyControls}{busy && <span className="embed-status" role="status">正在读取绑定会话…</span>}</div>}
+    {page && data ? <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} onFindQueryChange={recordFindEdit} findScopeLabel="仅搜索已加载范围" readToolResult={readToolResult} resolveImage={resolveImage} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} toolbarLeading={historyControls} toolbarTrailing={sourceControls} pending={busy} emptyStateAction={page.has_earlier ? <button type="button" className="reader-empty-action" disabled={busy} onClick={()=>void read('earlier')}>加载更早的对话</button> : null} /> : <div className="session-reader-toolbar">{historyControls}{busy && <span className="embed-status" role="status">正在读取绑定会话…</span>}</div>}
   </div>
 }
 createRoot(document.getElementById('root')!).render(<ReaderEmbed />)

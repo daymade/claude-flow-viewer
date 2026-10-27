@@ -85,7 +85,7 @@ describe('shared user input content interpretation', () => {
       const native = parseCodexNativeRecords([record]).messages[0]
       const rawRecord = {type:'response_item',timestamp:'2026-01-01T00:00:00Z',payload:{type:'message',role:'user',content}}
       const raw = parseCodexSessionContent(JSON.stringify(rawRecord)).messages[0]
-      for (const message of [native,raw]) expect(message).toMatchObject({kind:'user-prompt',text:'[Image]\nDescribe this image.',images:[],inputClassification:{kind:'ordinary',reason:'attachment'}})
+      for (const message of [native,raw]) expect(message).toMatchObject({kind:'user-prompt',text:'[Image]\nDescribe this image.',images:[{mediaType:'',dataUrl:'',reference:'/synthetic/attachment.png'}],inputClassification:{kind:'ordinary',reason:'attachment'}})
       expect(native.sourceRecord).toBe(record.item)
       expect(native.sourceRecordId).toBe(record.id)
       expect(raw.sourceRecord).toEqual(rawRecord)
