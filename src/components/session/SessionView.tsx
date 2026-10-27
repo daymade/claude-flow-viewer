@@ -3,7 +3,7 @@ import type { SessionData, SessionMessage, FilterState, PromptIndexEntry } from 
 import { extractTimelineEvents } from '../../lib/timeline'
 import { Timeline } from './Timeline'
 import { useHoverCard, HoverCard } from '../shared/HoverCard'
-import { SessionResources, type ReadToolResult, type SessionResourcesValue } from './SessionResources'
+import { SessionResources, type ReadToolResult, type ResolveImage, type SessionResourcesValue } from './SessionResources'
 import {
   PromptBlock,
   AiTextBlock,
@@ -44,6 +44,7 @@ export interface SessionViewProps {
   header?: React.ReactNode
   readerMode?: boolean
   readToolResult?: ReadToolResult | null
+  resolveImage?: ResolveImage | null
   /** Semantic identity of the session resource behind `readToolResult`. */
   resourceScope?: string | null
   /** Optional actions rendered with the fully-filtered guidance (e.g. adjust filters, load earlier). */
@@ -116,6 +117,7 @@ export function SessionView({
   header = null,
   readerMode = false,
   readToolResult = null,
+  resolveImage = null,
   resourceScope = null,
   filteredEmptyActions = null,
   rangeEmptyActions = null,
@@ -124,10 +126,11 @@ export function SessionView({
   const contentRef = useRef<HTMLDivElement>(null)
   const resourcesValue = useMemo<SessionResourcesValue | null>(
     () => {
-      if (!readToolResult) return null
-      return resourceScope != null ? { readToolResult, scope: resourceScope } : readToolResult
+      if (!readToolResult&&!resolveImage) return null
+      if(resolveImage)return {readToolResult:readToolResult??undefined,resolveImage,scope:resourceScope}
+      return resourceScope != null ? { readToolResult:readToolResult!, scope: resourceScope } : readToolResult
     },
-    [readToolResult, resourceScope],
+    [readToolResult, resolveImage, resourceScope],
   )
   const [activePromptNums, setActivePromptNums] = useState<Set<number>>(new Set())
   const [scrollFraction, setScrollFraction] = useState(0)

@@ -1,4 +1,6 @@
 import { createContext, useContext } from 'react'
+import type {ImageResource} from '../../lib/image-references'
+export type ResolveImage=(reference:string,sourceRecordId:string)=>ImageResource|null
 
 export type ReadToolResult = (relativePath: string) => Promise<string>
 
@@ -14,7 +16,8 @@ export type ReadToolResult = (relativePath: string) => Promise<string>
  * identity signal and consumers conservatively invalidate on loader change.
  */
 export interface ScopedToolResultReader {
-  readToolResult: ReadToolResult
+  readToolResult?: ReadToolResult
+  resolveImage?: ResolveImage
   scope?: string | null
 }
 

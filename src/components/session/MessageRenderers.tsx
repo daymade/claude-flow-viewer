@@ -1,11 +1,21 @@
 import { useState, useCallback, useRef } from 'react'
 import Markdown from 'react-markdown'
+import {SessionImage} from './SessionImage'
+import {remarkImageReferences} from '../../lib/image-references'
 import remarkGfm from 'remark-gfm'
 import type { SessionMessage, FilterState } from '../../types/session'
 import { formatTokens } from '../../lib/timeline'
 import { useSessionResources, resolveToolResultReader, type ReadToolResult } from './SessionResources'
 
-const REMARK_PLUGINS = [remarkGfm]
+const REMARK_PLUGINS = [remarkGfm,remarkImageReferences]
+
+function MessageMarkdown({text,sourceRecordId}:{text:string;sourceRecordId?:string}) {
+  return <Markdown remarkPlugins={REMARK_PLUGINS}
+    components={{img:({src,alt,title,node})=>{
+      const original=node?.properties?.['data-image-reference']
+      return <SessionImage reference={typeof original==='string'?original:src??''} sourceRecordId={sourceRecordId} alt={alt??''} title={title}/>
+    }}}>{text}</Markdown>
+}
 
 // ━━━ L0: User Prompt ━━━ Chat Bubble ━━━
 
@@ -72,11 +82,13 @@ export function PromptBlock({ msg, searchQuery }: {
         <span className="text-[10px] text-stone-400 font-mono ml-auto tabular-nums">{msg.time}</span>
       </div>
       <div className="text-[15px] leading-[1.75] break-words text-stone-800 prose prose-sm max-w-none prose-p:my-1.5 prose-p:leading-[1.75] prose-headings:my-2 prose-headings:text-stone-900 prose-a:text-amber-700 prose-a:break-all hover:prose-a:underline prose-code:text-[13px] prose-code:bg-stone-200/70 prose-code:text-stone-800 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-pre:bg-stone-900 prose-pre:text-stone-100 prose-pre:text-[13px] prose-pre:leading-relaxed prose-pre:my-2 prose-pre:rounded-md prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 prose-hr:my-2.5 prose-hr:border-stone-300/70 prose-strong:text-stone-900 prose-blockquote:border-l-stone-300 prose-blockquote:text-stone-600 [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0 prose-table:text-[13px] [&_table]:block [&_table]:overflow-x-auto">
-        <Markdown remarkPlugins={REMARK_PLUGINS}>{msg.text}</Markdown>
+        <MessageMarkdown text={msg.text} sourceRecordId={msg.sourceRecordId}/>
       </div>
       {msg.images.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-3">
-          {msg.images.map((img, i) => (
+          {msg.images.map((img, i) => img.reference ? (
+            <SessionImage key={i} className="max-w-full max-h-[400px] rounded-xl border border-white/50 shadow-sm" reference={img.reference} sourceRecordId={msg.sourceRecordId} alt={`Attached image ${i+1}`}/>
+          ) : (
             <a key={i} href={img.dataUrl} target="_blank" rel="noopener noreferrer" className="block">
               <img
                 src={img.dataUrl}
@@ -96,7 +108,7 @@ export function PromptBlock({ msg, searchQuery }: {
 export function AiTextBlock({ msg }: { msg: Extract<SessionMessage, { kind: 'ai-text' }> }) {
   return (
     <div className="mt-3 mb-2 pl-2 pr-1 text-[15px] leading-[1.8] text-stone-700 break-words prose prose-stone max-w-none prose-p:my-2 prose-headings:mt-5 prose-headings:mb-2.5 prose-headings:text-stone-900 prose-headings:font-semibold prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-pre:bg-stone-900 prose-pre:text-stone-100 prose-pre:text-sm prose-pre:leading-relaxed prose-pre:rounded-md prose-code:text-sm prose-code:bg-stone-100 prose-code:text-stone-800 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0 prose-a:text-amber-700 prose-a:no-underline hover:prose-a:underline prose-table:text-sm [&_table]:block [&_table]:overflow-x-auto prose-th:px-3 prose-th:py-2 prose-th:bg-stone-50 prose-th:text-left prose-th:whitespace-nowrap prose-td:px-3 prose-td:py-2 prose-td:border-stone-200 prose-td:whitespace-nowrap prose-blockquote:border-l-stone-300 prose-blockquote:text-stone-600 prose-hr:my-5 prose-img:rounded-md prose-strong:text-stone-900 sm:pl-6 sm:pr-2">
-      <Markdown remarkPlugins={REMARK_PLUGINS}>{msg.text}</Markdown>
+      <MessageMarkdown text={msg.text} sourceRecordId={msg.sourceRecordId}/>
     </div>
   )
 }

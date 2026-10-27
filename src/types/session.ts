@@ -8,6 +8,8 @@ export type UserInputOrigin = 'direct' | 'queued' | 'compacted'
 export interface EmbeddedImage {
   mediaType: string
   dataUrl: string
+  /** Original local attachment reference; never an HTTP URL or a read capability. */
+  reference?: string
 }
 
 export type SessionMessage = { sourceRecordId?: string; sourceRecord?: Record<string,unknown> } & (

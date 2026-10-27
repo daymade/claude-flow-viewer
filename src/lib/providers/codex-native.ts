@@ -29,7 +29,7 @@ export function parseCodexNativeRecords(records: NativeConversationRecord[]): Se
       const images: EmbeddedImage[] = []
       const text = parts.map(part => {
         if (part && typeof part === 'object' && ['localImage','local_image'].includes(part.type)
-            && typeof part.path === 'string' && part.path.trim()) return '[Image]'
+            && typeof part.path === 'string' && part.path.trim()) {images.push({mediaType:'',dataUrl:'',reference:part.path});return '[Image]'}
         if (part && typeof part === 'object' && ['image','input_image'].includes(part.type)) {
           const url = part.url ?? part.image_url
           if (typeof url === 'string' && url.startsWith('data:image/')) images.push({mediaType:url.slice(5,url.indexOf(';')),dataUrl:url})

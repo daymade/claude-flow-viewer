@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {SessionReader, classifyUserInputContent, classifyUserInputs, parseCodexNativeRecords, parseCodexSessionContent, parseClaudeSessionContent, buildClaudeSourceAnchors, normalizeConversationPage, resolveConversationAnchor} from '../dist-reader/reader.mjs';
+import {SessionReader, classifyUserInputContent, classifyUserInputs, parseCodexNativeRecords, parseCodexSessionContent, parseClaudeSessionContent, buildClaudeSourceAnchors, normalizeConversationPage, resolveConversationAnchor, conversationImageReferences, resolveConversationImage} from '../dist-reader/reader.mjs';
 import {spawnSync} from 'node:child_process';
 
 // Exercise the built public export without a global React namespace. Source
@@ -50,3 +50,16 @@ assert.equal(resolveConversationAnchor(sourcePage,'1'),1);
 assert.equal(normalizeConversationPage(sourcePage).messages[0].sourceRecordId,'0');
 assert.equal(buildClaudeSourceAnchors(sourceContent+sourceContent,parsed.messages,'package-session').entries.length,0);
 console.log('PASS built source-anchor SDK preserves raw context and numeric file owners');
+
+const imagePage={provider:'codex',session_id:'image-fixture',revision:'revision-a',records:[{id:'image-owner',ordinal:1,item:{type:'agentMessage',text:'![Required](/synthetic/required.png)'}}]};
+const imageInput={version:1,page:imagePage};
+const imageCli=spawnSync(process.execPath,['dist-reader/server/image-references.mjs'],{input:JSON.stringify(imageInput),encoding:'utf8'});
+assert.equal(imageCli.status,0,imageCli.stderr);
+assert.deepEqual(JSON.parse(imageCli.stdout),conversationImageReferences(imagePage));
+assert.deepEqual(JSON.parse(imageCli.stdout).records,[{id:'image-owner',references:['/synthetic/required.png']}]);
+imagePage.imageResources={version:1,session_id:'image-fixture',revision:'revision-a',identity:null,entries:[{recordId:'image-owner',reference:'/synthetic/required.png',source:'current-file',observed_at:'2026-10-27T00:00:00Z',url:'/api/images/opaque'}]};
+assert.equal(resolveConversationImage(imagePage,'/synthetic/required.png','image-owner','/api/').url,'/api/images/opaque');
+assert.equal(resolveConversationImage({...imagePage,session_id:'other'},'/synthetic/required.png','image-owner','/api/'),null);
+const duplicateImage=spawnSync(process.execPath,['dist-reader/server/image-references.mjs'],{input:JSON.stringify({version:1,page:{...imagePage,records:[imagePage.records[0],imagePage.records[0]]}}),encoding:'utf8'});
+assert.notEqual(duplicateImage.status,0);assert.equal(duplicateImage.stdout,'');
+console.log('PASS built image-reference CLI and SDK share exact ownership and reject foreign or duplicate records');

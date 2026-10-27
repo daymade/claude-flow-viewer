@@ -12,3 +12,6 @@ export type {UserInputClassification, UserInputBatch, UserInputBatchResult} from
 export type {ConversationPage} from './lib/reader-page'
 export {buildClaudeSourceAnchors} from './lib/providers/claude'
 export type {ClaudeSourceAnchors} from './lib/providers/claude'
+export {classifyImageReference,imageReferencesForMessage,conversationImageReferences,resolveConversationImage,IMAGE_REASONS} from './lib/image-references'
+export type {ConversationImageResources,ImageResource,ImageFailureReason} from './lib/image-references'
+export type {ResolveImage} from './components/session/SessionResources'
