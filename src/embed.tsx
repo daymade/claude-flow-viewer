@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client'
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { SessionReader } from './components/session/SessionReader'
-import {normalizeConversationPage as adapt,type ConversationPage as Page} from './lib/reader-page'
+import {normalizeConversationPage as adapt,resolveConversationAnchor,type ConversationPage as Page} from './lib/reader-page'
 import type { ReaderJumpTarget } from './components/session/SessionView'
 import { bindEmbedEndpoint, embedRequestUrl } from './lib/embed-endpoint'
 import './index.css'
@@ -177,7 +177,8 @@ export function ReaderEmbed() {
         return
       }
       const data=adapt(merged)
-      let index=anchor ? data.messages.findIndex(message=>message.sourceRecordId===anchor) : mode==='latest' ? data.messages.length-1 : 0
+      let index=anchor ? resolveConversationAnchor(merged,anchor) : mode==='latest' ? data.messages.length-1 : 0
+      if(anchor && index<0)throw new Error('Requested source record is not uniquely available in this reading window')
       if(conversationView && !anchor){
         const conversationIndices=data.messages.flatMap((message,index)=>message.kind==='ai-text' || message.kind==='user-prompt' ? [index] : [])
         index=(mode==='latest' ? conversationIndices[conversationIndices.length-1] : conversationIndices[0]) ?? -1

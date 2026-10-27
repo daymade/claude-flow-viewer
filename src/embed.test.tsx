@@ -1019,3 +1019,26 @@ it('shows a distinct zero-records message and never displays success-empty while
   expect(await screen.findByText('returned original body')).toBeTruthy()
   expect(screen.queryByText('当前读取范围没有记录')).toBeNull()
 })
+
+it('focuses an original Claude UUID through its numeric owner while preserving numeric focus',async()=>{
+ const endpoint='/api/sessions/source-anchor'
+ const uuid='11111111-2222-3333-4444-555555555555'
+ const anchored={...page,records:page.records.map((record,index)=>({...record,id:String(140+index),message:{...record.message,sourceRecordId:index===1 ? uuid : `other-${index}`}})),
+  sourceAnchors:{version:1,session_id:'sess-1',entries:[{sourceRecordId:uuid,messageIndex:141}]}}
+ const fetchMock=vi.fn(async()=>jsonResponse(anchored));vi.stubGlobal('fetch',fetchMock)
+ await mountEmbed(`/reader/embed.html?endpoint=${endpoint}&session=sess-1&channel=anchor-proof`)
+ await screen.findByText('the selected question')
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel:'anchor-proof',recordId:uuid}))
+ await waitFor(()=>expect(ringAt(1)).toContain('ring-'))
+ expect(anchorCalls(fetchMock,endpoint)).toHaveLength(1)
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel:'anchor-proof',recordId:'140'}))
+ await waitFor(()=>expect(ringAt(0)).toContain('ring-'))
+})
+it('shows an unavailable source anchor instead of silently focusing unrelated text',async()=>{
+ const endpoint='/api/sessions/source-anchor-denied',uuid='11111111-2222-3333-4444-555555555555'
+ vi.stubGlobal('fetch',vi.fn(async()=>jsonResponse({...page,sourceAnchors:{version:1,session_id:'foreign',entries:[{sourceRecordId:uuid,messageIndex:1}]}})))
+ await mountEmbed(`/reader/embed.html?endpoint=${endpoint}&session=sess-1&channel=anchor-proof`)
+ await screen.findByText('first message')
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel:'anchor-proof',recordId:uuid}))
+ await screen.findByText('Requested source record is not uniquely available in this reading window')
+})

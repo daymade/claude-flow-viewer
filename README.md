@@ -61,6 +61,10 @@ Find 输入框聚焦或搜索词非空时，嵌入页在工具栏显示「仅搜
 
 Claude 解析消息的可选 `sourceRecordId` 保留原 JSONL 记录的 `uuid`；同一记录的多段内容共享它，它不是投影消息的唯一键。工具调用的 `toolUseId` 来自原 `tool_use.id`，工具结果来自原 `tool_result.tool_use_id`，不按显示顺序或工具名称配对。TeamMate 消息、压缩边界与分支内消息也保留各自来源记录身份；缺失的 ID 保持缺失，不据此猜测子 Agent 或会话关系。完整解析与增量续解析遵循同一来源合同。
 
+Claude 原始记录上下文定位与渲染／文件引用坐标分开。`parse-claude.mjs` 输出 `sourceAnchors: {version:1, session_id, entries:[{sourceRecordId, messageIndex}]}`；`messageIndex` 是本次完整解析 `messages` 的零基索引。同一原始记录的多个内容块定位到第一个已解析容器；全原文中重复出现的 UUID、缺失或无效 UUID、未渲染记录不产生入口。该定位只证明原记录上下文，不证明某个工具块或子 Agent 正文。增量 CLI 每次从本次完整原文重新核对唯一性，旧缓存不会认证新出现的重复 UUID。
+
+宿主分页保留原 `flow-message.id = String(messageIndex)` 和消息内原 `sourceRecordId`，连同本次同源快照的 `sourceAnchors` 交给 Reader。SDK `resolveConversationAnchor(page, anchor)` 与嵌入页共用解析：原 UUID 仅在 packet 的 session 与当前页相同、唯一入口指向本页唯一 numeric owner，且该消息原 UUID 相符时定位；缺失／过期／重复／越窗／来源不符返回 `-1`。既有 record.id 定位继续工作，`normalizeConversationPage` 的 Claude numeric `sourceRecordId` 和 `cfv:open-file` 的文件归属不变。宿主仍负责 endpoint、identity、revision/window 的完整绑定；该索引不授予文件能力、跨会话读取或执行权。
+
 增量状态使用 `ClaudeParserState` version 3；旧状态自动退回完整解析，避免复用没有来源字段的冻结消息。构建共享包用 `npm run build:reader`，CLI 的原有参数与完整解析回退流程不变。
 
 共享包导出 `classifyUserInputContent(content)` 与 `classifyUserInputs(batch)`，Codex raw/native 的 `user-prompt.inputClassification` 使用同一内容规则：`ordinary`、`internal`、`control` 或 `unknown`，附 `reason`。它解释内容，不认证操作者；原记录、来源 ID、顺序与正文保持不变。短“继续”、带人话解释的 JSON/XML 示例及 Reader 支持的 image/input_image 输入属于 ordinary；完整的协作、Hook、bootstrap 与原生问答控制包分别标注。缺失、空或不支持的内容保留 unknown；消费者判断“当前请求”时不能跳过较新的 unknown 而继续接受旧请求。
