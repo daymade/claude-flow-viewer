@@ -8,6 +8,11 @@ import {resolveConversationImage,mergeConversationImageResources} from './lib/im
 import './index.css'
 import './embed.css'
 const CONVERSATION_FILTER = {thinking:false,toolCalls:false,toolResults:false}
+const INVALID_INITIAL_BINDING='Invalid initial record binding'
+function isValidRecordId(value:unknown):value is string{
+  if(typeof value!=='string'||value.length===0||value.length>1024||value.trim()!==value)return false
+  return ![...value].some(character=>{const code=character.charCodeAt(0);return code<=31||code===127})
+}
 // Transcript anchors pointing at local files (absolute paths, relative text
 // files, encoded paths, file: URLs) must never navigate the embed: the host
 // does not serve them and the iframe would be replaced by a browser error
@@ -64,16 +69,25 @@ function classifyAnchor(anchor:HTMLAnchorElement):{blocked:false;newTab?:true}|{
   return{blocked:true,kind:'unknown',reference:href}
 }
 export function ReaderEmbed() {
-  const raw=new URLSearchParams(location.search).get('endpoint') ?? ''
-  const expectedSession=new URLSearchParams(location.search).get('session')
+  const parameters=new URLSearchParams(location.search)
+  const raw=parameters.get('endpoint') ?? ''
+  const expectedSession=parameters.get('session')
   // Optional opaque binding token supplied by the host: echoed in cfv:ready so a
   // delayed ready from an old navigation cannot bless a new load of the same
   // WindowProxy/endpoint, and checked on incoming cfv:focus when present.
-  const channel=new URLSearchParams(location.search).get('channel')
-  const hostFiles=new URLSearchParams(location.search).get('file_links')==='host'
-  const conversationView=new URLSearchParams(location.search).get('view')==='conversation'
+  const channel=parameters.get('channel')
+  const hostFiles=parameters.get('file_links')==='host'
+  const conversationView=parameters.get('view')==='conversation'
   const endpoint=bindEmbedEndpoint(raw,location.pathname,location.origin)
-  const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(''), [busy,setBusy]=useState(false)
+  // Birth positioning is opt-in and lives only in the embed URL, never in the
+  // bound endpoint query. URLSearchParams.get() would hide duplicates, so keep
+  // the complete value list and reject every incomplete or malformed binding.
+  const initialValues=parameters.getAll('initial_record_id')
+  const hasInitial=initialValues.length>0
+  const initialRecordId=initialValues.length===1&&isValidRecordId(initialValues[0])?initialValues[0]:null
+  const initialBindingValid=!hasInitial||Boolean(endpoint&&initialRecordId&&expectedSession?.trim()&&channel?.trim())
+  const initialBindingError=hasInitial&&!initialBindingValid
+  const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(initialBindingError?INVALID_INITIAL_BINDING:''), [busy,setBusy]=useState(false)
   const [target,setTarget]=useState<ReaderJumpTarget|null>(null)
   const [blockedLink,setBlockedLink]=useState<BlockedLink|null>(null)
   const historyRef=useRef<HTMLDetailsElement>(null)
@@ -154,6 +168,7 @@ export function ReaderEmbed() {
   const findIntent=useRef({version:0,query:''})
   const recordFindEdit=useCallback((query:string)=>{findIntent.current={version:findIntent.current.version+1,query}},[])
   const read=useCallback(async (mode:string,anchor?:string)=>{
+    if(initialBindingError){setError(INVALID_INITIAL_BINDING);return}
     if (!endpoint) {setError('No bound session endpoint');return}
     const version=++generation.current, previous=current.current,findVersion=findIntent.current.version
     setBusy(true);setError('')
@@ -190,18 +205,30 @@ export function ReaderEmbed() {
       setTarget(index>=0 ? {messageIndex:index, ...(mode==='question' ? {requestId:`nav-${++navigationSequence.current}`} : {})} : null)
     } catch(e) {if(version===generation.current)setError(e instanceof Error ? e.message : String(e))}
     finally {if(version===generation.current)setBusy(false)}
-  },[endpoint,expectedSession,conversationView])
-  useEffect(()=>{void read('latest');const counter=generation;return()=>{counter.current++}},[read])
+  },[endpoint,expectedSession,conversationView,initialBindingError])
+  useEffect(()=>{
+    if(!initialBindingError)void read(initialRecordId?'question':'latest',initialRecordId??undefined)
+    const counter=generation;return()=>{counter.current++}
+  },[read,initialBindingError,initialRecordId])
   useEffect(()=>{
     const receive=(event:MessageEvent)=>{
-      if(event.origin!==location.origin || event.source!==parent || event.data?.type!=='cfv:focus' || event.data.endpoint!==endpoint)return
-      if(event.data.channel!=null && event.data.channel!==channel)return
-      if(typeof event.data.recordId==='string')void read('question',event.data.recordId)
+      if(initialBindingError||event.origin!==location.origin || event.source!==parent || event.data?.type!=='cfv:focus' || event.data.endpoint!==endpoint)return
+      if(initialRecordId){
+        // Opt-in birth binding upgrades later host navigation to the same strict
+        // identity contract; missing fields are not equivalent to a match.
+        if(event.data.channel!==channel||event.data.session!==expectedSession)return
+      }else{
+        // Legacy hosts may omit channel/session, but an explicitly supplied
+        // wrong identity must still be rejected.
+        if(Object.hasOwn(event.data,'channel') && event.data.channel!==channel)return
+        if(Object.hasOwn(event.data,'session') && event.data.session!==expectedSession)return
+      }
+      if(isValidRecordId(event.data.recordId))void read('question',event.data.recordId)
     }
     addEventListener('message',receive)
-    parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel},location.origin)
+    parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel,...(!initialBindingError&&initialRecordId?{initialRecordId}:{})},location.origin)
     return()=>removeEventListener('message',receive)
-  },[endpoint,expectedSession,channel,read])
+  },[endpoint,expectedSession,channel,read,initialBindingError,initialRecordId])
   const readToolResult=useCallback(async (relativePath:string)=>{
     if(!endpoint)throw new Error('No bound session endpoint')
     const response=await fetch(embedRequestUrl(endpoint,new URLSearchParams({path:relativePath}),'/tool-output'),{credentials:'same-origin'})

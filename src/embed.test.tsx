@@ -85,6 +85,180 @@ const ringAt = (index:number) => document.querySelector(`[data-message-index="${
 const nativeRuntimeId='22222222-2222-4222-8222-222222222222'
 const nativeRuntimeWitness='a'.repeat(64)
 const nativeBinding=`native_runtime_id=${nativeRuntimeId}&native_runtime_witness=${nativeRuntimeWitness}`
+const readyMessages=(received:unknown[])=>received.filter(data=>(data as {type?:string}|null)?.type==='cfv:ready') as Array<Record<string,unknown>>
+
+it('uses a valid initial record for the only birth read and echoes the accepted binding',async()=>{
+ const endpoint=`/minions/api/sessions/initial-valid?${nativeBinding}`,initialRecordId='rec-2'
+ const fetchMock=stubFetch(),received:unknown[]=[]
+ const receive=(event:MessageEvent)=>received.push(event.data)
+ window.addEventListener('message',receive)
+ try{
+  await mountEmbed('/minions/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'birth-channel',initial_record_id:initialRecordId}))
+  await waitFor(()=>expect(ringAt(1)).toContain('ring-1'))
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  const url=new URL(String(fetchMock.mock.calls[0][0]),location.origin)
+  expect(url.pathname).toBe('/minions/api/sessions/initial-valid')
+  expect(url.searchParams.get('offset')).toBe('-1')
+  expect(url.searchParams.get('anchor')).toBe(initialRecordId)
+  expect(url.searchParams.getAll('initial_record_id')).toEqual([])
+  expect(url.searchParams.getAll('native_runtime_id')).toEqual([nativeRuntimeId])
+  expect(url.searchParams.getAll('native_runtime_witness')).toEqual([nativeRuntimeWitness])
+  expect(readyMessages(received)).toEqual([{type:'cfv:ready',endpoint,session:'sess-1',channel:'birth-channel',initialRecordId}])
+ }finally{window.removeEventListener('message',receive)}
+})
+
+it.each([
+ ['c1-opaque','opaque-\u0085-record'],
+ ['utf16-limit','r'.repeat(1022)+'😀'],
+])('preserves the agreed opaque initial record domain: %s',async(label,initialRecordId)=>{
+ const endpoint=`/api/sessions/initial-opaque-${label}`,received:unknown[]=[]
+ const fetchMock=vi.fn(async(input:RequestInfo|URL)=>({ok:new URL(String(input),location.origin).pathname===endpoint,json:async()=>({...page,records:page.records.map(record=>record.id==='rec-2'?{...record,id:initialRecordId}:record)})}) as Response)
+ vi.stubGlobal('fetch',fetchMock)
+ const receive=(event:MessageEvent)=>received.push(event.data)
+ window.addEventListener('message',receive)
+ try{
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'opaque-channel',initial_record_id:initialRecordId}))
+  await waitFor(()=>expect(ringAt(1)).toContain('ring-1'))
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(new URL(String(fetchMock.mock.calls[0][0]),location.origin).searchParams.get('anchor')).toBe(initialRecordId)
+  expect(readyMessages(received)).toEqual([{type:'cfv:ready',endpoint,session:'sess-1',channel:'opaque-channel',initialRecordId}])
+ }finally{window.removeEventListener('message',receive)}
+})
+
+it('keeps the legacy birth read and ready shape when initial_record_id is absent',async()=>{
+ const endpoint='/api/sessions/initial-legacy',fetchMock=stubFetch(),received:unknown[]=[]
+ const receive=(event:MessageEvent)=>received.push(event.data)
+ window.addEventListener('message',receive)
+ try{
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'legacy-channel'}))
+  await waitFor(()=>expect(ringAt(2)).toContain('ring-1'))
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  const url=new URL(String(fetchMock.mock.calls[0][0]),location.origin)
+  expect(url.searchParams.get('offset')).toBe('-1')
+  expect(url.searchParams.has('anchor')).toBe(false)
+  expect(readyMessages(received)).toEqual([{type:'cfv:ready',endpoint,session:'sess-1',channel:'legacy-channel'}])
+  expect(Object.hasOwn(readyMessages(received)[0],'initialRecordId')).toBe(false)
+ }finally{window.removeEventListener('message',receive)}
+})
+
+it.each([
+ ['empty',''],['leading-whitespace',' rec-2'],['trailing-whitespace','rec-2 '],
+ ['del-control','rec\u007f-2'],['nul-control','rec\u0000-2'],['newline-control','rec\n-2'],['over-limit','x'.repeat(1025)],
+])('rejects an invalid initial record without any read or echo: %s',async(label,initialRecordId)=>{
+ const endpoint=`/api/sessions/invalid-initial-${label}`,fetchMock=stubFetch(),received:unknown[]=[]
+ const receive=(event:MessageEvent)=>received.push(event.data)
+ window.addEventListener('message',receive)
+ try{
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'ch',initial_record_id:initialRecordId}))
+  expect(screen.getByRole('alert').textContent).toBe('Invalid initial record binding')
+  expect(fetchMock).not.toHaveBeenCalled()
+  await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint,channel:'ch',session:'sess-1',recordId:'rec-2'})})
+  await flush()
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(readyMessages(received)).toHaveLength(1)
+  expect(Object.hasOwn(readyMessages(received)[0],'initialRecordId')).toBe(false)
+ }finally{window.removeEventListener('message',receive)}
+})
+
+it('rejects duplicate initial_record_id parameters instead of taking the first value',async()=>{
+ const endpoint='/api/sessions/invalid-initial-duplicate',fetchMock=stubFetch(),received:unknown[]=[]
+ const receive=(event:MessageEvent)=>received.push(event.data)
+ window.addEventListener('message',receive)
+ try{
+  const binding=new URLSearchParams({endpoint,session:'sess-1',channel:'ch'})
+  await mountEmbed(`/reader/embed.html?${binding}&initial_record_id=rec-2&initial_record_id=rec-2`)
+  expect(screen.getByRole('alert').textContent).toBe('Invalid initial record binding')
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(readyMessages(received)).toHaveLength(1)
+  expect(Object.hasOwn(readyMessages(received)[0],'initialRecordId')).toBe(false)
+ }finally{window.removeEventListener('message',receive)}
+})
+
+it.each([
+ {label:'missing-session',session:null,channel:'ch'},
+ {label:'empty-session',session:'',channel:'ch'},
+ {label:'missing-channel',session:'sess-1',channel:null},
+ {label:'empty-channel',session:'sess-1',channel:''},
+ {label:'blank-channel',session:'sess-1',channel:'   '},
+ {label:'invalid-endpoint',session:'sess-1',channel:'ch',endpoint:'/api/sessions/invalid-initial-endpoint?query=1'},
+])('rejects an incomplete initial binding without any read or echo: $label',async({label,session,channel,endpoint:endpointOverride})=>{
+ const endpoint=endpointOverride??`/api/sessions/invalid-initial-${label}`,fetchMock=stubFetch(),received:unknown[]=[]
+ const receive=(event:MessageEvent)=>received.push(event.data)
+ window.addEventListener('message',receive)
+ try{
+  const query=new URLSearchParams({endpoint,initial_record_id:'rec-2'})
+  if(session!==null)query.set('session',session)
+  if(channel!==null)query.set('channel',channel)
+  await mountEmbed('/reader/embed.html?'+query)
+  expect(screen.getByRole('alert').textContent).toBe('Invalid initial record binding')
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(readyMessages(received)).toHaveLength(1)
+  expect(Object.hasOwn(readyMessages(received)[0],'initialRecordId')).toBe(false)
+ }finally{window.removeEventListener('message',receive)}
+})
+
+it('requires every initial-mode focus binding and keeps later focus on the mounted reader',async()=>{
+ const endpoint=`/minions/api/sessions/initial-focus?${nativeBinding}`,fetchMock=stubFetch()
+ await mountEmbed('/minions/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'focus-channel',initial_record_id:'rec-2'}))
+ await waitFor(()=>expect(ringAt(1)).toContain('ring-1'))
+ const reader=document.querySelector('[data-session-reader]')
+ const valid={type:'cfv:focus',endpoint,channel:'focus-channel',session:'sess-1',recordId:'rec-1'}
+ const omit=(key:string)=>Object.fromEntries(Object.entries(valid).filter(([name])=>name!==key))
+ const rejected:Array<{data:Record<string,unknown>;origin?:string;source?:MessageEventSource|null}>=[
+  {data:valid,origin:'https://foreign.invalid'},
+  {data:valid,source:null},
+  {data:{...valid,endpoint:'/minions/api/sessions/initial-focus'}},
+  {data:{...valid,channel:'wrong-channel'}},
+  {data:{...valid,session:'wrong-session'}},
+  {data:omit('channel')},{data:omit('session')},
+  {data:{...valid,channel:null}},{data:{...valid,session:null}},
+  {data:{...valid,type:'cfv:unknown'}},
+ ]
+ for(const {data,origin=location.origin,source=window} of rejected){
+  await act(async()=>{window.dispatchEvent(new MessageEvent('message',{data,origin,source}))})
+  await flush()
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+ }
+ for(const recordId of ['', ' rec-1','rec-1 ','rec\n1',42,null,'x'.repeat(1025)]){
+  await act(async()=>{sendHostMessage({...valid,recordId})})
+  await flush()
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+ }
+ await act(async()=>{sendHostMessage(valid)})
+ await waitFor(()=>expect(ringAt(0)).toContain('ring-1'))
+ expect(fetchMock).toHaveBeenCalledTimes(2)
+ await act(async()=>{sendHostMessage({...valid,recordId:'rec-3'})})
+ await waitFor(()=>expect(ringAt(2)).toContain('ring-1'))
+ expect(fetchMock).toHaveBeenCalledTimes(3)
+ expect(document.querySelector('[data-session-reader]')).toBe(reader)
+ expect(anchorCalls(fetchMock,endpoint)).toHaveLength(3)
+})
+
+it('keeps legacy focus compatible with omitted fields but rejects explicitly wrong identities',async()=>{
+ const endpoint='/api/sessions/legacy-focus-identities',fetchMock=stubFetch()
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'legacy-focus'}))
+ await waitFor(()=>expect(ringAt(2)).toContain('ring-1'))
+ const valid={type:'cfv:focus',endpoint,channel:'legacy-focus',session:'sess-1',recordId:'rec-1'}
+ for(const data of [
+  {...valid,channel:'wrong'},{...valid,session:'wrong'},
+  {...valid,channel:''},{...valid,session:''},
+  {...valid,channel:null},{...valid,session:null},
+  {...valid,channel:undefined},{...valid,session:undefined},
+ ]){
+  await act(async()=>{sendHostMessage(data)})
+  await flush()
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+ }
+ await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint,recordId:'rec-1'})})
+ await waitFor(()=>expect(ringAt(0)).toContain('ring-1'))
+ expect(fetchMock).toHaveBeenCalledTimes(2)
+ await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint,channel:'legacy-focus',recordId:'rec-3'})})
+ await waitFor(()=>expect(ringAt(2)).toContain('ring-1'))
+ expect(fetchMock).toHaveBeenCalledTimes(3)
+ await act(async()=>{sendHostMessage({type:'cfv:focus',endpoint,session:'sess-1',recordId:'rec-2'})})
+ await waitFor(()=>expect(ringAt(1)).toContain('ring-1'))
+ expect(fetchMock).toHaveBeenCalledTimes(4)
+})
 
 it('declares the loaded-window Find scope without another read or transcript adaptation',async()=>{
  const fetchMock=stubFetch()

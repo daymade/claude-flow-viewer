@@ -42,6 +42,10 @@ npm run build
 
 无query的 `endpoint` 保持原合同；带query时，仅允许字面两键 `native_runtime_id`（小写十六进制完整 `8-4-4-4-12` UUID，不限制version/variant）与 `native_runtime_witness`（64位小写十六进制）各一次、任意顺序完整配对，拒收缺失、空值、重复、其他键、编码键名或值、尾部分隔符、fragment及原有同源／挂载／路径逃逸违规。完整原始endpoint参与 `cfv:ready`、`cfv:focus` 与资源身份绑定，分页、刷新、anchor、tool-output请求均保留这对参数，`cfv:focus` 携带的endpoint与绑定值不完全一致时拒收且不触发读取。
 
+可选出生定位通过嵌入页顶层唯一 `initial_record_id` 开启，绝不写入 `endpoint` query，也不扩充上段允许的运行时 query。值是最多 1024 个 UTF-16 码元的非空 opaque 原记录字符串，不假定 UUID 形态；首尾空白、C0 控制符或 DEL、空值、重复参数或超过上限均拒绝。该模式必须同时具备有效 endpoint 与非空 session/channel；非法或不完整绑定显示错误，不发 latest/anchor 读取，也不在 `cfv:ready` 回声。完整绑定的首个且唯一出生请求是 `read('question', initialRecordId)`，不先读 latest；`cfv:ready.initialRecordId` 仅确认请求已接受，不代表正文已可读。原记录唯一性、会话身份与后续 Find/翻页规则不变。未提供参数时仍只读一次 latest，ready 不新增该键。
+
+此模式下 `cfv:focus` 必须同时精确匹配 origin、parent window、完整原 endpoint、channel、session，缺失或错误均不读；未知 type 或非法 recordId 也不读。无参数旧模式仍允许 host 省略 channel/session，但显式错误值拒绝。Parent 仅在 origin/window/raw endpoint/channel/session 全匹配且 `ready.initialRecordId` 等于该 scope 出生 ID 时消费一次出生意图；echo 不替代正文与原记录唯一性核验，父侧 src/key 冻结由宿主负责。
+
 嵌入页可追加 `view=conversation`，初次打开时隐藏 Thinking、Tool Calls 和 Results；工具栏可重新开启，刷新与翻页保留当前过滤设置。未传该参数时使用原有默认显示。
 
 已加载记录全部被当前筛选隐藏时，正文区显示「当前筛选没有可见记录」。「调整筛选」打开现有筛选面板，由读者选择显示内容，不自动开启工具或思考记录；当前页允许向前读取时，同一区域提供「加载更早的对话」，沿用现有分页、身份与读取边界。真正没有已加载记录时显示「当前读取范围没有记录」，不据此判断整个会话为空；读取进行中不显示成功空态。共享 `SessionReader` 可通过可选 `emptyStateAction` 提供宿主的空态操作，`pending` 标识读取进行中，均不改变未传入时的筛选默认值。
