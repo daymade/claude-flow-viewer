@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   makeCodexProjectId,
   parseCodexSessionContent,
@@ -351,6 +351,51 @@ describe('codex parsing', () => {
       text: '打开 Kimi 查询仙工智能报告',
     })
     expect(result.prompts).toHaveLength(1)
+  })
+})
+
+describe('codex prompt deduplication time window', () => {
+  const sessionId = '00000000-0000-4000-8000-000000000041'
+  const base = Date.parse('2026-01-01T00:00:00.000Z')
+  const header = {
+    timestamp: new Date(base).toISOString(),
+    type: 'session_meta',
+    payload: { id: sessionId, cwd: '/workspace/project' },
+  }
+
+  it.each([
+    { name: 'inclusive boundary', offsets: [0, 1000], expected: 1 },
+    { name: 'outside boundary', offsets: [0, 1001], expected: 2 },
+    { name: 'out-of-order older duplicate', offsets: [0, 3000, 500], expected: 2 },
+    { name: 'rejected duplicates do not extend the window', offsets: [0, 900, 1800], expected: 2 },
+    { name: 'distinct same-time inputs', offsets: [0, 0], expected: 2, distinct: true },
+  ])('preserves $name in full, streaming and head reads', async ({ offsets, expected, distinct }) => {
+    const content = jsonl(header, ...offsets.map((offset, index) => ({
+      ...responseMessage('user', distinct ? `input ${index}` : 'repeat input'),
+      timestamp: new Date(base + offset).toISOString(),
+    })))
+    async function* lines() { yield* content.split('\n') }
+    const full = parseCodexSessionContent(content)
+    const streamed = await parseCodexSessionContentStreaming(lines(), async () => {})
+    expect(full.prompts).toHaveLength(expected)
+    expect(streamed).toEqual(full)
+    expect(quickScanCodexMetadata(content, sessionId, content.length)?.meta.promptCount).toBe(expected)
+  })
+
+  it('keeps the same fallback clock for missing timestamps', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(base))
+    try {
+      const record = { type: 'event_msg', payload: { type: 'user_message', message: 'repeat input' } }
+      const content = jsonl(header, record, record)
+      async function* lines() { yield* content.split('\n') }
+      const full = parseCodexSessionContent(content)
+      const streamed = await parseCodexSessionContentStreaming(lines(), async () => {})
+      expect(full.prompts).toHaveLength(1)
+      expect(streamed).toEqual(full)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
