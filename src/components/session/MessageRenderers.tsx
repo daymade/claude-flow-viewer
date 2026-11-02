@@ -1,3 +1,4 @@
+import { DeferredDetails } from './DeferredDetails'
 import { useState, useCallback, useRef } from 'react'
 import Markdown from 'react-markdown'
 import {SessionImage} from './SessionImage'
@@ -131,15 +132,14 @@ export function ThinkingHint({ msg }: { msg: Extract<SessionMessage, { kind: 'ai
 
 // ━━━ L3: Tool Call ━━━
 
-export function ToolCallLine({ msg }: { msg: Extract<SessionMessage, { kind: 'ai-tool-use' }> }) {
+export function ToolCallLine({ msg, forceMount = false }: { msg: Extract<SessionMessage, { kind: 'ai-tool-use' }>; forceMount?: boolean }) {
   const isAgent = msg.name === 'Agent' || msg.name === 'Task' || msg.name === 'spawn_agent' || msg.name === 'send_input'
 
   if (isAgent) {
     const agentType = String(msg.input.subagent_type || msg.input.type || 'general')
     const desc = String(msg.input.description || '')
-    const prompt = String(msg.input.prompt || '')
     return (
-      <details className="mt-2 ml-6">
+      <DeferredDetails forceMount={forceMount} className="mt-2 ml-6">
         <summary className="cursor-pointer py-1 text-sm text-stone-500 select-none hover:text-stone-700 transition-colors flex items-center gap-2 whitespace-nowrap">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-stone-400 shrink-0">
             <path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4-4v2" strokeLinecap="round" strokeLinejoin="round" />
@@ -149,29 +149,31 @@ export function ToolCallLine({ msg }: { msg: Extract<SessionMessage, { kind: 'ai
           <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-500 text-[11px] font-medium uppercase shrink-0">{agentType}</span>
           <span className="truncate min-w-0 font-medium">{desc || msg.summary}</span>
         </summary>
-        {prompt && (
+        {()=> {
+          const prompt = String(msg.input.prompt || '')
+          return prompt && (
           <div className="mt-1 ml-6 pl-3 border-l border-stone-200 py-2 text-xs text-stone-500 leading-relaxed max-h-[200px] overflow-auto whitespace-pre-wrap break-words">{prompt}</div>
-        )}
-      </details>
+        )}}
+      </DeferredDetails>
     )
   }
 
   return (
-    <details className="mt-0.5 ml-6">
+    <DeferredDetails forceMount={forceMount} className="mt-0.5 ml-6">
       <summary className="cursor-pointer py-1 text-sm text-stone-500 font-mono select-none hover:text-stone-700 transition-colors flex items-center gap-1.5 whitespace-nowrap">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-stone-400 shrink-0">
           <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         <span className="truncate min-w-0">{msg.summary}</span>
       </summary>
-      <pre className="mt-1 ml-5 p-3 bg-stone-50 rounded text-[13px] max-h-[200px] overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] leading-relaxed text-stone-500">{truncateInput(msg.input)}</pre>
-    </details>
+      {()=> <pre className="mt-1 ml-5 p-3 bg-stone-50 rounded text-[13px] max-h-[200px] overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] leading-relaxed text-stone-500">{truncateInput(msg.input)}</pre>}
+    </DeferredDetails>
   )
 }
 
 // ━━━ L4: Tool Result ━━━
 
-export function ToolResultBlock({ msg }: { msg: Extract<SessionMessage, { kind: 'tool-result' }> }) {
+export function ToolResultBlock({ msg, forceMount = false }: { msg: Extract<SessionMessage, { kind: 'tool-result' }>; forceMount?: boolean }) {
   const { read: readToolResult, scope } = resolveToolResultReader(useSessionResources())
   // Semantic identity of the resource this mounted slot currently shows.
   // externalFile / sourceRecordId distinguish resources inside one session;
@@ -224,7 +226,7 @@ export function ToolResultBlock({ msg }: { msg: Extract<SessionMessage, { kind: 
   const showingFull = fullContent !== null
 
   return (
-    <details className="ml-6">
+    <DeferredDetails forceMount={forceMount} className="ml-6">
       <summary className={`cursor-pointer py-0.5 pl-5 text-xs select-none transition-colors flex items-center gap-1.5 whitespace-nowrap ${
         msg.isError ? 'text-red-500 hover:text-red-600' : 'text-stone-400 hover:text-stone-500'
       }`}>
@@ -242,6 +244,7 @@ export function ToolResultBlock({ msg }: { msg: Extract<SessionMessage, { kind: 
           <span className="text-amber-500 font-normal ml-1">({msg.totalSize} on disk)</span>
         )}
       </summary>
+      {()=> <>
       <pre className={`mt-0.5 ml-5 p-3 rounded text-[13px] max-h-[400px] overflow-auto whitespace-pre-wrap break-words leading-relaxed ${
         msg.isError ? 'bg-red-50 text-red-600' : 'bg-stone-50 text-stone-500'
       }`}>{displayContent}</pre>
@@ -267,7 +270,8 @@ export function ToolResultBlock({ msg }: { msg: Extract<SessionMessage, { kind: 
           </button>
         </div>
       )}
-    </details>
+      </>}
+    </DeferredDetails>
   )
 }
 

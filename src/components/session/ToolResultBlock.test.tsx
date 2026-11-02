@@ -1,11 +1,19 @@
 // @vitest-environment jsdom
 import {afterEach,it,expect,vi} from 'vitest'
-import {render,screen,fireEvent,cleanup,act} from '@testing-library/react'
+import {render as renderTree,screen,fireEvent,cleanup,act} from '@testing-library/react'
+import type {ReactNode} from 'react'
 import {ToolResultBlock} from './MessageRenderers'
 import {SessionResources, type ReadToolResult} from './SessionResources'
 import type {SessionMessage} from '../../types/session'
 
 afterEach(cleanup)
+
+function render(ui:ReactNode) {
+  const result=renderTree(ui)
+  const details=result.container.querySelector('details')!
+  act(()=>{details.open=true;fireEvent(details,new Event('toggle'))})
+  return result
+}
 
 type ToolResultMessage = Extract<SessionMessage,{kind:'tool-result'}>
 const msg = (externalFile:string,content:string): ToolResultMessage =>
