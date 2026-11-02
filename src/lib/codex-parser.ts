@@ -9,7 +9,7 @@ import type {
   SessionThreadKind,
 } from '../types/session'
 import { detectDecision } from './decision-detector'
-import { computeHeatmap } from './heatmap'
+import { computeHeatmap, type HeatmapInput } from './heatmap'
 import { classifyUserInputContent, type UserInputClassification } from './user-input-classification'
 
 export const CODEX_PROJECT_PREFIX = 'codex:'
@@ -873,9 +873,44 @@ export interface CodexClassifierOptions {
  * folded into the same per-record pass — see the comment above `processRecord`'s retained-input
  * block for why that fold is safe.
  */
-function createCodexClassifier(options?: CodexClassifierOptions) {
+export interface CodexMessageCoordinate {
+  readonly messageIndex: number
+  readonly recordIndex: number
+}
+/** Synchronous observation only; do not mutate the message or its sourceRecord. */
+export type CodexMessageSink = (message: Readonly<SessionMessage>, coordinate: CodexMessageCoordinate) => void
+export interface CodexMessageScan {
+  source: 'codex'
+  messageCount: number
+  recordCount: number
+}
+
+function heatmapInput(message: SessionMessage): HeatmapInput {
+  if (message.kind === 'user-prompt') return { kind: message.kind, promptNum: message.promptNum }
+  if (message.kind === 'tool-result') return { kind: message.kind, isError: message.isError }
+  if (message.kind === 'ai-thinking') return { kind: message.kind, full: { length: message.full.length } }
+  return { kind: message.kind }
+}
+
+function createCodexClassifier(options?: CodexClassifierOptions, sink?: CodexMessageSink) {
   const messages: SessionMessage[] = []
   const prompts: PromptIndexEntry[] = []
+  const messageFacts: HeatmapInput[] = []
+  let messageCount = 0
+  let lastEmittedKind: SessionMessage['kind'] | undefined
+  function emitMessage(message: SessionMessage): void {
+    const messageIndex = messageCount++
+    lastEmittedKind = message.kind
+    if (!sink) { messages.push(message); return }
+    const coordinate = { messageIndex, recordIndex: recordIndex - 1 }
+    messageFacts.push(heatmapInput(message))
+    const returned: unknown = sink(message, coordinate)
+    if (returned !== null && (typeof returned === 'object' || typeof returned === 'function')
+        && typeof (returned as { then?: unknown }).then === 'function') {
+      void Promise.resolve(returned).catch(() => undefined)
+      throw new TypeError('Codex message sink must be synchronous')
+    }
+  }
   let promptCounter = 0
   let pendingInterrupt = false
   const seenPrompts: Array<{ text: string; timestampMs: number }> = []
@@ -893,7 +928,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
     const decision = decidePrompt(prompt.text, promptCounter, pendingInterrupt)
     pendingInterrupt = false
     const timestamp = timestampDate.toISOString()
-    messages.push({
+    emitMessage({
       ...provenance,
       kind: 'user-prompt',
       promptNum: promptCounter,
@@ -928,8 +963,8 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
   // came first. Two genuine compactions with no message at all between them would merge, which cannot
   // happen: a compaction is triggered by the context the messages in between built up.
   const pushCompactBoundary = (timestamp: string, provenance: CodexRecordProvenance) => {
-    if (messages[messages.length - 1]?.kind === 'compact-boundary') return
-    messages.push({ ...provenance, kind: 'compact-boundary', timestamp, trigger: 'auto', preTokens: 0, summaryText: '' })
+    if (lastEmittedKind === 'compact-boundary') return
+    emitMessage({ ...provenance, kind: 'compact-boundary', timestamp, trigger: 'auto', preTokens: 0, summaryText: '' })
   }
 
   // Retained-input bookkeeping (was extractRetainedUserInputs's own two full-array scans over a
@@ -1016,11 +1051,11 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
         }
         case 'agent_message': {
           const message = typeof event.message === 'string' ? event.message.trim() : ''
-          if (message) messages.push({ ...provenance, kind: 'ai-text', text: message, timestamp })
+          if (message) emitMessage({ ...provenance, kind: 'ai-text', text: message, timestamp })
           break
         }
         case 'task_started':
-          messages.push({
+          emitMessage({
             ...provenance,
             kind: 'task-event',
             taskId: typeof event.turn_id === 'string' ? event.turn_id : '?',
@@ -1030,7 +1065,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
           })
           break
         case 'task_complete':
-          messages.push({
+          emitMessage({
             ...provenance,
             kind: 'task-event',
             taskId: typeof event.turn_id === 'string' ? event.turn_id : '?',
@@ -1043,7 +1078,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
           pendingInterrupt = true
           break
         case 'thread_rolled_back':
-          messages.push({
+          emitMessage({
             ...provenance,
             kind: 'rollback-marker',
             timestamp,
@@ -1062,7 +1097,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
           const input = invocation.arguments && typeof invocation.arguments === 'object'
             ? invocation.arguments as Record<string, unknown>
             : {}
-          messages.push({
+          emitMessage({
             ...provenance,
             kind: 'ai-tool-use',
             summary: summarizeToolCall(`${server}.${tool}`, input),
@@ -1071,7 +1106,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
             timestamp,
           })
           const result = extractMcpResultContent(event.result)
-          messages.push({
+          emitMessage({
             ...provenance,
             kind: 'tool-result',
             content: result.content,
@@ -1112,12 +1147,12 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
         const role = String(item.role || '')
         if (role === 'assistant') {
           const { text } = parseContentParts(item.content)
-          if (text) messages.push({ ...provenance, kind: 'ai-text', text, timestamp })
+          if (text) emitMessage({ ...provenance, kind: 'ai-text', text, timestamp })
         } else if (role === 'user') {
           const { text } = parseContentParts(item.content)
           const delegationUpdate = text ? extractDelegationUpdate(text) : null
           if (delegationUpdate) {
-            messages.push({
+            emitMessage({
               ...provenance,
               ...delegationUpdate,
               timestamp,
@@ -1143,7 +1178,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
         if (!body) break
         const author = typeof item.author === 'string' ? item.author : ''
         const from = author.split('/').filter(Boolean).pop() || 'delegated-agent'
-        messages.push({
+        emitMessage({
           ...provenance,
           kind: 'team-message',
           from,
@@ -1157,7 +1192,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
       case 'reasoning': {
         const reasoning = extractReasoningText(item)
         if (!reasoning) break
-        messages.push({
+        emitMessage({
           ...provenance,
           kind: 'ai-thinking',
           preview: sanitizePreview(reasoning).slice(0, 120),
@@ -1168,7 +1203,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
       }
       case 'function_call': {
         const input = parseJsonObject(item.arguments)
-        messages.push({
+        emitMessage({
           ...provenance,
           kind: 'ai-tool-use',
           summary: summarizeToolCall(String(item.name || 'unknown'), input),
@@ -1184,7 +1219,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
           : item.input && typeof item.input === 'object'
             ? item.input as Record<string, unknown>
             : {}
-        messages.push({
+        emitMessage({
           ...provenance,
           kind: 'ai-tool-use',
           summary: summarizeToolCall(String(item.name || 'custom_tool'), input),
@@ -1203,7 +1238,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
           if (Array.isArray(action.queries)) input.queries = action.queries
         }
         if (typeof item.arguments === 'string') Object.assign(input, parseJsonObject(item.arguments))
-        messages.push({
+        emitMessage({
           ...provenance,
           kind: 'ai-tool-use',
           summary: summarizeToolCall('web_search_call', input),
@@ -1217,7 +1252,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
         const input = item.arguments && typeof item.arguments === 'object'
           ? item.arguments as Record<string, unknown>
           : parseJsonObject(item.arguments)
-        messages.push({
+        emitMessage({
           ...provenance,
           kind: 'ai-tool-use',
           summary: summarizeToolCall('tool_search_call', input),
@@ -1230,7 +1265,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
       case 'function_call_output':
       case 'custom_tool_call_output': {
         const result = unwrapToolOutput(item.output)
-        messages.push({
+        emitMessage({
           ...provenance,
           kind: 'tool-result',
           content: result.content,
@@ -1241,7 +1276,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
       }
       case 'tool_search_output': {
         const result = unwrapToolOutput(extractToolSearchOutput(item))
-        messages.push({
+        emitMessage({
           ...provenance,
           kind: 'tool-result',
           content: result.content,
@@ -1253,24 +1288,32 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
     }
   }
 
-  function finalize(): SessionData {
+  function finalizeMetadata() {
+    const metadataMessages = sink ? messageFacts : messages
     const markers = { compacts: 0, plans: 0, clears: 0, forks: 0 }
-    for (const msg of messages) {
+    for (const msg of metadataMessages) {
       if (msg.kind === 'compact-boundary') markers.compacts++
       else if (msg.kind === 'rollback-marker') markers.forks++
     }
 
     return {
-      source: 'codex',
-      messages,
-      prompts,
       retainedUserInputs: buildRetainedFromSnapshot(sessionStart, lastCompactionSnapshot),
-      heatmap: computeHeatmap(messages),
+      heatmap: computeHeatmap(metadataMessages),
       markers,
     }
   }
 
-  return { processRecord, finalize }
+  function finalize(): SessionData {
+    if (sink) throw new Error('Message sink does not produce SessionData')
+    return { source: 'codex', messages, prompts, ...finalizeMetadata() }
+  }
+
+  function finishMessages(): CodexMessageScan {
+    finalizeMetadata()
+    return { source: 'codex', messageCount, recordCount: recordIndex }
+  }
+
+  return { processRecord, finalize, finishMessages }
 }
 
 export function parseCodexSessionContent(content: string): SessionData {
@@ -1318,6 +1361,15 @@ export async function parseCodexSessionContentStreaming(
   options?: CodexClassifierOptions,
 ): Promise<SessionData> {
   const classifier = createCodexClassifier(options)
+  await driveCodexLines(lines, yieldToEventLoop, classifier)
+  return classifier.finalize()
+}
+
+async function driveCodexLines(
+  lines: AsyncIterable<string>,
+  yieldToEventLoop: () => Promise<void>,
+  classifier: ReturnType<typeof createCodexClassifier>,
+): Promise<void> {
   let recordsProcessed = 0
   for await (const line of lines) {
     if (!line.trim()) continue
@@ -1331,5 +1383,16 @@ export async function parseCodexSessionContentStreaming(
     recordsProcessed += 1
     if (recordsProcessed % CODEX_STREAM_YIELD_EVERY_LINES === 0) await yieldToEventLoop()
   }
-  return classifier.finalize()
+}
+
+/** Full canonical emission stream; derived validation still runs before success. */
+export async function parseCodexMessagesStreaming(
+  lines: AsyncIterable<string>,
+  yieldToEventLoop: () => Promise<void>,
+  sink: CodexMessageSink,
+): Promise<CodexMessageScan> {
+  if (typeof sink !== 'function') throw new TypeError('Codex message sink required')
+  const classifier = createCodexClassifier(undefined, sink)
+  await driveCodexLines(lines, yieldToEventLoop, classifier)
+  return classifier.finishMessages()
 }

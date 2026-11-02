@@ -83,6 +83,8 @@ Claude 原始记录上下文定位与渲染／文件引用坐标分开。`parse-
 
 已在服务端绑定来源的消费者可执行 `node <package>/server/classify-user-inputs.mjs`（包子路径 `@daymade/session-reader/classify-user-inputs`），通过 stdin 发送一份 `{ "version": 1, "inputs": [{ "id": "source-record-id", "content": [{ "type": "text", "text": "继续" }] }] }`。stdout 返回 `{ "version": 1, "classifications": [{ "id": "source-record-id", "kind": "ordinary", "reason": "text" }] }`，保持 ID 与输入顺序。单批上限 1000 条、stdin 上限 16 MiB；版本、ID 或 envelope 畸形时非零退出且不输出成功结果。它不读取会话文件，调用者必须独立验证源会话与记录绑定，不接收客户端自报的分类。
 
+共享包的 `parseCodexMessagesStreaming(lines, yieldToEventLoop, sink)` 完整扫描 Codex 输入，按成熟分类顺序同步交付每条 canonical 消息及从零开始的 `messageIndex`、物理 `recordIndex`，同一原记录可产生多条消息。sink 只能观察，不得修改消息或 `sourceRecord`，不得返回 Promise；异常使整次扫描失败，调用者须在扫描和自身来源校验全部成功前保留结果为未确认。成功仅返回 `{source:'codex',messageCount,recordCount}`，不构造伪 `SessionData`，原有解析 API 保持不变。此入口仍完成 prompt bookkeeping、retained、markers 与 heatmap 的原校验，宿主负责完整来源、冻结窗口、时钟与数值见证；它不裁 tail、不授予读取或执行权限。
+
 ### Development Mode
 
 ```bash

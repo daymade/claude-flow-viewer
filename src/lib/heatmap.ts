@@ -15,9 +15,15 @@ import type { SessionMessage } from '../types/session'
  * Both would shift every subsequent index and paint intensities onto the wrong rows.
  * Guarded by `heatmap.test.ts`.
  */
-export function computeHeatmap(messages: SessionMessage[]): number[] {
-  const segments: SessionMessage[][] = []
-  let current: SessionMessage[] | null = null
+export type HeatmapInput =
+  | { kind: 'user-prompt'; promptNum: number }
+  | { kind: 'tool-result'; isError: boolean }
+  | { kind: 'ai-thinking'; full: { readonly length: number } }
+  | { kind: Exclude<SessionMessage['kind'], 'user-prompt' | 'tool-result' | 'ai-thinking'> }
+
+export function computeHeatmap(messages: HeatmapInput[]): number[] {
+  const segments: HeatmapInput[][] = []
+  let current: HeatmapInput[] | null = null
 
   for (const msg of messages) {
     if (msg.kind === 'user-prompt' && msg.promptNum > 0) {
