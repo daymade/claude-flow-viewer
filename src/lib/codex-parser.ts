@@ -685,7 +685,7 @@ function scanCodexHeadStats(head: string): { promptCount: number; toolCount: num
     const text = normalizePromptText(prompt.text)
     if (!text) return
     const isDuplicate = seenPrompts.some((seen) =>
-      seen.text === text && Math.abs(seen.timestampMs - timestampMs) <= 1000
+      Math.abs(seen.timestampMs - timestampMs) <= 1000 && seen.text === text
     )
     if (isDuplicate) return
     seenPrompts.push({ text, timestampMs })
@@ -884,7 +884,7 @@ function createCodexClassifier(options?: CodexClassifierOptions) {
     if (!textKey && !prompt.images.length) return false
     const timestampMs = timestampDate.getTime()
     const isDuplicate = Boolean(textKey) && seenPrompts.some((seen) =>
-      seen.text === textKey && Math.abs(seen.timestampMs - timestampMs) <= 1000
+      Math.abs(seen.timestampMs - timestampMs) <= 1000 && seen.text === textKey
     )
     if (isDuplicate) return false
 
