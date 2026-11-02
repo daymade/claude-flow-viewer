@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import {afterEach,it,expect} from 'vitest'
-import {render,cleanup} from '@testing-library/react'
+import {render,cleanup,act,fireEvent} from '@testing-library/react'
 import {ToolCallLine} from './MessageRenderers'
 import type {SessionMessage} from '../../types/session'
 
@@ -13,6 +13,8 @@ const toolMsg = (input: Record<string, unknown>): ToolUseMessage =>
 
 const renderedPre = (input: Record<string, unknown>) => {
   const {container} = render(<ToolCallLine msg={toolMsg(input)}/>)
+  const details = container.querySelector('details')!
+  act(()=>{details.open=true;fireEvent(details,new Event('toggle'))})
   const pre = container.querySelector('pre')
   if (!pre) throw new Error('generic tool-use renderer did not produce a <pre>')
   return {container,pre}

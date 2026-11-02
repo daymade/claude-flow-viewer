@@ -351,7 +351,7 @@ it('keeps the mounted runtime binding through reads, paging, refresh, focus and 
 
     const result=screen.getByText('Result').closest('details')!
     fireEvent.click(result.querySelector('summary')!)
-    fireEvent.click(screen.getByRole('button',{name:'Load full output (4 B)'}))
+    fireEvent.click(await screen.findByRole('button',{name:'Load full output (4 B)'}))
     await screen.findByText('FULL BOUND OUTPUT')
     const requested=fetchMock.mock.calls.map(([input])=>new URL(String(input),location.origin))
     for(const url of requested){
@@ -408,7 +408,9 @@ it.each(['claude','codex'] as const)('starts the %s conversation view with tool 
   expect(screen.queryByText('fixture tool output')).toBeNull()
   expect(ringAt(3)).toContain('ring-1')
   fireEvent.click(filterCheckbox('Results'))
-  expect(screen.getByText('fixture tool output')).toBeTruthy()
+  expect(screen.queryByText('fixture tool output')).toBeNull()
+  fireEvent.click(screen.getByText('Result').closest('details')!.querySelector('summary')!)
+  expect(await screen.findByText('fixture tool output')).toBeTruthy()
   for(const name of ['加载更早的对话','继续查看','从头查看','刷新到最新']){
     fireEvent.click(screen.getByRole('button',{name}))
     await flush()
@@ -1127,13 +1129,15 @@ it('guides through an entirely filtered 80-record native tail: adjust filters re
   expect(emptyActions().getByRole('button',{name:'加载更早的对话'})).toBeTruthy()
 
   // 调整筛选 opens the existing Filters panel without toggling any filter;
-  // enabling Results reveals the tool output already in the loaded window.
+  // enabling Results restores its summary; expanding reveals the loaded output.
   fireEvent.click(screen.getByRole('button',{name:'调整筛选'}))
   expect(screen.getByRole('button',{name:'Filters'}).getAttribute('aria-expanded')).toBe('true')
   expect(filterCheckbox('Tool Calls').checked).toBe(false)
   expect(filterCheckbox('Results').checked).toBe(false)
   fireEvent.click(filterCheckbox('Results'))
-  expect(screen.getByText('synthetic output 1')).toBeTruthy()
+  expect(screen.queryByText('synthetic output 1')).toBeNull()
+  fireEvent.click(screen.getAllByText('Result')[0].closest('details')!.querySelector('summary')!)
+  expect(await screen.findByText('synthetic output 1')).toBeTruthy()
   expect(screen.queryByText('当前筛选没有可见记录')).toBeNull()
 
   // Back to the filtered-empty state, then load earlier from the guidance:

@@ -1,3 +1,4 @@
+import { DeferredDetails } from './DeferredDetails'
 import { useRef, useCallback, useMemo, useState, useEffect } from 'react'
 import type { SessionData, SessionMessage, FilterState, PromptIndexEntry } from '../../types/session'
 import { extractTimelineEvents } from '../../lib/timeline'
@@ -491,13 +492,13 @@ function renderAnchoredMessage(
     >
       {'timestamp' in msg && msg.timestamp && <time className="block text-[10px] text-stone-400 font-mono mt-2" dateTime={msg.timestamp}>{/^\d{4}-\d\d-\d\dT/.test(msg.timestamp) ? new Date(msg.timestamp).toLocaleString(undefined,{hour12:false}) : msg.timestamp}</time>}
       {content}
-      <SourceRecordDetails msg={msg}/>
+      <SourceRecordDetails msg={msg} forceMount={forceVisible}/>
     </div>
   )
 }
 
-function SourceRecordDetails({msg}:{msg:SessionMessage}) {
-  return msg.sourceRecord ? <details className="ml-6 my-2 text-[11px] text-stone-400"><summary className="cursor-pointer">Original native record</summary><pre className="p-3 whitespace-pre-wrap break-words max-h-80 overflow-auto bg-stone-50">{JSON.stringify(msg.sourceRecord,null,2)}</pre></details> : null
+function SourceRecordDetails({msg,forceMount=false}:{msg:SessionMessage;forceMount?:boolean}) {
+  return msg.sourceRecord ? <DeferredDetails forceMount={forceMount} className="ml-6 my-2 text-[11px] text-stone-400"><summary className="cursor-pointer">Original native record</summary>{()=> <pre className="p-3 whitespace-pre-wrap break-words max-h-80 overflow-auto bg-stone-50">{JSON.stringify(msg.sourceRecord,null,2)}</pre>}</DeferredDetails> : null
 }
 
 // ─── Tool Group (collapsed consecutive tool calls) ───
@@ -522,7 +523,7 @@ function ToolGroup({ messages, filter }: { messages: SessionMessage[]; filter: F
   const namesSummary = names.join(', ') + (toolCalls.length > 4 ? ` +${toolCalls.length - 4}` : '')
 
   return (
-    <details className="mt-1.5 ml-6">
+    <DeferredDetails className="mt-1.5 ml-6">
       <summary className="cursor-pointer py-1.5 text-sm text-stone-500 select-none hover:text-stone-700 transition-colors flex items-center gap-2 whitespace-nowrap">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-stone-400 shrink-0">
           <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" strokeLinecap="round" strokeLinejoin="round" />
@@ -531,14 +532,14 @@ function ToolGroup({ messages, filter }: { messages: SessionMessage[]; filter: F
         <span className="text-stone-400 font-mono text-xs truncate min-w-0">({namesSummary})</span>
         {errorCount > 0 && <span className="text-red-500 text-xs font-medium shrink-0">{errorCount} error{errorCount > 1 ? 's' : ''}</span>}
       </summary>
-      <div className="mt-1 ml-2 pl-3 border-l border-stone-200">
+      {()=> <div className="mt-1 ml-2 pl-3 border-l border-stone-200">
         {messages.map((m, j) => {
           if (m.kind === 'ai-tool-use' && !filter.toolCalls) return null
           if (m.kind === 'tool-result' && !filter.toolResults) return null
           return <div key={j}><MessageBlock msg={m} filter={filter} searchQuery="" /><SourceRecordDetails msg={m}/></div>
         })}
-      </div>
-    </details>
+      </div>}
+    </DeferredDetails>
   )
 }
 
@@ -560,8 +561,8 @@ function MessageBlock({
   switch (msg.kind) {
     case 'user-prompt': return <PromptBlock msg={msg} searchQuery={searchQuery} />
     case 'ai-thinking': return filter.thinking || forceVisible ? <ThinkingHint msg={msg} /> : null
-    case 'ai-tool-use': return filter.toolCalls || forceVisible ? <ToolCallLine msg={msg} /> : null
-    case 'tool-result': return filter.toolResults || forceVisible ? <ToolResultBlock msg={msg} /> : null
+    case 'ai-tool-use': return filter.toolCalls || forceVisible ? <ToolCallLine msg={msg} forceMount={forceVisible} /> : null
+    case 'tool-result': return filter.toolResults || forceVisible ? <ToolResultBlock msg={msg} forceMount={forceVisible} /> : null
     case 'ai-text': return filter.aiText || forceVisible ? <AiTextBlock msg={msg} /> : null
     case 'team-message': return filter.team || forceVisible ? <TeamMessageBlock msg={msg} /> : null
     case 'delegation-update': return filter.team || forceVisible ? <DelegationUpdateBlock msg={msg} /> : null
