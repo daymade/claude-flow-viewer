@@ -46,7 +46,7 @@ npm run build
 
 此模式下 `cfv:focus` 必须同时精确匹配 origin、parent window、完整原 endpoint、channel、session，缺失或错误均不读；未知 type 或非法 recordId 也不读。无参数旧模式仍允许 host 省略 channel/session，但显式错误值拒绝。Parent 仅在 origin/window/raw endpoint/channel/session 全匹配且 `ready.initialRecordId` 等于该 scope 出生 ID 时消费一次出生意图；echo 不替代正文与原记录唯一性核验，父侧 src/key 冻结由宿主负责。
 
-嵌入页可追加 `view=conversation`，初次打开时隐藏 Thinking、Tool Calls 和 Results；工具栏可重新开启，刷新与翻页保留当前过滤设置。未传该参数时使用原有默认显示。
+嵌入页可追加 `view=conversation`，初次打开时隐藏 Thinking、Tool Calls 和 Results；工具栏可重新开启，刷新与翻页保留当前过滤设置。自动 latest 定位跳过空白 AI 正文；显式原记录定位、Find 与原件保留。未传该参数时使用原有默认显示。
 
 已加载记录全部被当前筛选隐藏时，正文区显示「当前筛选没有可见记录」。「调整筛选」打开现有筛选面板，由读者选择显示内容，不自动开启工具或思考记录；当前页允许向前读取时，同一区域提供「加载更早的对话」，沿用现有分页、身份与读取边界。真正没有已加载记录时显示「当前读取范围没有记录」，不据此判断整个会话为空；读取进行中不显示成功空态。共享 `SessionReader` 可通过可选 `emptyStateAction` 提供宿主的空态操作，`pending` 标识读取进行中，均不改变未传入时的筛选默认值。
 
