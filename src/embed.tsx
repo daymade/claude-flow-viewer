@@ -197,7 +197,7 @@ export function ReaderEmbed() {
       let index=anchor ? resolveConversationAnchor(merged,anchor) : mode==='latest' ? data.messages.length-1 : 0
       if(anchor && index<0){setTarget(null);throw new Error('Requested source record is not uniquely available in this reading window')}
       if(conversationView && !anchor){
-        const conversationIndices=data.messages.flatMap((message,index)=>message.kind==='ai-text' || message.kind==='user-prompt' ? [index] : [])
+        const conversationIndices=data.messages.flatMap((message,index)=>message.kind==='user-prompt' || (message.kind==='ai-text' && (mode!=='latest' || message.text.trim().length>0)) ? [index] : [])
         index=(mode==='latest' ? conversationIndices[conversationIndices.length-1] : conversationIndices[0]) ?? -1
       }
       // Explicit host navigation (cfv:focus → 'question') gets a fresh stable

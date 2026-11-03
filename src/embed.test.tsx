@@ -1239,3 +1239,57 @@ it('retires an accepted raw focus when the next page cannot certify the same sou
  expect(screen.getByText('UNRELATED replacement context')).toBeTruthy()
  expect(ringAt(0)).not.toContain('ring-')
 })
+
+
+type AutoTailCase={label:string;text:string;expected:number|null;phase?:string;status?:string;anchor?:string;only?:boolean;conversation?:boolean}
+const autoTailPage=(item:Record<string,unknown>,only=false)=>{
+  const records=[
+    ...(!only?[{id:'msg_meaningful',item:{id:'msg_meaningful',turnId:'turn_meaningful',type:'agentMessage',phase:'final_answer',text:'synthetic readable answer'}}]:[]),
+    {id:'msg_empty',item:{id:'msg_empty',turnId:'turn_empty',type:'agentMessage',...item}},
+  ].map((record,ordinal)=>({...record,ordinal,timestamp:'2026-01-01T00:00:00Z'}))
+  return {...page,provider:'codex',session_id:'session_fixture',records,total:records.length,offset:0,next_offset:records.length,has_earlier:false,has_later:false}
+}
+const autoTailCases:AutoTailCase[]=[
+  {label:'empty final',text:'',expected:0},
+  {label:'nonempty final',text:'synthetic final answer',expected:1},
+  {label:'pending empty',text:'',phase:'commentary',status:'inProgress',expected:0},
+  {label:'explicit empty anchor',text:'',anchor:'msg_empty',expected:1},
+  {label:'only empty',text:'',only:true,expected:null},
+  {label:'whitespace final',text:' \n\t',expected:0},
+  {label:'non-conversation unchanged',text:'',conversation:false,expected:1},
+]
+it.each(autoTailCases)('auto-tail-empty: $label',async(testCase)=>{
+  const item={phase:testCase.phase??'final_answer',text:testCase.text,...(testCase.status?{status:testCase.status}:{})}
+  const sourcePage=autoTailPage(item,testCase.only),original=JSON.stringify(sourcePage.records)
+  const fetchMock=vi.fn(async()=>jsonResponse(sourcePage));vi.stubGlobal('fetch',fetchMock)
+  const endpoint='/api/sessions/auto-tail-'+testCase.label.replace(/\W+/g,'-')
+  const params=new URLSearchParams({endpoint,session:'session_fixture',channel:'auto-tail-fixture',...(testCase.conversation!==false?{view:'conversation'}:{}),...(testCase.anchor?{initial_record_id:testCase.anchor}:{})})
+  await mountEmbed('/reader/embed.html?'+params)
+  await waitFor(()=>expect(document.querySelectorAll('[data-message-index]')).toHaveLength(sourcePage.records.length))
+  if(testCase.expected===null)expect(document.querySelectorAll('[data-message-index].ring-1')).toHaveLength(0)
+  else await waitFor(()=>expect(ringAt(testCase.expected!)).toContain('ring-1'))
+  const rawRow=document.querySelector('[data-source-record-id="msg_empty"]')!
+  expect(rawRow.querySelector('summary')?.textContent).toBe('Original native record')
+  expect(rawRow.querySelector('time')?.getAttribute('datetime')).toBe('2026-01-01T00:00:00Z')
+  expect(JSON.stringify(sourcePage.records)).toBe(original)
+  expect(sourcePage.records.at(-1)!.item).toMatchObject(item)
+  expect(screen.queryByText('当前读取范围没有记录')).toBeNull()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+})
+it('auto-tail-empty: Find still reaches the complete empty original without another read',async()=>{
+  const sourcePage=autoTailPage({phase:'final_answer',text:''})
+  const fetchMock=vi.fn(async()=>jsonResponse(sourcePage));vi.stubGlobal('fetch',fetchMock)
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint:'/api/sessions/auto-tail-find',session:'session_fixture',view:'conversation'}))
+  await waitFor(()=>expect(ringAt(0)).toContain('ring-1'))
+  const reader=document.querySelector('[data-session-reader]'),scroller=document.querySelector('[data-primary-scroll]')
+  fireEvent.change(findInput(),{target:{value:'turn_empty'}})
+  await waitFor(()=>expect(ringAt(1)).toContain('ring-1'))
+  const rawRow=document.querySelector('[data-source-record-id="msg_empty"]')!,details=rawRow.querySelector('details')!
+  await waitFor(()=>expect(details.open).toBe(true))
+  expect(details.querySelector('pre')?.textContent).toBe(JSON.stringify(sourcePage.records[1].item,null,2))
+  expect(rawRow.querySelector('time')?.getAttribute('datetime')).toBe('2026-01-01T00:00:00Z')
+  expect(document.querySelector('[data-session-reader]')).toBe(reader)
+  expect(document.querySelector('[data-primary-scroll]')).toBe(scroller)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+})
