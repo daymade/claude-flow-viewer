@@ -44,6 +44,10 @@ npm run build
 
 可选出生定位通过嵌入页顶层唯一 `initial_record_id` 开启，绝不写入 `endpoint` query，也不扩充上段允许的运行时 query。值是最多 1024 个 UTF-16 码元的非空 opaque 原记录字符串，不假定 UUID 形态；首尾空白、C0 控制符或 DEL、空值、重复参数或超过上限均拒绝。该模式必须同时具备有效 endpoint 与非空 session/channel；非法或不完整绑定显示错误，不发 latest/anchor 读取，也不在 `cfv:ready` 回声。完整绑定的首个且唯一出生请求是 `read('question', initialRecordId)`，不先读 latest；`cfv:ready.initialRecordId` 仅确认请求已接受，不代表正文已可读。原记录唯一性、会话身份与后续 Find/翻页规则不变。未提供参数时仍只读一次 latest，ready 不新增该键。
 
+初次阅读完整 Codex 原件可由宿主显式请求顶层 `window_focus=latest-conversation`，只接受 `view=conversation`、以 `/original-context` 结尾的已绑定 endpoint、非空 session/channel，且不得与 `initial_record_id` 混用。重复、未知或不完整模式在读取前拒绝。首次只发一次 `offset=-1&limit=80&window_focus=latest-conversation`；后端完整验证原件后，以最后一条用户输入或非空 AI 正文为焦点返回连续窗口，工具尾部仍可向后读取。响应必须带严格的 `window_focus:{mode:'latest-conversation',matched:boolean,message_index:number|null}`、连续 `original:<offset+i>` 坐标及一致分页信息；缺失或矛盾不显示正文。`cfv:ready.windowFocusMode` 只确认此帧接受该模式，不代表正文完成；请求此模式的宿主须核对该回声，无请求的宿主拒绝带模式的迟到回声。未请求模式仍使用原来的 latest 行为。
+
+构建包在 `package.json.capabilities.originalContextWindowFocus` 声明 `['latest-conversation']`，并导出 `isConversationMessage` 供原件 producer 使用同一判定。来源读取者须核实际所用包的能力后再声明支持，不能从版本号推定。向前翻页的条数不超过当前首条 offset，避免非整页焦点窗口产生重复记录。
+
 此模式下 `cfv:focus` 必须同时精确匹配 origin、parent window、完整原 endpoint、channel、session，缺失或错误均不读；未知 type 或非法 recordId 也不读。无参数旧模式仍允许 host 省略 channel/session，但显式错误值拒绝。Parent 仅在 origin/window/raw endpoint/channel/session 全匹配且 `ready.initialRecordId` 等于该 scope 出生 ID 时消费一次出生意图；echo 不替代正文与原记录唯一性核验，父侧 src/key 冻结由宿主负责。
 
 嵌入页可追加 `view=conversation`，初次打开时隐藏 Thinking、Tool Calls 和 Results；工具栏可重新开启，刷新与翻页保留当前过滤设置。自动 latest 定位跳过空白 AI 正文；显式原记录定位、Find 与原件保留。未传该参数时使用原有默认显示。

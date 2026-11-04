@@ -4,11 +4,13 @@ import { SessionReader } from './components/session/SessionReader'
 import {normalizeConversationPage as adapt,resolveConversationAnchor,type ConversationPage as Page} from './lib/reader-page'
 import type { ReaderJumpTarget } from './components/session/SessionView'
 import { bindEmbedEndpoint, embedRequestUrl } from './lib/embed-endpoint'
+import {isConversationMessage,LATEST_CONVERSATION,validateConversationWindowFocus,earlierConversationWindow} from './lib/conversation-focus'
 import {resolveConversationImage,mergeConversationImageResources} from './lib/image-references'
 import './index.css'
 import './embed.css'
 const CONVERSATION_FILTER = {thinking:false,toolCalls:false,toolResults:false}
 const INVALID_INITIAL_BINDING='Invalid initial record binding'
+const INVALID_WINDOW_FOCUS_BINDING='Invalid conversation window focus binding'
 function isValidRecordId(value:unknown):value is string{
   if(typeof value!=='string'||value.length===0||value.length>1024||value.trim()!==value)return false
   return ![...value].some(character=>{const code=character.charCodeAt(0);return code<=31||code===127})
@@ -86,8 +88,12 @@ export function ReaderEmbed() {
   const hasInitial=initialValues.length>0
   const initialRecordId=initialValues.length===1&&isValidRecordId(initialValues[0])?initialValues[0]:null
   const initialBindingValid=!hasInitial||Boolean(endpoint&&initialRecordId&&expectedSession?.trim()&&channel?.trim())
-  const initialBindingError=hasInitial&&!initialBindingValid
-  const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(initialBindingError?INVALID_INITIAL_BINDING:''), [busy,setBusy]=useState(false)
+  const windowFocusValues=parameters.getAll('window_focus')
+  const windowFocusMode=windowFocusValues.length===1&&windowFocusValues[0]===LATEST_CONVERSATION?LATEST_CONVERSATION:null
+  const windowFocusBindingError=windowFocusValues.length>0&&(!windowFocusMode||!conversationView||!endpoint||!new URL(endpoint,location.origin).pathname.endsWith('/original-context')||!expectedSession?.trim()||!channel?.trim()||hasInitial)
+  const initialBindingError=hasInitial&&!initialBindingValid||windowFocusBindingError
+  const bindingError=windowFocusBindingError?INVALID_WINDOW_FOCUS_BINDING:INVALID_INITIAL_BINDING
+  const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(initialBindingError?bindingError:''), [busy,setBusy]=useState(false)
   const [target,setTarget]=useState<ReaderJumpTarget|null>(null)
   const [blockedLink,setBlockedLink]=useState<BlockedLink|null>(null)
   const historyRef=useRef<HTMLDetailsElement>(null)
@@ -168,11 +174,15 @@ export function ReaderEmbed() {
   const findIntent=useRef({version:0,query:''})
   const recordFindEdit=useCallback((query:string)=>{findIntent.current={version:findIntent.current.version+1,query}},[])
   const read=useCallback(async (mode:string,anchor?:string)=>{
-    if(initialBindingError){setError(INVALID_INITIAL_BINDING);return}
+    if(initialBindingError){setError(bindingError);return}
     if (!endpoint) {setError('No bound session endpoint');return}
+    if(mode==='earlier'&&(!current.current||current.current.offset<=0))return
     const version=++generation.current, previous=current.current,findVersion=findIntent.current.version
     setBusy(true);setError('')
-    const query=new URLSearchParams({limit:'80',offset:mode==='earlier' ? String(Math.max(0,(previous?.offset ?? 0)-80)) : mode==='later' ? String(previous?.next_offset ?? 0) : mode==='first' ? '0' : '-1'})
+    const earlier=mode==='earlier'&&previous?earlierConversationWindow(previous.offset,80):null
+    const query=new URLSearchParams({limit:String(earlier?.limit??80),offset:mode==='earlier' ? String(earlier?.offset??0) : mode==='later' ? String(previous?.next_offset ?? 0) : mode==='first' ? '0' : '-1'})
+    const focused=windowFocusMode===LATEST_CONVERSATION&&conversationView&&mode==='latest'&&!anchor
+    if(focused)query.set('window_focus',LATEST_CONVERSATION)
     if (anchor) query.set('anchor',anchor)
     if (['earlier','later'].includes(mode) && previous) {
       if(previous.revision)query.set('revision',previous.revision)
@@ -182,6 +192,8 @@ export function ReaderEmbed() {
       const response=await fetch(embedRequestUrl(endpoint,query),{credentials:'same-origin'})
       if(!response.ok)throw new Error((await response.text()).slice(0,1000))
       const next:Page=await response.json()
+      if(focused)validateConversationWindowFocus(next,80)
+      else if(next.window_focus!=null)throw new Error('Unexpected initial conversation window focus')
       if(expectedSession && next.session_id!==expectedSession)throw new Error('Selected session identity changed')
       if(version!==generation.current)return
       if(previous && ['earlier','later'].includes(mode) && next.session_id!==previous.session_id)throw new Error('Selected session identity changed')
@@ -197,7 +209,7 @@ export function ReaderEmbed() {
       let index=anchor ? resolveConversationAnchor(merged,anchor) : mode==='latest' ? data.messages.length-1 : 0
       if(anchor && index<0){setTarget(null);throw new Error('Requested source record is not uniquely available in this reading window')}
       if(conversationView && !anchor){
-        const conversationIndices=data.messages.flatMap((message,index)=>message.kind==='user-prompt' || (message.kind==='ai-text' && (mode!=='latest' || message.text.trim().length>0)) ? [index] : [])
+        const conversationIndices=data.messages.flatMap((message,index)=>isConversationMessage(message) ? [index] : [])
         index=(mode==='latest' ? conversationIndices[conversationIndices.length-1] : conversationIndices[0]) ?? -1
       }
       // Explicit host navigation (cfv:focus → 'question') gets a fresh stable
@@ -205,7 +217,7 @@ export function ReaderEmbed() {
       setTarget(index>=0 ? {messageIndex:index, ...(mode==='question' ? {requestId:`nav-${++navigationSequence.current}`} : {})} : null)
     } catch(e) {if(version===generation.current)setError(e instanceof Error ? e.message : String(e))}
     finally {if(version===generation.current)setBusy(false)}
-  },[endpoint,expectedSession,conversationView,initialBindingError])
+  },[endpoint,expectedSession,conversationView,initialBindingError,bindingError,windowFocusMode])
   useEffect(()=>{
     if(!initialBindingError)void read(initialRecordId?'question':'latest',initialRecordId??undefined)
     const counter=generation;return()=>{counter.current++}
@@ -226,9 +238,9 @@ export function ReaderEmbed() {
       if(isValidRecordId(event.data.recordId))void read('question',event.data.recordId)
     }
     addEventListener('message',receive)
-    parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel,...(!initialBindingError&&initialRecordId?{initialRecordId}:{})},location.origin)
+    parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel,...(!initialBindingError&&initialRecordId?{initialRecordId}:{}),...(!initialBindingError&&windowFocusMode?{windowFocusMode}:{})},location.origin)
     return()=>removeEventListener('message',receive)
-  },[endpoint,expectedSession,channel,read,initialBindingError,initialRecordId])
+  },[endpoint,expectedSession,channel,read,initialBindingError,initialRecordId,windowFocusMode])
   const readToolResult=useCallback(async (relativePath:string)=>{
     if(!endpoint)throw new Error('No bound session endpoint')
     const response=await fetch(embedRequestUrl(endpoint,new URLSearchParams({path:relativePath}),'/tool-output'),{credentials:'same-origin'})

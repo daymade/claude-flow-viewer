@@ -1,8 +1,16 @@
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {SessionReader, classifyUserInputContent, classifyUserInputs, parseCodexNativeRecords, parseCodexSessionContent, parseClaudeSessionContent, buildClaudeSourceAnchors, normalizeConversationPage, resolveConversationAnchor, conversationImageReferences, resolveConversationImage} from '../dist-reader/reader.mjs';
+import {SessionReader, classifyUserInputContent, classifyUserInputs, parseCodexNativeRecords, parseCodexSessionContent, parseClaudeSessionContent, buildClaudeSourceAnchors, normalizeConversationPage, resolveConversationAnchor, conversationImageReferences, resolveConversationImage, isConversationMessage} from '../dist-reader/reader.mjs';
 import {spawnSync} from 'node:child_process';
+
+const readerPackage=JSON.parse(readFileSync(new URL('../dist-reader/package.json',import.meta.url),'utf8'));
+assert.deepEqual(readerPackage.capabilities.originalContextWindowFocus,['latest-conversation']);
+assert.equal(isConversationMessage({kind:'user-prompt',text:''}),true);
+assert.equal(isConversationMessage({kind:'ai-text',text:'Body'}),true);
+assert.equal(isConversationMessage({kind:'ai-thinking',text:'Thought'}),false);
+console.log('PASS built original-window capability and shared predicate export');
 
 // Exercise the built public export without a global React namespace. Source
 // component tests and the separately compiled iframe cannot catch this failure.
