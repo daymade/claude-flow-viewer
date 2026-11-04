@@ -87,6 +87,38 @@ const nativeRuntimeWitness='a'.repeat(64)
 const nativeBinding=`native_runtime_id=${nativeRuntimeId}&native_runtime_witness=${nativeRuntimeWitness}`
 const readyMessages=(received:unknown[])=>received.filter(data=>(data as {type?:string}|null)?.type==='cfv:ready') as Array<Record<string,unknown>>
 
+it('requests and acknowledges a focused original window without a second body read',async()=>{
+ const endpoint='/api/sources/tasks/focus-initial/original-context',received:unknown[]=[];
+ const sourcePage={...page,provider:'codex',records:page.records.map((record,i)=>({...record,id:`original:${i}`})),window_focus:{mode:'latest-conversation',matched:true,message_index:2}};
+ const fetchMock=vi.fn<typeof fetch>(async()=>({ok:true,json:async()=>sourcePage}) as Response);vi.stubGlobal('fetch',fetchMock);
+ const receive=(event:MessageEvent)=>received.push(event.data);window.addEventListener('message',receive);
+ try{
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'focused-birth',view:'conversation',window_focus:'latest-conversation'}));
+  await waitFor(()=>expect(ringAt(2)).toContain('ring-1'));
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(new URL(String(fetchMock.mock.calls[0][0]),location.origin).searchParams.get('window_focus')).toBe('latest-conversation');
+  expect(readyMessages(received)).toEqual([{type:'cfv:ready',endpoint,session:'sess-1',channel:'focused-birth',windowFocusMode:'latest-conversation'}]);
+ }finally{window.removeEventListener('message',receive)}
+});
+
+it.each([
+ ['wrong-endpoint','/api/tasks/focus-invalid/conversation',{}],
+ ['missing-channel','/api/sources/tasks/focus-no-channel/original-context',{channel:''}],
+ ['wrong-view','/api/sources/tasks/focus-wrong-view/original-context',{view:''}],
+ ['mixed-anchor','/api/sources/tasks/focus-anchor/original-context',{initial_record_id:'rec-2'}],
+])('rejects an invalid focus binding before reading: %s',async(_label,endpoint,changes)=>{
+ const fetchMock=stubFetch();
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'invalid-focused-birth',view:'conversation',window_focus:'latest-conversation',...changes}));
+ expect(screen.getByRole('alert').textContent).toBe('Invalid conversation window focus binding');expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it('refuses an unconfirmed focused response rather than displaying the legacy tool tail',async()=>{
+ const endpoint='/api/sources/tasks/focus-no-echo/original-context';stubFetch();
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'focused-no-echo',view:'conversation',window_focus:'latest-conversation'}));
+ expect(screen.getByRole('alert').textContent).toBe('Conversation window focus was not confirmed');
+ expect(document.querySelector('[data-message-index]')).toBeNull();
+});
+
 it('uses a valid initial record for the only birth read and echoes the accepted binding',async()=>{
  const endpoint=`/minions/api/sessions/initial-valid?${nativeBinding}`,initialRecordId='rec-2'
  const fetchMock=stubFetch(),received:unknown[]=[]

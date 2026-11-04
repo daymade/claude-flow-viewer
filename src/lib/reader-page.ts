@@ -3,11 +3,13 @@ import type {ConversationImageResources} from './image-references'
 import type {ClaudeSourceAnchors} from './providers/claude'
 import {computeHeatmap} from './heatmap'
 import type {SessionData,SessionMessage} from '../types/session'
+import type {AppliedConversationWindowFocus} from './conversation-focus'
 export interface FlowConversationRecord {kind:'flow-message';id:string;message:SessionMessage;timestamp?:string|null}
 export interface ConversationPage {
   provider:'claude'|'codex'; session_id:string
   records:Array<NativeConversationRecord | FlowConversationRecord>
   total:number;offset:number;next_offset:number;has_earlier:boolean;has_later:boolean
+  window_focus?:AppliedConversationWindowFocus
   imageResources?:ConversationImageResources
   sourceAnchors?:ClaudeSourceAnchors
   revision?:string;until?:number;read_at:string;boundary:string
