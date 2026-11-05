@@ -275,3 +275,11 @@ See [CLAUDE.md](./CLAUDE.md) for detailed architecture, development workflow, an
 ## License
 
 MIT
+
+### Strict original-prefix Node adapter
+
+The package exposes `./codex-original-source` and `capabilities.strictCodexOriginalStream: 1`. `readStrictCodexOriginalWindow` accepts one exact root paginated Codex physical prefix, its SHA256 and decimal-string FD dev/ino/uid, session/cwd, bound and window. It uses the existing classifier after one strict JSON decode: complete fatal UTF8/LF records, the mature 64MiB inclusive line limit and 1GiB ordinary prefix ceiling, unique metadata, exact contiguous integer ordinals and finite floating-point tokens. Ancestry, multiple sources and anchors remain outside this adapter. Refusal never falls back inside the strict call.
+
+Success requires normal complete exhaustion, actual consumed bytes/SHA and unchanged opened/path identity. Retained messages carry their consumed raw UTF8 line and byte/record coordinate; hosts independently keep initial/final full-prefix and current physical/index/dependency checks. Hosts must preserve `sourceRecordRaw` as a string through JSON transport. Original-record details display that string without reparsing; existing object-only producers retain their prior view. Function-call Input uses its original `payload.arguments` string where available. These guarantees do not assert that all other JavaScript-derived numeric fields are lossless.
+
+The host must positively negotiate JSON.parse reviver `context.source` support before opening a strict source. An explicitly unsupported runtime uses the mature route; actual strict validation failures never do. Minions keeps the existing snapshot/revision/clock/window representation, including later frozen anchor reads on the mature route, and fingerprints the actual adapter and package metadata in both paths.

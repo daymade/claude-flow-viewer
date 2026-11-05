@@ -132,6 +132,16 @@ export function ThinkingHint({ msg }: { msg: Extract<SessionMessage, { kind: 'ai
 
 // ━━━ L3: Tool Call ━━━
 
+function toolInputText(msg: Extract<SessionMessage, { kind: 'ai-tool-use' }>): string {
+  const record = msg.sourceRecord
+  const payload = record?.payload
+  if (record?.type === 'response_item' && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const item = payload as Record<string, unknown>
+    if (item.type === 'function_call' && typeof item.arguments === 'string') return item.arguments
+  }
+  return truncateInput(msg.input)
+}
+
 export function ToolCallLine({ msg, forceMount = false }: { msg: Extract<SessionMessage, { kind: 'ai-tool-use' }>; forceMount?: boolean }) {
   const isAgent = msg.name === 'Agent' || msg.name === 'Task' || msg.name === 'spawn_agent' || msg.name === 'send_input'
 
@@ -166,7 +176,7 @@ export function ToolCallLine({ msg, forceMount = false }: { msg: Extract<Session
         </svg>
         <span className="truncate min-w-0">{msg.summary}</span>
       </summary>
-      {()=> <pre className="mt-1 ml-5 p-3 bg-stone-50 rounded text-[13px] max-h-[200px] overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] leading-relaxed text-stone-500">{truncateInput(msg.input)}</pre>}
+      {()=> <pre className="mt-1 ml-5 p-3 bg-stone-50 rounded text-[13px] max-h-[200px] overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] leading-relaxed text-stone-500">{toolInputText(msg)}</pre>}
     </DeferredDetails>
   )
 }

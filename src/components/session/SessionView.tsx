@@ -497,8 +497,9 @@ function renderAnchoredMessage(
   )
 }
 
-function SourceRecordDetails({msg,forceMount=false}:{msg:SessionMessage;forceMount?:boolean}) {
-  return msg.sourceRecord ? <DeferredDetails forceMount={forceMount} className="ml-6 my-2 text-[11px] text-stone-400"><summary className="cursor-pointer">Original native record</summary>{()=> <pre className="p-3 whitespace-pre-wrap break-words max-h-80 overflow-auto bg-stone-50">{JSON.stringify(msg.sourceRecord,null,2)}</pre>}</DeferredDetails> : null
+export function SourceRecordDetails({msg,forceMount=false}:{msg:SessionMessage;forceMount?:boolean}) {
+  const raw = typeof msg.sourceRecordRaw === 'string' ? msg.sourceRecordRaw : null
+  return raw !== null || msg.sourceRecord ? <DeferredDetails forceMount={forceMount} className="ml-6 my-2 text-[11px] text-stone-400"><summary className="cursor-pointer">Original native record</summary>{()=> <pre className="p-3 whitespace-pre-wrap break-words max-h-80 overflow-auto bg-stone-50">{raw ?? JSON.stringify(msg.sourceRecord,null,2)}</pre>}</DeferredDetails> : null
 }
 
 // ─── Tool Group (collapsed consecutive tool calls) ───
