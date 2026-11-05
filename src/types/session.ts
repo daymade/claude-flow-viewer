@@ -12,7 +12,7 @@ export interface EmbeddedImage {
   reference?: string
 }
 
-export type SessionMessage = { sourceRecordId?: string; sourceRecord?: Record<string,unknown> } & (
+export type SessionMessage = { sourceRecordId?: string; sourceRecord?: Record<string,unknown>; sourceRecordRaw?: string } & (
   | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; timestamp?: string; decision: DecisionMarker; queued?: boolean; dupCount?: number; inputClassification?: UserInputClassification }
   | { kind: 'tool-result'; content: string; isError: boolean; externalFile?: string; totalSize?: string; timestamp?: string; toolUseId?: string }
   | { kind: 'ai-text'; text: string; timestamp?: string }

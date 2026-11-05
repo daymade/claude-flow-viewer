@@ -7,6 +7,8 @@ import {spawnSync} from 'node:child_process';
 
 const readerPackage=JSON.parse(readFileSync(new URL('../dist-reader/package.json',import.meta.url),'utf8'));
 assert.deepEqual(readerPackage.capabilities.originalContextWindowFocus,['latest-conversation']);
+assert.equal(readerPackage.capabilities.strictCodexOriginalStream,1);
+assert.equal(typeof (await import('../dist-reader/server/codex-original-source.mjs')).readStrictCodexOriginalWindow,'function');
 assert.equal(isConversationMessage({kind:'user-prompt',text:''}),true);
 assert.equal(isConversationMessage({kind:'ai-text',text:'Body'}),true);
 assert.equal(isConversationMessage({kind:'ai-thinking',text:'Thought'}),false);
@@ -71,3 +73,7 @@ assert.equal(resolveConversationImage({...imagePage,session_id:'other'},'/synthe
 const duplicateImage=spawnSync(process.execPath,['dist-reader/server/image-references.mjs'],{input:JSON.stringify({version:1,page:{...imagePage,records:[imagePage.records[0],imagePage.records[0]]}}),encoding:'utf8'});
 assert.notEqual(duplicateImage.status,0);assert.equal(duplicateImage.stdout,'');
 console.log('PASS built image-reference CLI and SDK share exact ownership and reject foreign or duplicate records');
+
+const strictTests=spawnSync(process.execPath,['--test','scripts/test-codex-original-source.mjs','dist-reader/tests/codex-original-raw.test.mjs'],{encoding:'utf8'});
+assert.equal(strictTests.status,0,strictTests.stdout+'\n'+strictTests.stderr);
+console.log(strictTests.stdout);

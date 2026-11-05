@@ -1396,3 +1396,21 @@ export async function parseCodexMessagesStreaming(
   await driveCodexLines(lines, yieldToEventLoop, classifier)
   return classifier.finishMessages()
 }
+
+/** Consume already-decoded records through the same canonical classifier.
+ * The caller owns strict byte, JSON and source validation; no parse fallback. */
+export async function parseCodexMessagesRecordsStreaming(
+  records: AsyncIterable<Record<string, unknown>>,
+  yieldToEventLoop: () => Promise<void>,
+  sink: CodexMessageSink,
+): Promise<CodexMessageScan> {
+  if (typeof sink !== 'function') throw new TypeError('Codex message sink required')
+  const classifier = createCodexClassifier(undefined, sink)
+  let count = 0
+  for await (const record of records) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) throw new TypeError('Codex record object required')
+    classifier.processRecord(record)
+    if (++count % CODEX_STREAM_YIELD_EVERY_LINES === 0) await yieldToEventLoop()
+  }
+  return classifier.finishMessages()
+}
