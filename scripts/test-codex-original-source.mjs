@@ -109,6 +109,20 @@ test('large integer lexemes remain readable through exact raw lines',()=>{
   assert.equal(decodeStrictOriginalRecord(Buffer.from(raw),1,sid,cwd).rawLine,raw)
 })
 
+test('record type whitespace matches Python boundaries without treating BOM as blank',()=>{
+  const points=[9,10,11,12,13,28,29,30,31,32,0x85,0xa0,0x1680,
+    ...Array.from({length:11},(_,index)=>0x2000+index),0x2028,0x2029,0x202f,0x205f,0x3000]
+  const whitespace=new Set(points)
+  const decodeType=type=>decodeStrictOriginalRecord(Buffer.from(JSON.stringify({...message,type})+'\n'),1,sid,cwd)
+  assert.throws(()=>decodeType(''))
+  assert.throws(()=>decodeType(points.map(code=>String.fromCodePoint(code)).join('')))
+  for(const code of points)assert.throws(()=>decodeType(String.fromCodePoint(code)),String(code))
+  const neighbors=new Set(points.flatMap(code=>[code-1,code+1]).filter(code=>!whitespace.has(code)))
+  for(const code of [...neighbors,0xfeff,0x180e])assert.ok(decodeType(String.fromCodePoint(code)),String(code))
+  assert.ok(decodeType('\u001c event_msg\u0085'))
+  assert.ok(decodeType(' \ufeff\t'))
+})
+
 test('64MiB record limit includes LF and CR and rejects one extra byte',()=>{
   const prefix=JSON.stringify(header),exact=Buffer.alloc(MAX_ORIGINAL_RECORD_BYTES,32)
   exact.write(prefix);exact[exact.length-2]=13;exact[exact.length-1]=10

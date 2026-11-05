@@ -20,6 +20,16 @@ const decimal = (v:unknown):v is string => typeof v==='string' && /^(0|[1-9][0-9
 const decoder = new TextDecoder('utf-8',{fatal:true,ignoreBOM:true})
 const ancestry = ['history_base','forked_from_id','parent_thread_id','subagent_history_start_ordinal']
 
+function isBlankRecordType(value:string) {
+  for(const character of value){
+    const code=character.codePointAt(0)!
+    if(!((code>=9&&code<=13)||(code>=28&&code<=32)||code===0x85||code===0xa0
+      ||code===0x1680||(code>=0x2000&&code<=0x200a)||code===0x2028||code===0x2029
+      ||code===0x202f||code===0x205f||code===0x3000))return false
+  }
+  return true
+}
+
 /** One decode, including exact ordinal lexeme and finite floating-point checks. */
 export function decodeStrictOriginalRecord(raw:Uint8Array,index:number,session:string,cwd:string) {
   if(raw.byteLength>MAX_ORIGINAL_RECORD_BYTES)throw new Error('original record exceeds byte safety limit')
@@ -39,7 +49,7 @@ export function decodeStrictOriginalRecord(raw:Uint8Array,index:number,session:s
     }
     return value
   })
-  if(!object(record)||typeof record.type!=='string'||/^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/.test(record.type)||!object(record.payload))
+  if(!object(record)||typeof record.type!=='string'||isBlankRecordType(record.type)||!object(record.payload))
     throw new Error('original record requires a type and an object payload')
   const ordinalToken=ordinals.get(record)
   if(typeof record.ordinal!=='number'||typeof ordinalToken!=='string'||!/^-(?:0|[1-9][0-9]*)$|^(?:0|[1-9][0-9]*)$/.test(ordinalToken)||BigInt(ordinalToken)!==BigInt(index))
