@@ -87,6 +87,146 @@ const nativeRuntimeWitness='a'.repeat(64)
 const nativeBinding=`native_runtime_id=${nativeRuntimeId}&native_runtime_witness=${nativeRuntimeWitness}`
 const readyMessages=(received:unknown[])=>received.filter(data=>(data as {type?:string}|null)?.type==='cfv:ready') as Array<Record<string,unknown>>
 
+it('initial source handoff: empty native shell applies one immutable birth page and repeat only acks',async()=>{
+ const endpoint='/api/sources/tasks/handoff-native/conversation',received:unknown[]=[];const fetchMock=stubFetch();
+ const receive=(event:MessageEvent)=>received.push(event.data);window.addEventListener('message',receive);
+ try{
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'handoff-native',initial_record_id:'rec-2',initial_handoff:'1'}));
+  expect(fetchMock).not.toHaveBeenCalled();expect(readyMessages(received)).toEqual([{type:'cfv:ready',endpoint,session:'sess-1',channel:'handoff-native',initialRecordId:'rec-2',initialHandoff:1}]);
+  const message={type:'cfv:initial-source',version:1,endpoint,session:'sess-1',channel:'handoff-native',recordId:'rec-2',windowFocus:null,page};
+  sendHostMessage({...message,channel:'late-B'});expect(document.querySelector('[data-message-index]')).toBeNull();
+  act(()=>sendHostMessage(message));await waitFor(()=>expect(ringAt(1)).toContain('ring-1'));expect(fetchMock).not.toHaveBeenCalled();
+  const adapted=adaptSpy.calls.length;sendHostMessage(message);await flush();expect(adaptSpy.calls.length).toBe(adapted);
+  expect(received.filter(data=>(data as {type?:string}|null)?.type==='cfv:initial-source-ack')).toHaveLength(2);
+  sendHostMessage({...message,recordId:'rec-1'});await flush();expect(ringAt(1)).toContain('ring-1');
+ }finally{window.removeEventListener('message',receive)}
+});
+
+it('initial source handoff: original official focus uses the supplied complete page without a birth fetch',async()=>{
+ const endpoint='/api/sources/tasks/handoff-original/original-context',received:unknown[]=[];
+ const sourcePage={...page,provider:'codex',records:page.records.map((record,i)=>({...record,id:`original:${i}`,message:{...record.message,sourceRecordRaw:'{}\n'}})),window_focus:{mode:'latest-conversation',matched:true,message_index:2}};
+ const fetchMock=vi.fn<typeof fetch>(async()=>({ok:true,json:async()=>sourcePage}) as Response);vi.stubGlobal('fetch',fetchMock);
+ const receive=(event:MessageEvent)=>received.push(event.data);window.addEventListener('message',receive);
+ try{
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'handoff-original',view:'conversation',window_focus:'latest-conversation',initial_handoff:'1'}));
+  expect(fetchMock).not.toHaveBeenCalled();
+  act(()=>sendHostMessage({type:'cfv:initial-source',version:1,endpoint,session:'sess-1',channel:'handoff-original',recordId:null,windowFocus:'latest-conversation',page:sourcePage}));
+  await waitFor(()=>expect(ringAt(2)).toContain('ring-1'));expect(fetchMock).not.toHaveBeenCalled();
+  expect(readyMessages(received)[0]).toMatchObject({initialHandoff:1,windowFocusMode:'latest-conversation'});
+ }finally{window.removeEventListener('message',receive)}
+});
+
+it('initial source handoff: deferred empty shell binds once without a birth GET and preserves the mounted reader on duplicate',async()=>{
+ const channel='deferred-shell',endpoint=`/minions/api/sessions/deferred?${nativeBinding}`,received:unknown[]=[],fetchMock=stubFetch();
+ const receive=(event:MessageEvent)=>received.push(event.data);window.addEventListener('message',receive);
+ try{
+  await mountEmbed('/minions/reader/embed.html?'+new URLSearchParams({initial_handoff:'source-page-v1',channel,view:'conversation'}));
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(readyMessages(received)).toEqual([{type:'cfv:ready',endpoint:null,session:null,channel,initialHandoff:1}]);
+  expect((screen.getByRole('button',{name:'刷新到最新'}) as HTMLButtonElement).disabled).toBe(true);
+  const message={type:'cfv:initial-source',version:1,endpoint,session:'sess-1',channel,recordId:'rec-2',windowFocus:null,page};
+  act(()=>sendHostMessage(message));await waitFor(()=>expect(ringAt(1)).toContain('ring-1'));
+  const reader=document.querySelector('[data-session-reader]'),scroller=document.querySelector('[data-primary-scroll]') as HTMLElement;
+  fireEvent.change(findInput(),{target:{value:'selected question'}});scroller.scrollTop=91;
+  const sourceDisclosure=document.querySelector('.embed-source') as HTMLDetailsElement;
+  sourceDisclosure.open=true;
+  const adapted=adaptSpy.calls.length;
+  act(()=>sendHostMessage(message));await flush();
+  expect(adaptSpy.calls.length).toBe(adapted);expect(findInput().value).toBe('selected question');expect(scroller.scrollTop).toBe(91);
+  expect(sourceDisclosure.open).toBe(true);expect(document.querySelector('.embed-source')).toBe(sourceDisclosure);
+  expect(document.querySelector('[data-session-reader]')).toBe(reader);expect(document.querySelector('[data-primary-scroll]')).toBe(scroller);
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(received.filter(data=>(data as {type?:string})?.type==='cfv:initial-source-ack')).toEqual([
+   {type:'cfv:initial-source-ack',version:1,endpoint,session:'sess-1',channel},
+   {type:'cfv:initial-source-ack',version:1,endpoint,session:'sess-1',channel},
+  ]);
+  for(const changes of [{endpoint:'/minions/api/sessions/other'},{session:'other'},{recordId:'rec-1'},{windowFocus:'latest-conversation'},
+   {page:{...page,revision:'replacement'}},{page:{...page,records:page.records.map(record=>({...record,message:{...record.message,text:'replacement body'}}))}},
+  ])act(()=>sendHostMessage({...message,...changes}));
+  await flush();expect(adaptSpy.calls.length).toBe(adapted);expect(received.filter(data=>(data as {type?:string})?.type==='cfv:initial-source-ack')).toHaveLength(2);
+  act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel,session:'other',recordId:'rec-1'}));expect(fetchMock).not.toHaveBeenCalled();
+  act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel,session:'sess-1',recordId:'rec-1'}));
+  await waitFor(()=>expect(fetchMock).toHaveBeenCalledTimes(1));await waitFor(()=>expect(ringAt(0)).toContain('ring-1'));
+  const requested=new URL(String(fetchMock.mock.calls[0][0]),location.origin);
+  expect(requested.searchParams.get('anchor')).toBe('rec-1');expect(requested.searchParams.get('native_runtime_id')).toBe(nativeRuntimeId);
+  const afterNavigation=adaptSpy.calls.length;act(()=>sendHostMessage(message));await flush();
+  expect(adaptSpy.calls.length).toBe(afterNavigation);expect(received.filter(data=>(data as {type?:string})?.type==='cfv:initial-source-ack')).toHaveLength(2);
+ }finally{window.removeEventListener('message',receive)}
+});
+
+it('initial source handoff: rejects foreign sender, malformed binding and incomplete pages without binding or reading',async()=>{
+ const channel='deferred-refusals',endpoint='/api/sessions/deferred-refusals',received:unknown[]=[],fetchMock=stubFetch();
+ const receive=(event:MessageEvent)=>received.push(event.data);window.addEventListener('message',receive);
+ try{
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({initial_handoff:'source-page-v1',channel}));
+  const message={type:'cfv:initial-source',version:1,endpoint,session:'sess-1',channel,recordId:null,windowFocus:null,page};
+  act(()=>window.dispatchEvent(new MessageEvent('message',{data:message,origin:'https://foreign.invalid',source:window})));
+  act(()=>window.dispatchEvent(new MessageEvent('message',{data:message,origin:location.origin,source:null})));
+  const invalid=[
+   {...message,channel:'late-channel'}, {...message,session:''}, {...message,endpoint:'/other/not-api'},
+   {...message,endpoint:'/api/../outside'}, {...message,version:2}, {...message,recordId:undefined}, {...message,windowFocus:undefined},
+   {...message,page:{...page,session_id:'other'}}, {...message,page:{...page,records:page.records.slice(1)}},
+   {...message,page:{...page,records:[page.records[0],page.records[0],page.records[2]]}},
+   {...message,page:{...page,total:4}}, {...message,page:{...page,next_offset:2}},
+   {...message,page:{...page,window_focus:{mode:'latest-conversation',matched:false,message_index:null}}},
+  ];
+  for(const data of invalid)act(()=>sendHostMessage(data));
+  await flush();expect(fetchMock).not.toHaveBeenCalled();expect(document.querySelector('[data-message-index]')).toBeNull();
+  expect(received.filter(data=>(data as {type?:string})?.type==='cfv:initial-source-ack')).toHaveLength(0);
+  act(()=>sendHostMessage({type:'cfv:focus',endpoint,session:'sess-1',channel,recordId:'rec-2'}));expect(fetchMock).not.toHaveBeenCalled();
+  act(()=>sendHostMessage(message));await screen.findByText('last message');expect(screen.queryByRole('alert')).toBeNull();expect(fetchMock).not.toHaveBeenCalled();
+ }finally{window.removeEventListener('message',receive)}
+});
+
+it('initial source handoff: deferred original context uses the official full window and later paging retains frozen coordinates',async()=>{
+ const channel='deferred-original',endpoint='/api/sources/tasks/deferred-original/original-context',received:unknown[]=[];
+ const records=Array.from({length:80},(_,i)=>({kind:'flow-message',id:`original:${20+i}`,message:{kind:i===40?'ai-text':'ai-tool-use',...(i===40?{text:'complete supplied answer'}:{name:'fixture',summary:'tool',input:{}}),sourceRecordRaw:`{"ordinal":${20+i}}\n`}}));
+ const sourcePage={...page,provider:'codex',records,total:100,offset:20,next_offset:100,has_earlier:true,has_later:false,revision:'frozen-revision',until:100,window_focus:{mode:'latest-conversation',matched:true,message_index:60}};
+ const fetchMock=vi.fn<typeof fetch>(async()=>jsonResponse({...sourcePage,records:records.slice(0,20).map((record,i)=>({...record,id:`original:${i}`})),offset:0,next_offset:20,has_earlier:false,has_later:true,window_focus:undefined}));vi.stubGlobal('fetch',fetchMock);
+ const receive=(event:MessageEvent)=>received.push(event.data);window.addEventListener('message',receive);
+ try{
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({initial_handoff:'source-page-v1',channel,view:'conversation'}));
+  const message={type:'cfv:initial-source',version:1,endpoint,session:'sess-1',channel,recordId:null,windowFocus:'latest-conversation',page:sourcePage};
+  act(()=>sendHostMessage({...message,page:{...sourcePage,window_focus:{mode:'latest-conversation',matched:true,message_index:59}}}));
+  expect(document.querySelector('[data-message-index]')).toBeNull();expect(fetchMock).not.toHaveBeenCalled();
+  act(()=>sendHostMessage(message));await waitFor(()=>expect(ringAt(40)).toContain('ring-1'));expect(fetchMock).not.toHaveBeenCalled();
+  const rawRecord=document.querySelector('[data-source-record-id="original:60"]')!;
+  fireEvent.click(within(rawRecord as HTMLElement).getByText('Original native record'));
+  await waitFor(()=>expect(rawRecord.querySelector('pre')?.textContent).toBe('{"ordinal":60}\n'));
+  expect(fetchMock).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button',{name:'加载更早的对话'}));
+  await waitFor(()=>expect(fetchMock).toHaveBeenCalledTimes(1));
+  const request=new URL(String(fetchMock.mock.calls[0][0]),location.origin);
+  expect(request.pathname).toBe(endpoint);expect(request.searchParams.get('offset')).toBe('0');expect(request.searchParams.get('limit')).toBe('20');
+  expect(request.searchParams.get('revision')).toBe('frozen-revision');expect(request.searchParams.get('until')).toBe('100');
+  expect(request.searchParams.has('window_focus')).toBe(false);
+ }finally{window.removeEventListener('message',receive)}
+});
+
+it.each([
+ ['partial-endpoint','initial_handoff=source-page-v1&channel=bad-partial&endpoint=/api/sessions/partial'],
+ ['partial-session','initial_handoff=source-page-v1&channel=bad-session&session=sess-1'],
+ ['duplicate-mode','initial_handoff=source-page-v1&initial_handoff=source-page-v1&channel=bad-duplicate'],
+ ['missing-channel','initial_handoff=source-page-v1'],
+ ['unknown-mode','initial_handoff=other&channel=bad-mode'],
+])('initial source handoff: malformed deferred URL stays read-free: %s',async(_label,query)=>{
+ const fetchMock=stubFetch();await mountEmbed('/reader/embed.html?'+query);
+ expect(screen.getByRole('alert')).toBeTruthy();expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it('requires exact channel and session on host focus in original window focus mode',async()=>{
+ const endpoint='/api/sources/tasks/original-focus-binding/original-context';
+ const sourcePage={...page,provider:'codex',records:page.records.map((record,i)=>({...record,id:`original:${i}`})),window_focus:{mode:'latest-conversation',matched:true,message_index:2}};
+ const fetchMock=vi.fn<typeof fetch>(async input=>jsonResponse(String(input).includes('anchor=')?{...sourcePage,window_focus:undefined}:sourcePage));vi.stubGlobal('fetch',fetchMock);
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'original-focus-bound',view:'conversation',window_focus:'latest-conversation'}));
+ await waitFor(()=>expect(ringAt(2)).toContain('ring-1'));expect(fetchMock).toHaveBeenCalledTimes(1);
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,session:'sess-1',recordId:'original:0'}));
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel:'original-focus-bound',recordId:'original:0'}));
+ await flush();expect(fetchMock).toHaveBeenCalledTimes(1);
+  act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel:'original-focus-bound',session:'sess-1',recordId:'original:0'}));
+  await waitFor(()=>expect(ringAt(0)).toContain('ring-1'));expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
 it('requests and acknowledges a focused original window without a second body read',async()=>{
  const endpoint='/api/sources/tasks/focus-initial/original-context',received:unknown[]=[];
  const sourcePage={...page,provider:'codex',records:page.records.map((record,i)=>({...record,id:`original:${i}`})),window_focus:{mode:'latest-conversation',matched:true,message_index:2}};
