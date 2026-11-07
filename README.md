@@ -48,7 +48,29 @@ npm run build
 
 构建包在 `package.json.capabilities.originalContextWindowFocus` 声明 `['latest-conversation']`，并导出 `isConversationMessage` 供原件 producer 使用同一判定。来源读取者须核实际所用包的能力后再声明支持，不能从版本号推定。向前翻页的条数不超过当前首条 offset，避免非整页焦点窗口产生重复记录。
 
-此模式下 `cfv:focus` 必须同时精确匹配 origin、parent window、完整原 endpoint、channel、session，缺失或错误均不读；未知 type 或非法 recordId 也不读。无参数旧模式仍允许 host 省略 channel/session，但显式错误值拒绝。Parent 仅在 origin/window/raw endpoint/channel/session 全匹配且 `ready.initialRecordId` 等于该 scope 出生 ID 时消费一次出生意图；echo 不替代正文与原记录唯一性核验，父侧 src/key 冻结由宿主负责。
+包声明 `package.json.capabilities.initialSourceHandoff: 1` 时，宿主可先挂载尚未绑定会话的空 shell，再交接已经读取的首个完整页面，避免 Reader 重读出生正文：
+
+```text
+/reader/embed.html?initial_handoff=source-page-v1&channel=example&view=conversation
+```
+
+此 URL 不含 endpoint/session；channel 必须非空且唯一。绑定前不发会话 GET，历史读取按钮禁用。空 shell 发出 `{type:"cfv:ready",endpoint:null,session:null,channel:"example",initialHandoff:1}`；这只确认 shell 与交接能力可用，不代表正文已读取。宿主从实际包能力判断是否启用：缺少此能力的旧包使用原 URL 读取，声明值畸形则拒绝，不能仅凭版本或普通 ready 推定支持。
+
+宿主向同源 iframe 发送一次绑定与页面，`page` 使用原 HTTP 响应的完整字段和连续首窗（最多 80 条），不改写来源记录或坐标：
+
+```js
+frame.contentWindow.postMessage({
+  type: 'cfv:initial-source', version: 1,
+  endpoint: '/api/sessions/example', session: 'example', channel: 'example',
+  recordId: null, windowFocus: null, page: firstPage,
+}, location.origin)
+```
+
+`recordId` 为原记录 ID 或 null；`windowFocus` 为 `latest-conversation` 或 null。请求原件焦点时仍须 `view=conversation`、`/original-context` endpoint、`recordId:null` 和上文完整的官方焦点证明。Reader 核对同源 parent、channel、原始 endpoint、会话与完整页，经普通读取的同一验收路径应用一次，然后发送 `{type:"cfv:initial-source-ack",version:1,endpoint,session,channel}`。ack 确认该页已通过验收并交给 Reader 状态，不替代宿主对可见正文的验收。相同绑定与相同首包可重发并获 ack，不重建 Reader 或打断 Find、滚动与展开；更换绑定或页面、错误发送者、不完整页面与导航后的迟到首包均拒绝。后续 focus、分页、刷新与资源读取沿用冻结的 endpoint/session/channel。
+
+完整 endpoint/session 已知时也可使用交接模式；既有 `initial_handoff=1` 绑定 URL 保持兼容。未启用交接的 URL 保留原出生 GET、原记录定位与 ready 合同。
+
+`initial_record_id` 模式下 `cfv:focus` 必须同时精确匹配 origin、parent window、完整原 endpoint、channel、session，缺失或错误均不读；未知 type 或非法 recordId 也不读。无参数旧模式仍允许 host 省略 channel/session，但显式错误值拒绝。Parent 仅在 origin/window/raw endpoint/channel/session 全匹配且 `ready.initialRecordId` 等于该 scope 出生 ID 时消费一次出生意图；echo 不替代正文与原记录唯一性核验，父侧 src/key 冻结由宿主负责。
 
 嵌入页可追加 `view=conversation`，初次打开时隐藏 Thinking、Tool Calls 和 Results；工具栏可重新开启，刷新与翻页保留当前过滤设置。自动 latest 定位跳过空白 AI 正文；显式原记录定位、Find 与原件保留。未传该参数时使用原有默认显示。
 

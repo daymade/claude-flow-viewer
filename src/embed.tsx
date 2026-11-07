@@ -11,9 +11,33 @@ import './embed.css'
 const CONVERSATION_FILTER = {thinking:false,toolCalls:false,toolResults:false}
 const INVALID_INITIAL_BINDING='Invalid initial record binding'
 const INVALID_WINDOW_FOCUS_BINDING='Invalid conversation window focus binding'
+type SourceBinding={endpoint:string;session:string;recordId:string|null;windowFocus:typeof LATEST_CONVERSATION|null}
 function isValidRecordId(value:unknown):value is string{
   if(typeof value!=='string'||value.length===0||value.length>1024||value.trim()!==value)return false
   return ![...value].some(character=>{const code=character.charCodeAt(0);return code<=31||code===127})
+}
+function initialSourcePage(value:unknown,binding:SourceBinding,conversationView:boolean):Page{
+  if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Invalid initial source page')
+  const next=value as Page
+  if(!['claude','codex'].includes(next.provider)||next.session_id!==binding.session
+    ||!Array.isArray(next.records)||!Number.isSafeInteger(next.total)||next.total<0
+    ||!Number.isSafeInteger(next.offset)||next.offset<0||next.offset>next.total
+    ||next.records.length!==Math.min(80,next.total-next.offset)
+    ||next.next_offset!==next.offset+next.records.length
+    ||next.has_earlier!==(next.offset>0)||next.has_later!==(next.next_offset<next.total)
+    ||typeof next.read_at!=='string'||typeof next.boundary!=='string'
+    ||next.records.some(record=>!record||typeof record!=='object'||!isValidRecordId(record.id))
+    ||new Set(next.records.map(record=>record.id)).size!==next.records.length)
+    throw new Error('Invalid initial source page')
+  if(binding.windowFocus){
+    if(!conversationView||binding.recordId||!new URL(binding.endpoint,location.origin).pathname.endsWith('/original-context'))
+      throw new Error(INVALID_WINDOW_FOCUS_BINDING)
+    validateConversationWindowFocus(next,80)
+  }else if(next.window_focus!=null)throw new Error('Unexpected initial conversation window focus')
+  adapt(next)
+  if(binding.recordId&&resolveConversationAnchor(next,binding.recordId)<0)
+    throw new Error('Requested source record is not uniquely available in this reading window')
+  return next
 }
 // Transcript anchors pointing at local files (absolute paths, relative text
 // files, encoded paths, file: URLs) must never navigate the embed: the host
@@ -71,27 +95,38 @@ function classifyAnchor(anchor:HTMLAnchorElement):{blocked:false;newTab?:true}|{
   return{blocked:true,kind:'unknown',reference:href}
 }
 export function ReaderEmbed() {
-  const parameters=new URLSearchParams(location.search)
+  const parameters=useMemo(()=>new URLSearchParams(location.search),[])
+  const mountPath=useMemo(()=>location.pathname,[])
   const raw=parameters.get('endpoint') ?? ''
-  const expectedSession=parameters.get('session')
+  const urlSession=parameters.get('session')
   // Optional opaque binding token supplied by the host: echoed in cfv:ready so a
   // delayed ready from an old navigation cannot bless a new load of the same
   // WindowProxy/endpoint, and checked on incoming cfv:focus when present.
   const channel=parameters.get('channel')
   const hostFiles=parameters.get('file_links')==='host'
   const conversationView=parameters.get('view')==='conversation'
-  const endpoint=bindEmbedEndpoint(raw,location.pathname,location.origin)
+  const urlEndpoint=bindEmbedEndpoint(raw,mountPath,location.origin)
+  const [sourceBinding,setSourceBinding]=useState<SourceBinding|null>(null)
+  const sourceBindingRef=useRef<SourceBinding|null>(null)
+  const endpoint=sourceBinding?sourceBinding.endpoint:urlEndpoint
+  const expectedSession=sourceBinding?sourceBinding.session:urlSession
   // Birth positioning is opt-in and lives only in the embed URL, never in the
   // bound endpoint query. URLSearchParams.get() would hide duplicates, so keep
   // the complete value list and reject every incomplete or malformed binding.
   const initialValues=parameters.getAll('initial_record_id')
   const hasInitial=initialValues.length>0
-  const initialRecordId=initialValues.length===1&&isValidRecordId(initialValues[0])?initialValues[0]:null
-  const initialBindingValid=!hasInitial||Boolean(endpoint&&initialRecordId&&expectedSession?.trim()&&channel?.trim())
+  const urlRecordId=initialValues.length===1&&isValidRecordId(initialValues[0])?initialValues[0]:null
+  const initialRecordId=sourceBinding?sourceBinding.recordId:urlRecordId
+  const initialBindingValid=!hasInitial||Boolean(urlEndpoint&&urlRecordId&&urlSession?.trim()&&channel?.trim())
   const windowFocusValues=parameters.getAll('window_focus')
-  const windowFocusMode=windowFocusValues.length===1&&windowFocusValues[0]===LATEST_CONVERSATION?LATEST_CONVERSATION:null
-  const windowFocusBindingError=windowFocusValues.length>0&&(!windowFocusMode||!conversationView||!endpoint||!new URL(endpoint,location.origin).pathname.endsWith('/original-context')||!expectedSession?.trim()||!channel?.trim()||hasInitial)
-  const initialBindingError=hasInitial&&!initialBindingValid||windowFocusBindingError
+  const urlWindowFocus=windowFocusValues.length===1&&windowFocusValues[0]===LATEST_CONVERSATION?LATEST_CONVERSATION:null
+  const windowFocusMode=sourceBinding?sourceBinding.windowFocus:urlWindowFocus
+  const windowFocusBindingError=windowFocusValues.length>0&&(!urlWindowFocus||!conversationView||!urlEndpoint||!new URL(urlEndpoint,location.origin).pathname.endsWith('/original-context')||!urlSession?.trim()||!channel?.trim()||hasInitial)
+  const handoffValues=parameters.getAll('initial_handoff'),handoffMode=handoffValues.length===1&&['1','source-page-v1'].includes(handoffValues[0])
+  const deferredHandoff=handoffMode&&!parameters.has('endpoint')&&!parameters.has('session')
+  const handoffBindingError=handoffValues.length>0&&(!handoffMode||!isValidRecordId(channel)||parameters.getAll('channel').length!==1
+    ||(deferredHandoff?hasInitial||windowFocusValues.length>0:!urlEndpoint||!isValidRecordId(urlSession)||parameters.getAll('endpoint').length!==1||parameters.getAll('session').length!==1))
+  const initialBindingError=hasInitial&&!initialBindingValid||windowFocusBindingError||handoffBindingError
   const bindingError=windowFocusBindingError?INVALID_WINDOW_FOCUS_BINDING:INVALID_INITIAL_BINDING
   const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(initialBindingError?bindingError:''), [busy,setBusy]=useState(false)
   const [target,setTarget]=useState<ReaderJumpTarget|null>(null)
@@ -173,15 +208,41 @@ export function ReaderEmbed() {
   const generation=useRef(0), current=useRef<Page|null>(null), navigationSequence=useRef(0)
   const findIntent=useRef({version:0,query:''})
   const recordFindEdit=useCallback((query:string)=>{findIntent.current={version:findIntent.current.version+1,query}},[])
+  const handoffApplied=useRef(false)
+  const handoffPacket=useRef<string|null>(null)
+  const handoffClosed=useRef(false),readySent=useRef(false)
+  const accept=useCallback((next:Page,mode:string,anchor:string|undefined,previous:Page|null,findVersion:number,binding?:SourceBinding)=>{
+    const focused=(binding?binding.windowFocus:windowFocusMode)===LATEST_CONVERSATION&&conversationView&&mode==='latest'&&!anchor
+    if(focused)validateConversationWindowFocus(next,80)
+    else if(next.window_focus!=null)throw new Error('Unexpected initial conversation window focus')
+    const selectedSession=binding?binding.session:expectedSession
+    if(selectedSession && next.session_id!==selectedSession)throw new Error('Selected session identity changed')
+    if(previous && ['earlier','later'].includes(mode) && next.session_id!==previous.session_id)throw new Error('Selected session identity changed')
+    const merged=mode==='earlier' && previous ? {...next,records:[...next.records,...previous.records],next_offset:previous.next_offset,has_later:previous.has_later} : mode==='later' && previous ? {...next,offset:previous.offset,has_earlier:previous.has_earlier,records:[...previous.records,...next.records]} : next
+    if(previous&&['earlier','later'].includes(mode))merged.imageResources=mergeConversationImageResources(previous,next)
+    current.current=merged;setPage(merged)
+    if(['earlier','later'].includes(mode) && findIntent.current.version!==findVersion && findIntent.current.query){setTarget(null);return}
+    const data=adapt(merged)
+    let index=anchor ? resolveConversationAnchor(merged,anchor) : mode==='latest' ? data.messages.length-1 : 0
+    if(anchor && index<0){setTarget(null);throw new Error('Requested source record is not uniquely available in this reading window')}
+    if(conversationView && !anchor){
+      const conversationIndices=data.messages.flatMap((message,index)=>isConversationMessage(message) ? [index] : [])
+      index=(mode==='latest' ? conversationIndices[conversationIndices.length-1] : conversationIndices[0]) ?? -1
+    }
+    setTarget(index>=0 ? {messageIndex:index, ...(mode==='question' ? {requestId:`nav-${++navigationSequence.current}`} : {})} : null)
+  },[expectedSession,conversationView,windowFocusMode])
   const read=useCallback(async (mode:string,anchor?:string)=>{
     if(initialBindingError){setError(bindingError);return}
-    if (!endpoint) {setError('No bound session endpoint');return}
+    if(handoffMode&&!handoffApplied.current)return
+    const binding=sourceBindingRef.current,readEndpoint=binding?binding.endpoint:endpoint
+    if (!readEndpoint) {setError('No bound session endpoint');return}
     if(mode==='earlier'&&(!current.current||current.current.offset<=0))return
+    if(handoffMode)handoffClosed.current=true
     const version=++generation.current, previous=current.current,findVersion=findIntent.current.version
     setBusy(true);setError('')
     const earlier=mode==='earlier'&&previous?earlierConversationWindow(previous.offset,80):null
     const query=new URLSearchParams({limit:String(earlier?.limit??80),offset:mode==='earlier' ? String(earlier?.offset??0) : mode==='later' ? String(previous?.next_offset ?? 0) : mode==='first' ? '0' : '-1'})
-    const focused=windowFocusMode===LATEST_CONVERSATION&&conversationView&&mode==='latest'&&!anchor
+    const focused=(binding?binding.windowFocus:windowFocusMode)===LATEST_CONVERSATION&&conversationView&&mode==='latest'&&!anchor
     if(focused)query.set('window_focus',LATEST_CONVERSATION)
     if (anchor) query.set('anchor',anchor)
     if (['earlier','later'].includes(mode) && previous) {
@@ -189,43 +250,53 @@ export function ReaderEmbed() {
       if(previous.until!=null)query.set('until',String(previous.until))
     }
     try {
-      const response=await fetch(embedRequestUrl(endpoint,query),{credentials:'same-origin'})
+      const response=await fetch(embedRequestUrl(readEndpoint,query),{credentials:'same-origin'})
       if(!response.ok)throw new Error((await response.text()).slice(0,1000))
       const next:Page=await response.json()
-      if(focused)validateConversationWindowFocus(next,80)
-      else if(next.window_focus!=null)throw new Error('Unexpected initial conversation window focus')
-      if(expectedSession && next.session_id!==expectedSession)throw new Error('Selected session identity changed')
       if(version!==generation.current)return
-      if(previous && ['earlier','later'].includes(mode) && next.session_id!==previous.session_id)throw new Error('Selected session identity changed')
-      const merged=mode==='earlier' && previous ? {...next,records:[...next.records,...previous.records],next_offset:previous.next_offset,has_later:previous.has_later} : mode==='later' && previous ? {...next,offset:previous.offset,has_earlier:previous.has_earlier,records:[...previous.records,...next.records]} : next
-      if(previous&&['earlier','later'].includes(mode))merged.imageResources=mergeConversationImageResources(previous,next)
-      current.current=merged;setPage(merged)
-      if(['earlier','later'].includes(mode) && findIntent.current.version!==findVersion && findIntent.current.query){
-        // Prepending changes message indexes; a retired navigation must not revive when Find is cleared.
-        setTarget(null)
-        return
-      }
-      const data=adapt(merged)
-      let index=anchor ? resolveConversationAnchor(merged,anchor) : mode==='latest' ? data.messages.length-1 : 0
-      if(anchor && index<0){setTarget(null);throw new Error('Requested source record is not uniquely available in this reading window')}
-      if(conversationView && !anchor){
-        const conversationIndices=data.messages.flatMap((message,index)=>isConversationMessage(message) ? [index] : [])
-        index=(mode==='latest' ? conversationIndices[conversationIndices.length-1] : conversationIndices[0]) ?? -1
-      }
-      // Explicit host navigation (cfv:focus → 'question') gets a fresh stable
-      // token per request so repeated jumps to the same position still count.
-      setTarget(index>=0 ? {messageIndex:index, ...(mode==='question' ? {requestId:`nav-${++navigationSequence.current}`} : {})} : null)
+      accept(next,mode,anchor,previous,findVersion,binding??undefined)
     } catch(e) {if(version===generation.current)setError(e instanceof Error ? e.message : String(e))}
     finally {if(version===generation.current)setBusy(false)}
-  },[endpoint,expectedSession,conversationView,initialBindingError,bindingError,windowFocusMode])
+  },[endpoint,accept,initialBindingError,bindingError,handoffMode,windowFocusMode,conversationView])
   useEffect(()=>{
-    if(!initialBindingError)void read(initialRecordId?'question':'latest',initialRecordId??undefined)
-    const counter=generation;return()=>{counter.current++}
-  },[read,initialBindingError,initialRecordId])
+    if(!initialBindingError&&!handoffMode)void read(initialRecordId?'question':'latest',initialRecordId??undefined)
+    if(!handoffMode){const counter=generation;return()=>{counter.current++}}
+  },[read,initialBindingError,initialRecordId,handoffMode])
+  useEffect(()=>()=>{generation.current++},[])
   useEffect(()=>{
     const receive=(event:MessageEvent)=>{
-      if(initialBindingError||event.origin!==location.origin || event.source!==parent || event.data?.type!=='cfv:focus' || event.data.endpoint!==endpoint)return
-      if(initialRecordId){
+      if(initialBindingError||event.origin!==location.origin||event.source!==parent)return
+      const message=event.data
+      if(message?.type==='cfv:initial-source'){
+        if(!handoffMode||handoffClosed.current||message.version!==1||message.channel!==channel
+          ||!isValidRecordId(message.session)||typeof message.endpoint!=='string'
+          ||bindEmbedEndpoint(message.endpoint,mountPath,location.origin)!==message.endpoint
+          ||!Object.hasOwn(message,'recordId')||message.recordId!==null&&!isValidRecordId(message.recordId)
+          ||!Object.hasOwn(message,'windowFocus')||message.windowFocus!==null&&message.windowFocus!==LATEST_CONVERSATION)return
+        const binding:SourceBinding={endpoint:message.endpoint,session:message.session,recordId:message.recordId,windowFocus:message.windowFocus}
+        const prior=sourceBindingRef.current
+        if(prior?(Object.keys(prior) as Array<keyof SourceBinding>).some(key=>prior[key]!==binding[key])
+          :!deferredHandoff&&(binding.endpoint!==urlEndpoint||binding.session!==urlSession||binding.recordId!==urlRecordId||binding.windowFocus!==urlWindowFocus))return
+        const ack={type:'cfv:initial-source-ack',version:1,endpoint:binding.endpoint,channel,session:binding.session}
+        try{
+          const packet=JSON.stringify(message.page)
+          if(!packet)return
+          // An acknowledgement certifies this exact first page, not a later
+          // capture that happens to reuse the same endpoint and session.
+          if(handoffApplied.current){if(packet===handoffPacket.current)parent.postMessage(ack,location.origin);return}
+          const next=initialSourcePage(message.page,binding,conversationView)
+          generation.current++
+          accept(next,binding.recordId?'question':'latest',binding.recordId??undefined,null,findIntent.current.version,binding)
+          sourceBindingRef.current=binding;handoffPacket.current=packet;handoffApplied.current=true;setSourceBinding(binding);setError('');setBusy(false)
+          parent.postMessage(ack,location.origin)
+        }catch(e){setError(e instanceof Error?e.message:String(e))}
+        return
+      }
+      const binding=sourceBindingRef.current
+      if(message?.type!=='cfv:focus'||message.endpoint!==(binding?binding.endpoint:endpoint)||handoffMode&&!handoffApplied.current)return
+      if(handoffMode){
+        if(message.channel!==channel||message.session!==binding?.session)return
+      }else if(initialRecordId){
         // Opt-in birth binding upgrades later host navigation to the same strict
         // identity contract; missing fields are not equivalent to a match.
         if(event.data.channel!==channel||event.data.session!==expectedSession)return
@@ -238,9 +309,12 @@ export function ReaderEmbed() {
       if(isValidRecordId(event.data.recordId))void read('question',event.data.recordId)
     }
     addEventListener('message',receive)
-    parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel,...(!initialBindingError&&initialRecordId?{initialRecordId}:{}),...(!initialBindingError&&windowFocusMode?{windowFocusMode}:{})},location.origin)
+    if(!handoffMode||!readySent.current){
+      parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel,...(!initialBindingError&&initialRecordId?{initialRecordId}:{}),...(!initialBindingError&&windowFocusMode?{windowFocusMode}:{}),...(!initialBindingError&&handoffMode?{initialHandoff:1}:{})},location.origin)
+      readySent.current=true
+    }
     return()=>removeEventListener('message',receive)
-  },[endpoint,expectedSession,channel,read,initialBindingError,initialRecordId,windowFocusMode])
+  },[endpoint,expectedSession,channel,read,accept,initialBindingError,initialRecordId,windowFocusMode,handoffMode,deferredHandoff,urlEndpoint,urlSession,urlRecordId,urlWindowFocus,conversationView,mountPath])
   const readToolResult=useCallback(async (relativePath:string)=>{
     if(!endpoint)throw new Error('No bound session endpoint')
     const response=await fetch(embedRequestUrl(endpoint,new URLSearchParams({path:relativePath}),'/tool-output'),{credentials:'same-origin'})
@@ -257,10 +331,10 @@ export function ReaderEmbed() {
     for(const ref of [historyRef,sourceRef])if(ref.current!==open)ref.current?.removeAttribute('open')
   }
   const historyControls=<details className="embed-history embed-disclosure" ref={historyRef} onToggle={event=>closeOtherDisclosure(event.currentTarget)}><summary>历史</summary><div className="embed-history-actions" onClick={event=>{if(event.target instanceof HTMLButtonElement)historyRef.current?.removeAttribute('open')}}>
-      <button disabled={busy} onClick={()=>void read('first')}>从头查看</button>
+      <button disabled={busy||handoffMode&&!page} onClick={()=>void read('first')}>从头查看</button>
       <button disabled={busy || !page?.has_earlier} onClick={()=>void read('earlier')}>加载更早的对话</button>
       <button disabled={busy || !page?.has_later} onClick={()=>void read('later')}>继续查看</button>
-      <button disabled={busy} onClick={()=>void read('latest')}>刷新到最新</button>
+      <button disabled={busy||handoffMode&&!page} onClick={()=>void read('latest')}>刷新到最新</button>
       </div></details>
   const sourceControls=page && <details className="embed-source embed-disclosure" ref={sourceRef} onToggle={event=>closeOtherDisclosure(event.currentTarget)}><summary aria-label="来源与读取边界">来源</summary><div className="embed-source-content">
     <div className="embed-status" role="status">{busy?'读取中 · ':''}{`第 ${page.total ? page.offset+1 : 0}–${page.next_offset} 条 / 共 ${page.total} 条 · 搜索已加载范围`}</div>
