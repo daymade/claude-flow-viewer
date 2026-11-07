@@ -182,7 +182,7 @@ it('initial source handoff: deferred original context uses the official full win
  const channel='deferred-original',endpoint='/api/sources/tasks/deferred-original/original-context',received:unknown[]=[];
  const records=Array.from({length:80},(_,i)=>({kind:'flow-message',id:`original:${20+i}`,message:{kind:i===40?'ai-text':'ai-tool-use',...(i===40?{text:'complete supplied answer'}:{name:'fixture',summary:'tool',input:{}}),sourceRecordRaw:`{"ordinal":${20+i}}\n`}}));
  const sourcePage={...page,provider:'codex',records,total:100,offset:20,next_offset:100,has_earlier:true,has_later:false,revision:'frozen-revision',until:100,window_focus:{mode:'latest-conversation',matched:true,message_index:60}};
- const fetchMock=vi.fn(async()=>jsonResponse({...sourcePage,records:records.slice(0,20).map((record,i)=>({...record,id:`original:${i}`})),offset:0,next_offset:20,has_earlier:false,has_later:true,window_focus:undefined}));vi.stubGlobal('fetch',fetchMock);
+ const fetchMock=vi.fn<typeof fetch>(async()=>jsonResponse({...sourcePage,records:records.slice(0,20).map((record,i)=>({...record,id:`original:${i}`})),offset:0,next_offset:20,has_earlier:false,has_later:true,window_focus:undefined}));vi.stubGlobal('fetch',fetchMock);
  const receive=(event:MessageEvent)=>received.push(event.data);window.addEventListener('message',receive);
  try{
   await mountEmbed('/reader/embed.html?'+new URLSearchParams({initial_handoff:'source-page-v1',channel,view:'conversation'}));
