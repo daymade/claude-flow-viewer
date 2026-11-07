@@ -296,7 +296,7 @@ export function ReaderEmbed() {
       if(message?.type!=='cfv:focus'||message.endpoint!==(binding?binding.endpoint:endpoint)||handoffMode&&!handoffApplied.current)return
       if(handoffMode){
         if(message.channel!==channel||message.session!==binding?.session)return
-      }else if(initialRecordId){
+      }else if(initialRecordId||windowFocusMode){
         // Opt-in birth binding upgrades later host navigation to the same strict
         // identity contract; missing fields are not equivalent to a match.
         if(event.data.channel!==channel||event.data.session!==expectedSession)return

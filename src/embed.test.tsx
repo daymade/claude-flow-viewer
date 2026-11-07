@@ -214,6 +214,19 @@ it.each([
  expect(screen.getByRole('alert')).toBeTruthy();expect(fetchMock).not.toHaveBeenCalled();
 });
 
+it('requires exact channel and session on host focus in original window focus mode',async()=>{
+ const endpoint='/api/sources/tasks/original-focus-binding/original-context';
+ const sourcePage={...page,provider:'codex',records:page.records.map((record,i)=>({...record,id:`original:${i}`})),window_focus:{mode:'latest-conversation',matched:true,message_index:2}};
+ const fetchMock=vi.fn<typeof fetch>(async input=>jsonResponse(String(input).includes('anchor=')?{...sourcePage,window_focus:undefined}:sourcePage));vi.stubGlobal('fetch',fetchMock);
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'original-focus-bound',view:'conversation',window_focus:'latest-conversation'}));
+ await waitFor(()=>expect(ringAt(2)).toContain('ring-1'));expect(fetchMock).toHaveBeenCalledTimes(1);
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,session:'sess-1',recordId:'original:0'}));
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel:'original-focus-bound',recordId:'original:0'}));
+ await flush();expect(fetchMock).toHaveBeenCalledTimes(1);
+  act(()=>sendHostMessage({type:'cfv:focus',endpoint,channel:'original-focus-bound',session:'sess-1',recordId:'original:0'}));
+  await waitFor(()=>expect(ringAt(0)).toContain('ring-1'));expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
 it('requests and acknowledges a focused original window without a second body read',async()=>{
  const endpoint='/api/sources/tasks/focus-initial/original-context',received:unknown[]=[];
  const sourcePage={...page,provider:'codex',records:page.records.map((record,i)=>({...record,id:`original:${i}`})),window_focus:{mode:'latest-conversation',matched:true,message_index:2}};
