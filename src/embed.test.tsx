@@ -1,4 +1,8 @@
+/// <reference types="node" />
 // @vitest-environment jsdom
+import {webcrypto} from 'node:crypto'
+import {projectDeferredOriginalPage} from './lib/deferred-original'
+import type {ConversationPage} from './lib/reader-page'
 import {afterEach,it,expect,vi} from 'vitest'
 import {act} from 'react'
 import {cleanup,fireEvent,screen,waitFor,within} from '@testing-library/react'
@@ -86,6 +90,104 @@ const nativeRuntimeId='22222222-2222-4222-8222-222222222222'
 const nativeRuntimeWitness='a'.repeat(64)
 const nativeBinding=`native_runtime_id=${nativeRuntimeId}&native_runtime_witness=${nativeRuntimeWitness}`
 const readyMessages=(received:unknown[])=>received.filter(data=>(data as {type?:string}|null)?.type==='cfv:ready') as Array<Record<string,unknown>>
+
+function deferredFullPage():ConversationPage {
+ const output=[{type:'input_text',text:'exact before image\n'},{type:'input_image',image_url:'data:image/png;base64,AQIDBA==',detail:'high'},{type:'input_text',text:'exact after image'}];
+ return {...page,provider:'codex',revision:'rev-one',until:'original:3',identity:{node:'synthetic',provider:'codex',session_id:'sess-1',source_path:'/synthetic/session.jsonl'},records:[
+  {kind:'flow-message',id:'original:0',message:{kind:'ai-tool-use',name:'exec',summary:'exec',input:{raw:'tool input'},sourceRecordId:'same-call'}},
+  {kind:'flow-message',id:'original:1',source_session:'sess-1',source_ordinal:124,message:{kind:'tool-result',sourceRecordId:'same-call',isError:false,content:JSON.stringify(output,null,2),sourceRecord:{type:'response_item',ordinal:124,payload:{type:'custom_tool_call_output',call_id:'same-call',output}}}},
+  {kind:'flow-message',id:'original:2',message:{kind:'ai-text',text:'Visible latest text'}},
+ ] as ConversationPage['records']};
+}
+
+it('deferred original: explicit opt-in requests projections and verifies a shared exact single-record response without replacing the page',async()=>{
+ vi.stubGlobal('crypto',webcrypto);
+ const full=deferredFullPage(),projected=await projectDeferredOriginalPage(full,1),endpoint='/api/sources/tasks/deferred-explicit/original-context',received:unknown[]=[];
+ const fetchMock=vi.fn<typeof fetch>(async input=>{
+  const url=new URL(String(input),location.origin);
+  if(url.searchParams.get('limit')==='1')return {ok:true,json:async()=>({...full,offset:1,next_offset:2,records:[full.records[1]],has_earlier:true,has_later:true})} as Response;
+  return {ok:true,json:async()=>projected} as Response;
+ });vi.stubGlobal('fetch',fetchMock);
+ const receive=(event:MessageEvent)=>received.push(event.data);window.addEventListener('message',receive);
+ try{
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'deferred-explicit',deferred_original:'1'}));
+  expect(new URL(String(fetchMock.mock.calls[0][0]),location.origin).searchParams.get('deferred_original')).toBe('1');
+  await waitFor(()=>expect(readyMessages(received)[0]).toMatchObject({deferredOriginalPayload:1}));
+  expect(document.body.innerHTML).not.toContain('base64,');expect(fetchMock).toHaveBeenCalledTimes(1);
+  const row=document.querySelector('[data-message-index="1"]')!;
+  const result=row.querySelector('details')!;
+  act(()=>{result.open=true;fireEvent(result,new Event('toggle'))});
+  await waitFor(()=>expect(row.querySelectorAll('img')).toHaveLength(1));
+  const url=new URL(String(fetchMock.mock.calls[1][0]),location.origin);
+  expect(url.pathname).toBe(endpoint);expect(Object.fromEntries(url.searchParams)).toEqual({offset:'1',limit:'1',revision:'rev-one',until:'original:3'});
+  expect(document.querySelectorAll('[data-message-index]')).toHaveLength(3);
+  const raw=[...row.querySelectorAll('details')].find(details=>details.querySelector('summary')?.textContent==='Original native record')!;
+  act(()=>{raw.open=true;fireEvent(raw,new Event('toggle'))});await flush();expect(fetchMock).toHaveBeenCalledTimes(2);
+  const fullRecord=full.records[1];if(!('message' in fullRecord))throw Error('fixture');
+  expect(raw.querySelector('pre')?.textContent).toBe(JSON.stringify(fullRecord.message.sourceRecord,null,2));
+ }finally{window.removeEventListener('message',receive)}
+});
+
+it('deferred original: absent opt-in keeps full original requests and ready messages unchanged',async()=>{
+ const endpoint='/api/sources/tasks/deferred-legacy/original-context',fetchMock=vi.fn<typeof fetch>(async()=>({ok:true,json:async()=>deferredFullPage()}) as Response);vi.stubGlobal('fetch',fetchMock);
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'deferred-legacy'}));
+ expect(new URL(String(fetchMock.mock.calls[0][0]),location.origin).searchParams.has('deferred_original')).toBe(false);
+ expect(screen.getByText('Visible latest text')).toBeTruthy();
+});
+
+it('deferred original: focus without birth navigation still requires exact channel and session, including missing-field refusals',async()=>{
+ const endpoint='/api/sources/tasks/deferred-focus-identity/original-context',channel='deferred-focus-identity';
+ const fetchMock=vi.fn<typeof fetch>(async()=>({ok:true,json:async()=>deferredFullPage()}) as Response);vi.stubGlobal('fetch',fetchMock);
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel,deferred_original:'1'}));
+ const focus={type:'cfv:focus',endpoint,recordId:'original:2'};
+ for(const fields of [{},{channel},{session:'sess-1'},{channel:'wrong',session:'sess-1'},{channel,session:'wrong'}]){
+  act(()=>sendHostMessage({...focus,...fields}));await flush();expect(anchorCalls(fetchMock,endpoint)).toHaveLength(0);
+ }
+ act(()=>sendHostMessage({...focus,channel,session:'sess-1'}));
+ await waitFor(()=>expect(anchorCalls(fetchMock,endpoint)).toHaveLength(1));
+});
+
+it('deferred original: legacy full pages without WebCrypto keep their omitted-focus-identity compatibility',async()=>{
+ vi.stubGlobal('crypto',{});
+ const endpoint='/api/sources/tasks/deferred-focus-legacy/original-context';
+ const fetchMock=vi.fn<typeof fetch>(async()=>({ok:true,json:async()=>deferredFullPage()}) as Response);vi.stubGlobal('fetch',fetchMock);
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'deferred-focus-legacy'}));
+ expect(screen.getByText('Visible latest text')).toBeTruthy();
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,recordId:'original:2'}));
+ await waitFor(()=>expect(anchorCalls(fetchMock,endpoint)).toHaveLength(1));
+ expect(fetchMock.mock.calls.every(([input])=>!new URL(String(input),location.origin).searchParams.has('deferred_original'))).toBe(true);
+});
+
+it.each(['deferred_original=2','deferred_original=1&deferred_original=1'])('deferred original: rejects malformed opt-in %s without reading',async mode=>{
+ const fetchMock=stubFetch();await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint:'/api/sources/tasks/deferred-invalid/original-context',session:'sess-1',channel:'deferred-invalid'})+'&'+mode);
+ expect(fetchMock).not.toHaveBeenCalled();expect(screen.getByText('Invalid deferred original binding')).toBeTruthy();
+});
+
+it('deferred original: navigation generation rejects an in-flight single-record result from the prior page',async()=>{
+ vi.stubGlobal('crypto',webcrypto);
+ const full=deferredFullPage(),first=await projectDeferredOriginalPage(full,1),next=await projectDeferredOriginalPage({...full,revision:'rev-two',records:full.records.map(record=>record.id==='original:2'?{...record,message:{kind:'ai-text',text:'New source body'}}:record)} as ConversationPage,1);
+ let resolve!:(value:Response)=>void;const pending=new Promise<Response>(done=>{resolve=done});let reads=0;
+ const fetchMock=vi.fn<typeof fetch>(async input=>new URL(String(input),location.origin).searchParams.get('limit')==='1'?pending:({ok:true,json:async()=>++reads===1?first:next}) as Response);vi.stubGlobal('fetch',fetchMock);
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint:'/api/sources/tasks/deferred-late/original-context',session:'sess-1',channel:'deferred-late',deferred_original:'1'}));
+ const result=document.querySelector('[data-message-index="1"] details')! as HTMLDetailsElement;act(()=>{result.open=true;fireEvent(result,new Event('toggle'))});
+ await waitFor(()=>expect(fetchMock).toHaveBeenCalledTimes(2));
+ fireEvent.click(screen.getByText('刷新到最新'));await waitFor(()=>expect(screen.getByText('New source body')).toBeTruthy());
+ await act(async()=>{resolve({ok:true,json:async()=>({...full,offset:1,next_offset:2,records:[full.records[1]],has_earlier:true,has_later:true})} as Response);await pending});await flush();
+ expect(document.querySelectorAll('img')).toHaveLength(0);expect(document.body.innerHTML).not.toContain('base64,');
+});
+
+it.each(['revision','until','identity'])('deferred original: rejects a full single response with foreign %s before adopting its bytes',async key=>{
+ vi.stubGlobal('crypto',webcrypto);const full=deferredFullPage(),projected=await projectDeferredOriginalPage(full,1);
+ const fetchMock=vi.fn<typeof fetch>(async input=>{
+  if(new URL(String(input),location.origin).searchParams.get('limit')!=='1')return {ok:true,json:async()=>projected} as Response;
+  const next={...full,offset:1,next_offset:2,records:[full.records[1]],has_earlier:true,has_later:true,[key]:key==='identity'?{...full.identity,source_path:'/synthetic/other.jsonl'}:'foreign'};
+  return {ok:true,json:async()=>next} as Response;
+ });vi.stubGlobal('fetch',fetchMock);
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint:`/api/sources/tasks/deferred-foreign-${key}/original-context`,session:'sess-1',channel:`deferred-foreign-${key}`,deferred_original:'1'}));
+ const result=document.querySelector('[data-message-index="1"] details')! as HTMLDetailsElement;act(()=>{result.open=true;fireEvent(result,new Event('toggle'))});
+ await waitFor(()=>expect(screen.getByRole('alert').textContent).toContain('Original response does not match the bound source snapshot'));
+ expect(document.querySelectorAll('img')).toHaveLength(0);expect(document.body.innerHTML).not.toContain('base64,');
+});
 
 it('initial source handoff: empty native shell applies one immutable birth page and repeat only acks',async()=>{
  const endpoint='/api/sources/tasks/handoff-native/conversation',received:unknown[]=[];const fetchMock=stubFetch();
