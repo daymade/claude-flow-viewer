@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react'
 import type {ImageResource} from '../../lib/image-references'
+import type {DeferredOriginalStore} from '../../lib/deferred-original-store'
 export type ResolveImage=(reference:string,sourceRecordId:string)=>ImageResource|null
 
 export type ReadToolResult = (relativePath: string) => Promise<string>
@@ -18,6 +19,7 @@ export type ReadToolResult = (relativePath: string) => Promise<string>
 export interface ScopedToolResultReader {
   readToolResult?: ReadToolResult
   resolveImage?: ResolveImage
+  deferredOriginal?: DeferredOriginalStore
   scope?: string | null
 }
 

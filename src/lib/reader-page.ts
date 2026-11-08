@@ -4,15 +4,16 @@ import type {ClaudeSourceAnchors} from './providers/claude'
 import {computeHeatmap} from './heatmap'
 import type {SessionData,SessionMessage} from '../types/session'
 import type {AppliedConversationWindowFocus} from './conversation-focus'
+import {validateDeferredOriginalRecord, type DeferredOriginalRecord} from './deferred-original'
 export interface FlowConversationRecord {kind:'flow-message';id:string;message:SessionMessage;timestamp?:string|null}
 export interface ConversationPage {
   provider:'claude'|'codex'; session_id:string
-  records:Array<NativeConversationRecord | FlowConversationRecord>
+  records:Array<NativeConversationRecord | FlowConversationRecord | DeferredOriginalRecord>
   total:number;offset:number;next_offset:number;has_earlier:boolean;has_later:boolean
   window_focus?:AppliedConversationWindowFocus
   imageResources?:ConversationImageResources
   sourceAnchors?:ClaudeSourceAnchors
-  revision?:string;until?:number;read_at:string;boundary:string
+  revision?:string;until?:number|string;read_at:string;boundary:string
   identity?:{node:string;provider:string;session_id:string;manifest_sha256?:string;source_path?:string}
 }
 function promptsFromMessages(messages:SessionMessage[]):SessionData['prompts'] {
@@ -25,8 +26,13 @@ export function normalizeConversationPage(page:ConversationPage):SessionData {
     // parser, provenance attached there). A page mixing the two cannot be ordered or
     // de-duplicated honestly, so it is rejected instead of silently picking a lane.
     const nativeRecords:NativeConversationRecord[]=[], flowRecords:FlowConversationRecord[]=[]
-    for(const record of page.records){
+    for(const [index,record] of page.records.entries()){
       if('item' in record)nativeRecords.push(record)
+      else if(record.kind==='deferred-tool-result'){
+        validateDeferredOriginalRecord(page,index,record)
+        flowRecords.push({kind:'flow-message',id:record.id,message:{kind:'deferred-tool-result',deferred:record,isError:record.presentation.isError,
+          sourceRecordId:record.presentation.sourceRecordId,timestamp:record.presentation.timestamp}})
+      }
       else if('message' in record && record.message?.kind)flowRecords.push(record)
       else throw new Error('Conversation page record is neither a native item nor a parsed flow message')
     }

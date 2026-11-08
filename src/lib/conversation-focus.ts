@@ -38,7 +38,7 @@ export function validateConversationWindowFocus(page:ConversationPage,limit:numb
     ||page.next_offset!==start+page.records.length||page.has_earlier!==(start>0)
     ||page.has_later!==(page.next_offset<page.total))return invalid()
   if(page.records.some((record,index)=>record.id!==`original:${start+index}`))return invalid()
-  const messages=page.records.map(record=>'message' in record&&record.kind==='flow-message'?record.message:null)
+  const messages=page.records.map(record=>'message' in record&&record.kind==='flow-message'?record.message:'kind' in record&&record.kind==='deferred-tool-result'?{kind:'deferred-tool-result'}:null)
   if(messages.some(message=>message===null))return invalid()
   if(q!==null){
     const at=q-start

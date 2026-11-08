@@ -1,4 +1,5 @@
 import type {UserInputClassification} from '../lib/user-input-classification'
+import type {DeferredOriginalRecord} from '../lib/deferred-original'
 
 export type DecisionMarker = 'none' | 'interrupt' | 'correction'
 export type SessionSource = 'claude' | 'codex' | 'cherrystudio'
@@ -15,6 +16,7 @@ export interface EmbeddedImage {
 export type SessionMessage = { sourceRecordId?: string; sourceRecord?: Record<string,unknown>; sourceRecordRaw?: string } & (
   | { kind: 'user-prompt'; promptNum: number; text: string; images: EmbeddedImage[]; time: string; timestamp?: string; decision: DecisionMarker; queued?: boolean; dupCount?: number; inputClassification?: UserInputClassification }
   | { kind: 'tool-result'; content: string; isError: boolean; externalFile?: string; totalSize?: string; timestamp?: string; toolUseId?: string }
+  | { kind: 'deferred-tool-result'; deferred: DeferredOriginalRecord; isError: boolean; timestamp?: string }
   | { kind: 'ai-text'; text: string; timestamp?: string }
   | { kind: 'ai-thinking'; preview: string; full: string; timestamp?: string }
   | { kind: 'ai-tool-use'; summary: string; name: string; input: Record<string, unknown>; timestamp?: string; toolUseId?: string }

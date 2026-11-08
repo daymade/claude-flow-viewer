@@ -111,6 +111,12 @@ Claude 原始记录上下文定位与渲染／文件引用坐标分开。`parse-
 
 共享包的 `parseCodexMessagesStreaming(lines, yieldToEventLoop, sink)` 完整扫描 Codex 输入，按成熟分类顺序同步交付每条 canonical 消息及从零开始的 `messageIndex`、物理 `recordIndex`，同一原记录可产生多条消息。sink 只能观察，不得修改消息或 `sourceRecord`，不得返回 Promise；异常使整次扫描失败，调用者须在扫描和自身来源校验全部成功前保留结果为未确认。成功仅返回 `{source:'codex',messageCount,recordCount}`，不构造伪 `SessionData`，原有解析 API 保持不变。此入口仍完成 prompt bookkeeping、retained、markers 与 heatmap 的原校验，宿主负责完整来源、冻结窗口、时钟与数值见证；它不裁 tail、不授予读取或执行权限。
 
+原件二进制延后传输由 `package.json.capabilities.deferredOriginalPayload:1` 声明。宿主同时确认该能力与来源的实际支持后，才在嵌入页顶层 URL 传 `deferred_original=1`；Reader 在 `cfv:ready` 回声 `deferredOriginalPayload:1`，普通原件分页才追加同名参数。绑定 endpoint 仍只允许原有 runtime witness 参数，未启用模式的请求与完整页保持原行为。
+
+官方 `server/codex-original-payload.mjs`（包入口 `./codex-original-payload`）接受 stdin `{version:1,page,capability:1}`，输出 `{version:1,page}`。调用前，宿主必须用既有完整 canonical 页及独立来源 authority 检查验源；该 helper 只做传输投影，不读取来源或认证 descriptor。仅已知的 object-only Codex 工具输出数组可转成 `deferred-tool-result`，有序文字、错误状态、记录定位与小型来源元数据保留；未知结构与带 `sourceRecordRaw` 的记录保留完整旧对象。表示的 `presentation.parts` 不是原 `content` 或原始 JSONL。
+
+展开 Result、Original native record 或读取图片时，Reader 共用一次完整单条读取：同一 bound `/original-context` endpoint 上 `offset=<descriptor offset>&limit=1&revision=<snapshot>&until=<snapshot>`，不带 `deferred_original`。SDK 核对页绑定及完整 record/content、图片 URI 和解码字节的 SHA256 后才采用单条副本；有序 JSON 哈希使用 `sha256-json-stringify-utf8-v1`，不等同原 JSONL 字节。来源 identity 只保留已有字段，物理来源证明与 iframe owner 生命周期仍由宿主负责；浏览器验证需要可用的 WebCrypto SHA256。定位的 `forceMount` 不读取闭合 Raw，空 Find 不读取二进制；非空完整 Find 先补齐本页相关原件，未完成显示搜索中，失败显示错误，不提前给最终计数。切换来源、绑定或分页快照后，旧结果不再发布。组件宿主可通过 `readDeferredOriginal` 与包含 endpoint/channel/session/generation 的 `deferredOriginalScope` 复用相同行为。
+
 ### Development Mode
 
 ```bash

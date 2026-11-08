@@ -5,7 +5,7 @@ export const DEFERRED_ORIGINAL_HASH = 'sha256-json-stringify-utf8-v1' as const
 export const DEFERRED_ORIGINAL_VERSION = 1 as const
 
 export type DeferredOriginalSourcePage = Omit<ConversationPage, 'until'> & {until?: number | string}
-type OriginalRecord = FlowConversationRecord & {source_session: string; source_ordinal: number}
+export type OriginalRecord = FlowConversationRecord & {source_session: string; source_ordinal: number}
 type JsonObject = Record<string, unknown>
 type OriginalPageBinding = Pick<DeferredOriginalSourcePage, 'provider' | 'session_id' | 'identity' | 'revision' | 'until' | 'offset'>
 
@@ -64,6 +64,38 @@ export interface DeferredOriginalRecord {
 
 export type DeferredOriginalPage<T extends DeferredOriginalSourcePage = DeferredOriginalSourcePage> =
   Omit<T, 'records'> & {records: Array<T['records'][number] | DeferredOriginalRecord>}
+
+/** Validate a presentation's complete shape and current page binding, never its omitted bytes. */
+export function validateDeferredOriginalRecord(page: OriginalPageBinding, index: number, value: unknown): asserts value is DeferredOriginalRecord {
+  const invalid = () => {throw new Error('Invalid deferred original presentation or page binding')}
+  if (!object(value) || value.kind !== 'deferred-tool-result' || !object(value.original) || !object(value.presentation)) return invalid()
+  const descriptor = value.original, binding = descriptor.binding, presentation = value.presentation, bound = context(page)
+  if (!bound || descriptor.version !== 1 || descriptor.hashAlgorithm !== DEFERRED_ORIGINAL_HASH || !object(binding)
+      || !integer(index) || binding.offset !== page.offset + index || value.id !== `original:${binding.offset}`
+      || binding.recordId !== value.id || binding.sourceSession !== value.source_session || !nonempty(binding.sourceSession)
+      || binding.sourceOrdinal !== value.source_ordinal || !integer(binding.sourceOrdinal)
+      || orderedJson({provider: binding.provider, sessionId: binding.sessionId, identity: binding.identity, revision: binding.revision, until: binding.until}) !== orderedJson(bound)
+      || presentation.kind !== 'tool-result-presentation' || presentation.contentFormat !== 'json-stringify-2'
+      || typeof presentation.isError !== 'boolean' || !object(presentation.sourceRecordMetadata)
+      || presentation.sourceRecordMetadata.ordinal !== binding.sourceOrdinal
+      || !Array.isArray(presentation.parts) || !Array.isArray(descriptor.images) || descriptor.images.length === 0
+      || ![descriptor.recordSha256, descriptor.contentSha256].every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))) return invalid()
+  const images: unknown[] = []
+  for (const [index, part] of presentation.parts.entries()) {
+    if (!object(part)) return invalid()
+    if (part.kind === 'text') {
+      if (!['input_text', 'output_text', 'text'].includes(String(part.type)) || typeof part.text !== 'string') return invalid()
+    } else if (part.kind === 'image') {
+      const image = part.image
+      if (part.type !== 'input_image' || !object(image) || image.index !== index || !nonempty(image.mediaType)
+          || !integer(image.uriUtf8Bytes) || image.uriUtf8Bytes === 0 || !integer(image.decodedBytes) || image.decodedBytes === 0
+          || ![image.uriSha256, image.decodedSha256].every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))
+          || ('detail' in part && !['auto', 'low', 'high'].includes(String(part.detail)))) return invalid()
+      images.push(image)
+    } else return invalid()
+  }
+  if (orderedJson(images) !== orderedJson(descriptor.images)) return invalid()
+}
 
 const object = (value: unknown): value is JsonObject => value !== null && typeof value === 'object' && !Array.isArray(value)
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0

@@ -5,6 +5,8 @@ import { extractTimelineEvents } from '../../lib/timeline'
 import { Timeline } from './Timeline'
 import { useHoverCard, HoverCard } from '../shared/HoverCard'
 import { SessionResources, type ReadToolResult, type ResolveImage, type SessionResourcesValue } from './SessionResources'
+import type {DeferredOriginalStore} from '../../lib/deferred-original-store'
+import {DeferredToolResult, DeferredSourceRecord} from './DeferredOriginal'
 import {
   PromptBlock,
   AiTextBlock,
@@ -46,6 +48,7 @@ export interface SessionViewProps {
   readerMode?: boolean
   readToolResult?: ReadToolResult | null
   resolveImage?: ResolveImage | null
+  deferredOriginal?: DeferredOriginalStore | null
   /** Semantic identity of the session resource behind `readToolResult`. */
   resourceScope?: string | null
   /** Optional actions rendered with the fully-filtered guidance (e.g. adjust filters, load earlier). */
@@ -119,6 +122,7 @@ export function SessionView({
   readerMode = false,
   readToolResult = null,
   resolveImage = null,
+  deferredOriginal = null,
   resourceScope = null,
   filteredEmptyActions = null,
   rangeEmptyActions = null,
@@ -127,11 +131,11 @@ export function SessionView({
   const contentRef = useRef<HTMLDivElement>(null)
   const resourcesValue = useMemo<SessionResourcesValue | null>(
     () => {
-      if (!readToolResult&&!resolveImage) return null
-      if(resolveImage)return {readToolResult:readToolResult??undefined,resolveImage,scope:resourceScope}
+      if (!readToolResult&&!resolveImage&&!deferredOriginal) return null
+      if(resolveImage||deferredOriginal)return {readToolResult:readToolResult??undefined,resolveImage:resolveImage??undefined,deferredOriginal:deferredOriginal??undefined,scope:resourceScope}
       return resourceScope != null ? { readToolResult:readToolResult!, scope: resourceScope } : readToolResult
     },
-    [readToolResult, resolveImage, resourceScope],
+    [readToolResult, resolveImage, deferredOriginal, resourceScope],
   )
   const [activePromptNums, setActivePromptNums] = useState<Set<number>>(new Set())
   const [scrollFraction, setScrollFraction] = useState(0)
@@ -437,10 +441,10 @@ function renderMessages(
     const msg = messages[i]
 
     // Detect consecutive tool calls + results and group them
-    if (!forceExpandedTools && (msg.kind === 'ai-tool-use' || msg.kind === 'tool-result')) {
+    if (!forceExpandedTools && (msg.kind === 'ai-tool-use' || msg.kind === 'tool-result' || msg.kind === 'deferred-tool-result')) {
       const groupStart = i
       const group: SessionMessage[] = []
-      while (i < messages.length && (messages[i].kind === 'ai-tool-use' || messages[i].kind === 'tool-result')) {
+      while (i < messages.length && (messages[i].kind === 'ai-tool-use' || messages[i].kind === 'tool-result' || messages[i].kind === 'deferred-tool-result')) {
         group.push(messages[i])
         i++
       }
@@ -498,6 +502,7 @@ function renderAnchoredMessage(
 }
 
 export function SourceRecordDetails({msg,forceMount=false}:{msg:SessionMessage;forceMount?:boolean}) {
+  if(msg.kind==='deferred-tool-result')return <DeferredSourceRecord record={msg.deferred} forceMount={forceMount}/>
   const raw = typeof msg.sourceRecordRaw === 'string' ? msg.sourceRecordRaw : null
   return raw !== null || msg.sourceRecord ? <DeferredDetails forceMount={forceMount} className="ml-6 my-2 text-[11px] text-stone-400"><summary className="cursor-pointer">Original native record</summary>{()=> <pre className="p-3 whitespace-pre-wrap break-words max-h-80 overflow-auto bg-stone-50">{raw ?? JSON.stringify(msg.sourceRecord,null,2)}</pre>}</DeferredDetails> : null
 }
@@ -515,7 +520,7 @@ function toolGroupVisible(filter: FilterState) {
 
 function ToolGroup({ messages, filter }: { messages: SessionMessage[]; filter: FilterState }) {
   const toolCalls = messages.filter(m => m.kind === 'ai-tool-use') as Extract<SessionMessage, { kind: 'ai-tool-use' }>[]
-  const results = messages.filter(m => m.kind === 'tool-result') as Extract<SessionMessage, { kind: 'tool-result' }>[]
+  const results = messages.filter(m => m.kind === 'tool-result' || m.kind === 'deferred-tool-result')
   const errorCount = results.filter(r => r.isError).length
 
   if (!toolGroupVisible(filter)) return null
@@ -536,7 +541,7 @@ function ToolGroup({ messages, filter }: { messages: SessionMessage[]; filter: F
       {()=> <div className="mt-1 ml-2 pl-3 border-l border-stone-200">
         {messages.map((m, j) => {
           if (m.kind === 'ai-tool-use' && !filter.toolCalls) return null
-          if (m.kind === 'tool-result' && !filter.toolResults) return null
+          if ((m.kind === 'tool-result' || m.kind === 'deferred-tool-result') && !filter.toolResults) return null
           return <div key={j}><MessageBlock msg={m} filter={filter} searchQuery="" /><SourceRecordDetails msg={m}/></div>
         })}
       </div>}
@@ -564,6 +569,7 @@ function MessageBlock({
     case 'ai-thinking': return filter.thinking || forceVisible ? <ThinkingHint msg={msg} /> : null
     case 'ai-tool-use': return filter.toolCalls || forceVisible ? <ToolCallLine msg={msg} forceMount={forceVisible} /> : null
     case 'tool-result': return filter.toolResults || forceVisible ? <ToolResultBlock msg={msg} forceMount={forceVisible} /> : null
+    case 'deferred-tool-result': return filter.toolResults || forceVisible ? <DeferredToolResult record={msg.deferred} forceMount={forceVisible}/> : null
     case 'ai-text': return filter.aiText || forceVisible ? <AiTextBlock msg={msg} /> : null
     case 'team-message': return filter.team || forceVisible ? <TeamMessageBlock msg={msg} /> : null
     case 'delegation-update': return filter.team || forceVisible ? <DelegationUpdateBlock msg={msg} /> : null

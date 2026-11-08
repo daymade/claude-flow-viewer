@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {SessionReader, classifyUserInputContent, classifyUserInputs, parseCodexNativeRecords, parseCodexSessionContent, parseClaudeSessionContent, buildClaudeSourceAnchors, normalizeConversationPage, resolveConversationAnchor, conversationImageReferences, resolveConversationImage, isConversationMessage} from '../dist-reader/reader.mjs';
+import {SessionReader, classifyUserInputContent, classifyUserInputs, parseCodexNativeRecords, parseCodexSessionContent, parseClaudeSessionContent, buildClaudeSourceAnchors, normalizeConversationPage, resolveConversationAnchor, conversationImageReferences, resolveConversationImage, isConversationMessage, hydrateDeferredOriginalRecord} from '../dist-reader/reader.mjs';
 import {spawnSync} from 'node:child_process';
 
 const readerPackage=JSON.parse(readFileSync(new URL('../dist-reader/package.json',import.meta.url),'utf8'));
+assert.equal(readerPackage.capabilities.deferredOriginalPayload,1);
+assert.equal(readerPackage.exports['./codex-original-payload'],'./server/codex-original-payload.mjs');
 assert.deepEqual(readerPackage.capabilities.originalContextWindowFocus,['latest-conversation']);
 assert.equal(readerPackage.capabilities.strictCodexOriginalStream,1);
 assert.equal(typeof (await import('../dist-reader/server/codex-original-source.mjs')).readStrictCodexOriginalWindow,'function');
@@ -77,3 +79,18 @@ console.log('PASS built image-reference CLI and SDK share exact ownership and re
 const strictTests=spawnSync(process.execPath,['--test','scripts/test-codex-original-source.mjs','dist-reader/tests/codex-original-raw.test.mjs'],{encoding:'utf8'});
 assert.equal(strictTests.status,0,strictTests.stdout+'\n'+strictTests.stderr);
 console.log(strictTests.stdout);
+
+const payloadOutput=[{type:'input_text',text:'Exact text\n'},{type:'input_image',image_url:'data:image/png;base64,AQIDBA==',detail:'high'}];
+const payloadPage={provider:'codex',session_id:'payload-session',revision:'payload-revision',until:'original:1',offset:0,next_offset:1,total:1,has_earlier:false,has_later:false,read_at:'2026-11-08T00:00:00Z',boundary:'synthetic',identity:{node:'synthetic',provider:'codex',session_id:'payload-session',source_path:'/synthetic/source.jsonl'},records:[{kind:'flow-message',id:'original:0',source_session:'payload-session',source_ordinal:124,message:{kind:'tool-result',content:JSON.stringify(payloadOutput,null,2),isError:false,sourceRecord:{type:'response_item',ordinal:124,payload:{type:'custom_tool_call_output',output:payloadOutput}}}}]};
+const payloadCli=request=>spawnSync(process.execPath,['dist-reader/server/codex-original-payload.mjs'],{input:JSON.stringify(request),encoding:'utf8'});
+const payload=payloadCli({version:1,page:payloadPage,capability:1});
+assert.equal(payload.status,0,payload.stderr);
+const payloadResult=JSON.parse(payload.stdout).page;
+assert.equal(normalizeConversationPage(payloadResult).messages[0].kind,'deferred-tool-result');
+assert.equal(JSON.stringify(payloadResult).includes('base64,'),false);
+assert.deepEqual(await hydrateDeferredOriginalRecord(payloadResult,payloadResult.records[0],payloadPage.records[0]),payloadPage.records[0]);
+const oldPayload=payloadCli({version:1,page:payloadPage});
+assert.equal(oldPayload.status,0,oldPayload.stderr);assert.deepEqual(JSON.parse(oldPayload.stdout).page,payloadPage);
+const invalidPayload=payloadCli({version:1,page:payloadPage,capability:null});
+assert.notEqual(invalidPayload.status,0);assert.equal(invalidPayload.stdout,'');
+console.log('PASS built deferred-original producer, consumer and hydration agree; legacy input stays complete and malformed capability fails closed');

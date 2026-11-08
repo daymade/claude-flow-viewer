@@ -6,12 +6,13 @@ import type { ReaderJumpTarget } from './components/session/SessionView'
 import { bindEmbedEndpoint, embedRequestUrl } from './lib/embed-endpoint'
 import {isConversationMessage,LATEST_CONVERSATION,validateConversationWindowFocus,earlierConversationWindow} from './lib/conversation-focus'
 import {resolveConversationImage,mergeConversationImageResources} from './lib/image-references'
+import {hydrateDeferredOriginalRecord,validateDeferredOriginalRecord,type DeferredOriginalRecord} from './lib/deferred-original'
 import './index.css'
 import './embed.css'
 const CONVERSATION_FILTER = {thinking:false,toolCalls:false,toolResults:false}
 const INVALID_INITIAL_BINDING='Invalid initial record binding'
 const INVALID_WINDOW_FOCUS_BINDING='Invalid conversation window focus binding'
-type SourceBinding={endpoint:string;session:string;recordId:string|null;windowFocus:typeof LATEST_CONVERSATION|null}
+type SourceBinding={endpoint:string;session:string;recordId:string|null;windowFocus:typeof LATEST_CONVERSATION|null;deferredOriginal:boolean}
 function isValidRecordId(value:unknown):value is string{
   if(typeof value!=='string'||value.length===0||value.length>1024||value.trim()!==value)return false
   return ![...value].some(character=>{const code=character.charCodeAt(0);return code<=31||code===127})
@@ -35,6 +36,7 @@ function initialSourcePage(value:unknown,binding:SourceBinding,conversationView:
     validateConversationWindowFocus(next,80)
   }else if(next.window_focus!=null)throw new Error('Unexpected initial conversation window focus')
   adapt(next)
+  if(next.records.some(record=>'kind' in record&&record.kind==='deferred-tool-result')&&!binding.deferredOriginal)throw new Error('Deferred original payload was not requested')
   if(binding.recordId&&resolveConversationAnchor(next,binding.recordId)<0)
     throw new Error('Requested source record is not uniquely available in this reading window')
   return next
@@ -124,10 +126,14 @@ export function ReaderEmbed() {
   const windowFocusBindingError=windowFocusValues.length>0&&(!urlWindowFocus||!conversationView||!urlEndpoint||!new URL(urlEndpoint,location.origin).pathname.endsWith('/original-context')||!urlSession?.trim()||!channel?.trim()||hasInitial)
   const handoffValues=parameters.getAll('initial_handoff'),handoffMode=handoffValues.length===1&&['1','source-page-v1'].includes(handoffValues[0])
   const deferredHandoff=handoffMode&&!parameters.has('endpoint')&&!parameters.has('session')
+  const deferredValues=parameters.getAll('deferred_original'),deferredOriginal=deferredValues.length===1&&deferredValues[0]==='1'
+  const deferredBindingError=deferredValues.length>0&&(!deferredOriginal||!isValidRecordId(channel)||parameters.getAll('channel').length!==1
+    ||(!deferredHandoff&&(!urlEndpoint||!new URL(urlEndpoint,location.origin).pathname.endsWith('/original-context')||!isValidRecordId(urlSession)
+      ||parameters.getAll('endpoint').length!==1||parameters.getAll('session').length!==1)))
   const handoffBindingError=handoffValues.length>0&&(!handoffMode||!isValidRecordId(channel)||parameters.getAll('channel').length!==1
     ||(deferredHandoff?hasInitial||windowFocusValues.length>0:!urlEndpoint||!isValidRecordId(urlSession)||parameters.getAll('endpoint').length!==1||parameters.getAll('session').length!==1))
-  const initialBindingError=hasInitial&&!initialBindingValid||windowFocusBindingError||handoffBindingError
-  const bindingError=windowFocusBindingError?INVALID_WINDOW_FOCUS_BINDING:INVALID_INITIAL_BINDING
+  const initialBindingError=hasInitial&&!initialBindingValid||windowFocusBindingError||handoffBindingError||deferredBindingError
+  const bindingError=deferredBindingError?'Invalid deferred original binding':windowFocusBindingError?INVALID_WINDOW_FOCUS_BINDING:INVALID_INITIAL_BINDING
   const [page,setPage]=useState<Page|null>(null), [error,setError]=useState(initialBindingError?bindingError:''), [busy,setBusy]=useState(false)
   const [target,setTarget]=useState<ReaderJumpTarget|null>(null)
   const [blockedLink,setBlockedLink]=useState<BlockedLink|null>(null)
@@ -205,7 +211,7 @@ export function ReaderEmbed() {
       recordId:sourceRecordId,
     })
   },[hostFiles,endpoint,channel,expectedSession,page])
-  const generation=useRef(0), current=useRef<Page|null>(null), navigationSequence=useRef(0)
+  const generation=useRef(0), adoptedGeneration=useRef(0), current=useRef<Page|null>(null), navigationSequence=useRef(0)
   const findIntent=useRef({version:0,query:''})
   const recordFindEdit=useCallback((query:string)=>{findIntent.current={version:findIntent.current.version+1,query}},[])
   const handoffApplied=useRef(false)
@@ -218,9 +224,10 @@ export function ReaderEmbed() {
     const selectedSession=binding?binding.session:expectedSession
     if(selectedSession && next.session_id!==selectedSession)throw new Error('Selected session identity changed')
     if(previous && ['earlier','later'].includes(mode) && next.session_id!==previous.session_id)throw new Error('Selected session identity changed')
+    if(next.records.some(record=>'kind' in record&&record.kind==='deferred-tool-result')&&!deferredOriginal)throw new Error('Deferred original payload was not requested')
     const merged=mode==='earlier' && previous ? {...next,records:[...next.records,...previous.records],next_offset:previous.next_offset,has_later:previous.has_later} : mode==='later' && previous ? {...next,offset:previous.offset,has_earlier:previous.has_earlier,records:[...previous.records,...next.records]} : next
     if(previous&&['earlier','later'].includes(mode))merged.imageResources=mergeConversationImageResources(previous,next)
-    current.current=merged;setPage(merged)
+    adoptedGeneration.current=generation.current;current.current=merged;setPage(merged)
     if(['earlier','later'].includes(mode) && findIntent.current.version!==findVersion && findIntent.current.query){setTarget(null);return}
     const data=adapt(merged)
     let index=anchor ? resolveConversationAnchor(merged,anchor) : mode==='latest' ? data.messages.length-1 : 0
@@ -230,7 +237,7 @@ export function ReaderEmbed() {
       index=(mode==='latest' ? conversationIndices[conversationIndices.length-1] : conversationIndices[0]) ?? -1
     }
     setTarget(index>=0 ? {messageIndex:index, ...(mode==='question' ? {requestId:`nav-${++navigationSequence.current}`} : {})} : null)
-  },[expectedSession,conversationView,windowFocusMode])
+  },[expectedSession,conversationView,windowFocusMode,deferredOriginal])
   const read=useCallback(async (mode:string,anchor?:string)=>{
     if(initialBindingError){setError(bindingError);return}
     if(handoffMode&&!handoffApplied.current)return
@@ -244,6 +251,7 @@ export function ReaderEmbed() {
     const query=new URLSearchParams({limit:String(earlier?.limit??80),offset:mode==='earlier' ? String(earlier?.offset??0) : mode==='later' ? String(previous?.next_offset ?? 0) : mode==='first' ? '0' : '-1'})
     const focused=(binding?binding.windowFocus:windowFocusMode)===LATEST_CONVERSATION&&conversationView&&mode==='latest'&&!anchor
     if(focused)query.set('window_focus',LATEST_CONVERSATION)
+    if(deferredOriginal)query.set('deferred_original','1')
     if (anchor) query.set('anchor',anchor)
     if (['earlier','later'].includes(mode) && previous) {
       if(previous.revision)query.set('revision',previous.revision)
@@ -257,7 +265,7 @@ export function ReaderEmbed() {
       accept(next,mode,anchor,previous,findVersion,binding??undefined)
     } catch(e) {if(version===generation.current)setError(e instanceof Error ? e.message : String(e))}
     finally {if(version===generation.current)setBusy(false)}
-  },[endpoint,accept,initialBindingError,bindingError,handoffMode,windowFocusMode,conversationView])
+  },[endpoint,accept,initialBindingError,bindingError,handoffMode,windowFocusMode,conversationView,deferredOriginal])
   useEffect(()=>{
     if(!initialBindingError&&!handoffMode)void read(initialRecordId?'question':'latest',initialRecordId??undefined)
     if(!handoffMode){const counter=generation;return()=>{counter.current++}}
@@ -273,7 +281,8 @@ export function ReaderEmbed() {
           ||bindEmbedEndpoint(message.endpoint,mountPath,location.origin)!==message.endpoint
           ||!Object.hasOwn(message,'recordId')||message.recordId!==null&&!isValidRecordId(message.recordId)
           ||!Object.hasOwn(message,'windowFocus')||message.windowFocus!==null&&message.windowFocus!==LATEST_CONVERSATION)return
-        const binding:SourceBinding={endpoint:message.endpoint,session:message.session,recordId:message.recordId,windowFocus:message.windowFocus}
+        if(deferredOriginal&&!new URL(message.endpoint,location.origin).pathname.endsWith('/original-context'))return
+        const binding:SourceBinding={endpoint:message.endpoint,session:message.session,recordId:message.recordId,windowFocus:message.windowFocus,deferredOriginal}
         const prior=sourceBindingRef.current
         if(prior?(Object.keys(prior) as Array<keyof SourceBinding>).some(key=>prior[key]!==binding[key])
           :!deferredHandoff&&(binding.endpoint!==urlEndpoint||binding.session!==urlSession||binding.recordId!==urlRecordId||binding.windowFocus!==urlWindowFocus))return
@@ -310,11 +319,30 @@ export function ReaderEmbed() {
     }
     addEventListener('message',receive)
     if(!handoffMode||!readySent.current){
-      parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel,...(!initialBindingError&&initialRecordId?{initialRecordId}:{}),...(!initialBindingError&&windowFocusMode?{windowFocusMode}:{}),...(!initialBindingError&&handoffMode?{initialHandoff:1}:{})},location.origin)
+      parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel,...(!initialBindingError&&initialRecordId?{initialRecordId}:{}),...(!initialBindingError&&windowFocusMode?{windowFocusMode}:{}),...(!initialBindingError&&handoffMode?{initialHandoff:1}:{}),...(!initialBindingError&&deferredOriginal?{deferredOriginalPayload:1}:{})},location.origin)
       readySent.current=true
     }
     return()=>removeEventListener('message',receive)
-  },[endpoint,expectedSession,channel,read,accept,initialBindingError,initialRecordId,windowFocusMode,handoffMode,deferredHandoff,urlEndpoint,urlSession,urlRecordId,urlWindowFocus,conversationView,mountPath])
+  },[endpoint,expectedSession,channel,read,accept,initialBindingError,initialRecordId,windowFocusMode,handoffMode,deferredHandoff,urlEndpoint,urlSession,urlRecordId,urlWindowFocus,conversationView,mountPath,deferredOriginal])
+  const readDeferredOriginal=useCallback(async(record:DeferredOriginalRecord)=>{
+    const selected=current.current,version=generation.current
+    if(!deferredOriginal||!endpoint||!channel||!selected||selected!==page||selected.session_id!==expectedSession||adoptedGeneration.current!==version)throw new Error('No bound deferred original reader')
+    const binding=record.original.binding,index=binding.offset-selected.offset
+    validateDeferredOriginalRecord(selected,index,record)
+    const owned=()=>generation.current===version&&current.current===selected
+    const query=new URLSearchParams({offset:String(binding.offset),limit:'1',revision:binding.revision,until:String(binding.until)})
+    const response=await fetch(embedRequestUrl(endpoint,query),{credentials:'same-origin'})
+    if(!response.ok)throw new Error((await response.text()).slice(0,1000))
+    const next:Page=await response.json()
+    if(!owned())throw new Error('Original read belongs to an earlier reader source')
+    if(next.provider!==selected.provider||next.session_id!==selected.session_id||next.revision!==selected.revision||next.until!==selected.until
+      ||JSON.stringify(next.identity)!==JSON.stringify(selected.identity)||next.offset!==binding.offset||next.next_offset!==binding.offset+1
+      ||next.total!==selected.total||!Array.isArray(next.records)||next.records.length!==1)throw new Error('Original response does not match the bound source snapshot')
+    const complete=await hydrateDeferredOriginalRecord(selected,record,next.records[0])
+    if(!owned())throw new Error('Original read belongs to an earlier reader source')
+    return complete
+  },[deferredOriginal,endpoint,channel,expectedSession,page])
+  const deferredOriginalScope=page&&deferredOriginal?JSON.stringify([endpoint,channel,expectedSession,generation.current,page.identity,page.revision,page.until,page.offset,page.next_offset]):null
   const readToolResult=useCallback(async (relativePath:string)=>{
     if(!endpoint)throw new Error('No bound session endpoint')
     const response=await fetch(embedRequestUrl(endpoint,new URLSearchParams({path:relativePath}),'/tool-output'),{credentials:'same-origin'})
@@ -351,7 +379,7 @@ export function ReaderEmbed() {
       </details>
       <button type="button" onClick={()=>setBlockedLink(null)}>关闭</button>
     </div>}
-    {page && data ? <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} onFindQueryChange={recordFindEdit} findScopeLabel="仅搜索已加载范围" readToolResult={readToolResult} resolveImage={resolveImage} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} toolbarLeading={historyControls} toolbarTrailing={sourceControls} pending={busy} emptyStateAction={page.has_earlier ? <button type="button" className="reader-empty-action" disabled={busy} onClick={()=>void read('earlier')}>加载更早的对话</button> : null} /> : <div className="session-reader-toolbar">{historyControls}{busy && <span className="embed-status" role="status">正在读取绑定会话…</span>}</div>}
+    {page && data ? <SessionReader data={data} initialFilter={conversationView ? CONVERSATION_FILTER : undefined} activeSearchTarget={target} onFindQueryChange={recordFindEdit} findScopeLabel="仅搜索已加载范围" readToolResult={readToolResult} resolveImage={resolveImage} readDeferredOriginal={deferredOriginal?readDeferredOriginal:null} deferredOriginalScope={deferredOriginalScope} resourceScope={endpoint ? `${endpoint}|${page.provider}|${page.session_id}` : null} toolbarLeading={historyControls} toolbarTrailing={sourceControls} pending={busy} emptyStateAction={page.has_earlier ? <button type="button" className="reader-empty-action" disabled={busy} onClick={()=>void read('earlier')}>加载更早的对话</button> : null} /> : <div className="session-reader-toolbar">{historyControls}{busy && <span className="embed-status" role="status">正在读取绑定会话…</span>}</div>}
   </div>
 }
 createRoot(document.getElementById('root')!).render(<ReaderEmbed />)
