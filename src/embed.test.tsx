@@ -135,6 +135,29 @@ it('deferred original: absent opt-in keeps full original requests and ready mess
  expect(screen.getByText('Visible latest text')).toBeTruthy();
 });
 
+it('deferred original: focus without birth navigation still requires exact channel and session, including missing-field refusals',async()=>{
+ const endpoint='/api/sources/tasks/deferred-focus-identity/original-context',channel='deferred-focus-identity';
+ const fetchMock=vi.fn<typeof fetch>(async()=>({ok:true,json:async()=>deferredFullPage()}) as Response);vi.stubGlobal('fetch',fetchMock);
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel,deferred_original:'1'}));
+ const focus={type:'cfv:focus',endpoint,recordId:'original:2'};
+ for(const fields of [{},{channel},{session:'sess-1'},{channel:'wrong',session:'sess-1'},{channel,session:'wrong'}]){
+  act(()=>sendHostMessage({...focus,...fields}));await flush();expect(anchorCalls(fetchMock,endpoint)).toHaveLength(0);
+ }
+ act(()=>sendHostMessage({...focus,channel,session:'sess-1'}));
+ await waitFor(()=>expect(anchorCalls(fetchMock,endpoint)).toHaveLength(1));
+});
+
+it('deferred original: legacy full pages without WebCrypto keep their omitted-focus-identity compatibility',async()=>{
+ vi.stubGlobal('crypto',{});
+ const endpoint='/api/sources/tasks/deferred-focus-legacy/original-context';
+ const fetchMock=vi.fn<typeof fetch>(async()=>({ok:true,json:async()=>deferredFullPage()}) as Response);vi.stubGlobal('fetch',fetchMock);
+ await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'deferred-focus-legacy'}));
+ expect(screen.getByText('Visible latest text')).toBeTruthy();
+ act(()=>sendHostMessage({type:'cfv:focus',endpoint,recordId:'original:2'}));
+ await waitFor(()=>expect(anchorCalls(fetchMock,endpoint)).toHaveLength(1));
+ expect(fetchMock.mock.calls.every(([input])=>!new URL(String(input),location.origin).searchParams.has('deferred_original'))).toBe(true);
+});
+
 it.each(['deferred_original=2','deferred_original=1&deferred_original=1'])('deferred original: rejects malformed opt-in %s without reading',async mode=>{
  const fetchMock=stubFetch();await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint:'/api/sources/tasks/deferred-invalid/original-context',session:'sess-1',channel:'deferred-invalid'})+'&'+mode);
  expect(fetchMock).not.toHaveBeenCalled();expect(screen.getByText('Invalid deferred original binding')).toBeTruthy();

@@ -82,7 +82,7 @@ console.log(strictTests.stdout);
 
 const payloadOutput=[{type:'input_text',text:'Exact text\n'},{type:'input_image',image_url:'data:image/png;base64,AQIDBA==',detail:'high'}];
 const payloadPage={provider:'codex',session_id:'payload-session',revision:'payload-revision',until:'original:1',offset:0,next_offset:1,total:1,has_earlier:false,has_later:false,read_at:'2026-11-08T00:00:00Z',boundary:'synthetic',identity:{node:'synthetic',provider:'codex',session_id:'payload-session',source_path:'/synthetic/source.jsonl'},records:[{kind:'flow-message',id:'original:0',source_session:'payload-session',source_ordinal:124,message:{kind:'tool-result',content:JSON.stringify(payloadOutput,null,2),isError:false,sourceRecord:{type:'response_item',ordinal:124,payload:{type:'custom_tool_call_output',output:payloadOutput}}}}]};
-const payloadCli=request=>spawnSync(process.execPath,['dist-reader/server/codex-original-payload.mjs'],{input:JSON.stringify(request),encoding:'utf8'});
+const payloadCli=request=>spawnSync(process.execPath,['dist-reader/server/codex-original-payload.mjs'],{input:JSON.stringify(request),encoding:'utf8',maxBuffer:4*1024*1024});
 const payload=payloadCli({version:1,page:payloadPage,capability:1});
 assert.equal(payload.status,0,payload.stderr);
 const payloadResult=JSON.parse(payload.stdout).page;
@@ -94,3 +94,13 @@ assert.equal(oldPayload.status,0,oldPayload.stderr);assert.deepEqual(JSON.parse(
 const invalidPayload=payloadCli({version:1,page:payloadPage,capability:null});
 assert.notEqual(invalidPayload.status,0);assert.equal(invalidPayload.stdout,'');
 console.log('PASS built deferred-original producer, consumer and hydration agree; legacy input stays complete and malformed capability fails closed');
+
+const unicodeText='ASCII/汉字/😀/e\u0301\n'.repeat(20000);
+const unicodePage={...payloadPage,records:[{kind:'flow-message',id:'original:0',source_session:'payload-session',source_ordinal:124,message:{kind:'ai-text',text:unicodeText}}]};
+assert.ok(Buffer.byteLength(JSON.stringify({version:1,page:unicodePage,capability:1}))>4*65536);
+for(const capability of [1,undefined]){
+ const unicodeResult=payloadCli({version:1,page:unicodePage,capability});
+ assert.equal(unicodeResult.status,0,unicodeResult.stderr);
+ assert.equal(JSON.stringify(JSON.parse(unicodeResult.stdout).page)===JSON.stringify(unicodePage),true,'Built CLI must preserve large mixed UTF8 input across pipe chunks');
+}
+console.log('PASS built deferred-original CLI preserves large Chinese/ASCII/emoji/combining input across actual stdin pipe chunks');

@@ -2,6 +2,7 @@ import {projectDeferredOriginalPage} from '../src/lib/deferred-original'
 
 try {
   let input = ''
+  process.stdin.setEncoding('utf8')
   for await (const chunk of process.stdin) input += chunk
   const request = JSON.parse(input)
   if (!request || request.version !== 1 || !request.page || !Array.isArray(request.page.records)
