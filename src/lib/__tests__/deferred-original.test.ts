@@ -298,9 +298,10 @@ it('retains original detail without strict Raw and rejects unpaired descriptors,
   const withoutRaw = strictSourcePage('original')
   delete (withoutRaw.records[0] as unknown as {message: {sourceRecordRaw?: string}}).message.sourceRecordRaw
   expect(await projectDeferredOriginalPage(withoutRaw, 2)).toBe(withoutRaw)
-  for (const detail of ['future', null, 7]) {
-    const retained = strictSourcePage(detail)
+  for (const detail of ['future', null, 7, ['original']]) {
+    const retained = strictSourcePage(detail), before = JSON.stringify(retained)
     expect(await projectDeferredOriginalPage(retained, 2)).toBe(retained)
+    expect(JSON.stringify(retained)).toBe(before)
   }
   const {page, projected, record} = await projectedPage(strictSourcePage('original'), 2)
   for (const field of ['representation', 'sourceRecordRaw'] as const) {
@@ -315,6 +316,11 @@ it('retains original detail without strict Raw and rejects unpaired descriptors,
   const candidate = clone(page.records[0]) as unknown as {message: {sourceRecordRaw: string}}
   candidate.message.sourceRecordRaw = candidate.message.sourceRecordRaw.replace('9007199254740993', '9007199254740992')
   await expect(hydrateDeferredOriginalRecord(projected, record, candidate)).rejects.toThrow()
+  const invalidDetail = clone(projected), invalidRecord = invalidDetail.records[0] as DeferredOriginalRecord
+  const invalidImage = invalidRecord.presentation.parts[1] as unknown as {detail: unknown}
+  invalidImage.detail = ['original']
+  expect(() => validateDeferredOriginalRecord(invalidDetail, 0, invalidRecord)).toThrow()
+  await expect(hydrateDeferredOriginalRecord(invalidDetail, invalidRecord, page.records[0])).rejects.toThrow()
 })
 
 it('retains malformed, empty, null, non-UTF8 and unrelated strict Raw records unchanged', async () => {

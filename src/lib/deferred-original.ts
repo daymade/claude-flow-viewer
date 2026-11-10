@@ -105,7 +105,7 @@ export function validateDeferredOriginalRecord(page: OriginalPageBinding, index:
       if (part.type !== 'input_image' || !object(image) || image.index !== index || !nonempty(image.mediaType)
           || !integer(image.uriUtf8Bytes) || image.uriUtf8Bytes === 0 || !integer(image.decodedBytes) || image.decodedBytes === 0
           || ![image.uriSha256, image.decodedSha256].every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))
-          || ('detail' in part && !['auto', 'low', 'high', ...(strict ? ['original'] : [])].includes(String(part.detail)))) return invalid()
+          || ('detail' in part && !['auto', 'low', 'high'].includes(String(part.detail)) && !(strict && part.detail === 'original'))) return invalid()
       images.push(image)
     } else return invalid()
   }
@@ -186,7 +186,7 @@ async function projectRecord(page: OriginalPageBinding, index: number, value: un
       parts.push({kind: 'text', type: part.type as 'input_text' | 'output_text' | 'text', text: part.text})
     } else if (part.type === 'input_image') {
       if (keys.some(key => !['type', 'image_url', 'detail'].includes(key)) || typeof part.image_url !== 'string'
-          || ('detail' in part && !['auto', 'low', 'high', ...(strictRaw && rawWitness ? ['original'] : [])].includes(String(part.detail)))) return null
+          || ('detail' in part && !['auto', 'low', 'high'].includes(String(part.detail)) && !(strictRaw && rawWitness && part.detail === 'original'))) return null
       const decoded = imageBytes(part.image_url)
       if (!decoded) return null
       const uri = utf8(part.image_url)

@@ -159,7 +159,7 @@ it('deferred original: negotiated capability 2 projects strict Raw original deta
   expect(url.pathname).toBe(endpoint);expect(Object.fromEntries(url.searchParams)).toEqual({offset:'1',limit:'1',revision:'rev-one',until:'original:3'});
   const raw=[...row.querySelectorAll('details')].find(details=>details.querySelector('summary')?.textContent==='Original native record')!;
   act(()=>{raw.open=true;fireEvent(raw,new Event('toggle'))});await flush();
-  expect(raw.querySelector('pre')?.textContent).toBe(JSON.stringify(fullRecord.message.sourceRecord,null,2));
+  expect(raw.querySelector('pre')?.textContent).toBe(fullRecord.message.sourceRecordRaw);
   expect(fetchMock).toHaveBeenCalledTimes(2);
  }finally{window.removeEventListener('message',receive)}
 });
