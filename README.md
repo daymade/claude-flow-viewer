@@ -111,7 +111,7 @@ Claude 原始记录上下文定位与渲染／文件引用坐标分开。`parse-
 
 共享包的 `parseCodexMessagesStreaming(lines, yieldToEventLoop, sink)` 完整扫描 Codex 输入，按成熟分类顺序同步交付每条 canonical 消息及从零开始的 `messageIndex`、物理 `recordIndex`，同一原记录可产生多条消息。sink 只能观察，不得修改消息或 `sourceRecord`，不得返回 Promise；异常使整次扫描失败，调用者须在扫描和自身来源校验全部成功前保留结果为未确认。成功仅返回 `{source:'codex',messageCount,recordCount}`，不构造伪 `SessionData`，原有解析 API 保持不变。此入口仍完成 prompt bookkeeping、retained、markers 与 heatmap 的原校验，宿主负责完整来源、冻结窗口、时钟与数值见证；它不裁 tail、不授予读取或执行权限。
 
-原件二进制延后传输由 `package.json.capabilities.deferredOriginalPayload:1` 声明。宿主同时确认该能力与来源的实际支持后，才在嵌入页顶层 URL 传 `deferred_original=1`；Reader 在 `cfv:ready` 回声 `deferredOriginalPayload:1`，普通原件分页才追加同名参数。绑定 endpoint 仍只允许原有 runtime witness 参数，未启用模式的请求与完整页保持原行为。
+普通原件二进制延后传输（模式1）由 `package.json.capabilities.deferredOriginalPayload:1` 声明。宿主同时确认该能力与来源的实际支持后，才在嵌入页顶层 URL 传 `deferred_original=1`；Reader 在 `cfv:ready` 回声 `deferredOriginalPayload:1`，普通原件分页才追加同名参数。绑定 endpoint 仍只允许原有 runtime witness 参数，未启用模式的请求与完整页保持原行为。
 
 官方 `server/codex-original-payload.mjs`（包入口 `./codex-original-payload`）接受 stdin `{version:1,page,capability:1}`，输出 `{version:1,page}`。调用前，宿主必须用既有完整 canonical 页及独立来源 authority 检查验源；该 helper 只做传输投影，不读取来源或认证 descriptor。仅已知的 object-only Codex 工具输出数组可转成 `deferred-tool-result`，有序文字、错误状态、记录定位与小型来源元数据保留；未知或无效结构仍保留完整旧对象。旧 `capability:1` 仍保留所有带 Raw 记录；仅经 `strictDeferredOriginalPayload:1` 能力、`deferred_original=2` 与 ready 同值确认的宿主才向 helper 传 `capability:2`。该模式仅在 Raw 是完整 UTF-8 JSONL 行、其解析对象与来源对象一致时投影；原 canonical 缓存不变，presentation 不携带 Raw。不配套的旧宿主继续完整旧表示，不因 package 升级自动启用模式2。表示的 `presentation.parts` 不是原 `content` 或原始 JSONL。
 

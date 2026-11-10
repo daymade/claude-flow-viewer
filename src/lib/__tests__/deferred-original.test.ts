@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto'
 import {readFileSync} from 'node:fs'
 import {it, expect, vi} from 'vitest'
-import {projectDeferredOriginalPage, hydrateDeferredOriginalRecord, DEFERRED_ORIGINAL_HASH,
+import {projectDeferredOriginalPage, hydrateDeferredOriginalRecord, validateDeferredOriginalRecord, DEFERRED_ORIGINAL_HASH,
   type DeferredOriginalSourcePage, type DeferredOriginalRecord, type DeferredOriginalPage} from '../deferred-original'
 
 const sha = (input: string | Uint8Array) => createHash('sha256').update(input).digest('hex')
@@ -73,7 +73,7 @@ it('snapshots identity instead of aliasing a mutable source object', async () =>
 
 it('leaves all old fields and references unchanged without the explicit capability', async () => {
   const page = sourcePage()
-  for (const capability of [undefined, 0, 2, null]) expect(await projectDeferredOriginalPage(page, capability as number)).toBe(page)
+  for (const capability of [undefined, 0, 3, null]) expect(await projectDeferredOriginalPage(page, capability as number)).toBe(page)
 })
 
 it('retains unknown, malformed, non-inline and raw-string-bearing originals in full', async () => {
@@ -239,10 +239,15 @@ it('returns only the verified record snapshot when external inputs change during
 })
 
 
-function strictSourcePage(): DeferredOriginalSourcePage {
+function strictSourcePage(detail?: unknown): DeferredOriginalSourcePage {
   const page = sourcePage()
-  const record = page.records[0] as unknown as {message: {sourceRecordRaw: string; sourceRecord: unknown}}
-  const source = (record.message.sourceRecord as {metadata: Record<string, unknown>})
+  const record = page.records[0] as unknown as {message: {content: string; sourceRecordRaw: string;
+    sourceRecord: {metadata: Record<string, unknown>; payload: {output: Array<Record<string, unknown>>}}}}
+  const source = record.message.sourceRecord
+  if (detail !== undefined) {
+    source.payload.output[1].detail = detail
+    record.message.content = JSON.stringify(source.payload.output, null, 2)
+  }
   source.metadata.counter = '__LARGE_INTEGER__'
   source.metadata.float = '__FLOAT__'
   source.metadata.negativeZero = '__NEGATIVE_ZERO__'
@@ -273,6 +278,43 @@ it('defers a valid strict Raw record without inline Raw and hydrates its exact U
   expect(restored.message.sourceRecordRaw).toContain('-0.0')
   expect(restored.message.sourceRecordRaw).toMatch(/\r\n$/)
   expect(JSON.stringify(restored)).toBe(JSON.stringify(input.records[0]))
+})
+
+it('projects, validates and hydrates original image detail with its exact strict Raw bytes', async () => {
+  const input = strictSourcePage('original')
+  const {projected, record} = await projectedPage(input, 2)
+  expect(record.presentation.parts[1]).toMatchObject({kind: 'image', detail: 'original'})
+  expect(() => validateDeferredOriginalRecord(projected, 0, record)).not.toThrow()
+  const original = input.records[0] as unknown as {message: {sourceRecordRaw: string}}
+  const restored = await hydrateDeferredOriginalRecord(projected, record, input.records[0])
+  if (restored.message.kind !== 'tool-result') throw new Error('original-detail fixture did not restore tool-result')
+  expect(restored.message.sourceRecordRaw).toBe(original.message.sourceRecordRaw)
+  expect(JSON.stringify(restored)).toBe(JSON.stringify(input.records[0]))
+})
+
+it('retains original detail without strict Raw and rejects unpaired descriptors, invalid details and Raw tampering', async () => {
+  const mode1 = strictSourcePage('original')
+  expect(await projectDeferredOriginalPage(mode1, 1)).toBe(mode1)
+  const withoutRaw = strictSourcePage('original')
+  delete (withoutRaw.records[0] as unknown as {message: {sourceRecordRaw?: string}}).message.sourceRecordRaw
+  expect(await projectDeferredOriginalPage(withoutRaw, 2)).toBe(withoutRaw)
+  for (const detail of ['future', null, 7]) {
+    const retained = strictSourcePage(detail)
+    expect(await projectDeferredOriginalPage(retained, 2)).toBe(retained)
+  }
+  const {page, projected, record} = await projectedPage(strictSourcePage('original'), 2)
+  for (const field of ['representation', 'sourceRecordRaw'] as const) {
+    const changed = clone(projected), tampered = changed.records[0] as DeferredOriginalRecord
+    delete tampered.original[field]
+    expect(() => validateDeferredOriginalRecord(changed, 0, tampered)).toThrow()
+    await expect(hydrateDeferredOriginalRecord(changed, tampered, page.records[0])).rejects.toThrow()
+  }
+  const legacy = clone(projected), legacyRecord = legacy.records[0] as DeferredOriginalRecord
+  delete legacyRecord.original.representation; delete legacyRecord.original.sourceRecordRaw
+  expect(() => validateDeferredOriginalRecord(legacy, 0, legacyRecord)).toThrow()
+  const candidate = clone(page.records[0]) as unknown as {message: {sourceRecordRaw: string}}
+  candidate.message.sourceRecordRaw = candidate.message.sourceRecordRaw.replace('9007199254740993', '9007199254740992')
+  await expect(hydrateDeferredOriginalRecord(projected, record, candidate)).rejects.toThrow()
 })
 
 it('retains malformed, empty, null, non-UTF8 and unrelated strict Raw records unchanged', async () => {
