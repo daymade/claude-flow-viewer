@@ -38,6 +38,8 @@ describe('ClaudeSkillRecommendationService', () => {
   }
 
   beforeEach(async () => {
+    process.env.SHELL = '/bin/zsh'
+    vi.resetModules()
     execFileMock.mockReset()
     stdinEndMock.mockReset()
     tempRoot = await fs.mkdtemp(path.join(process.cwd(), '.tmp-claude-skill-service-'))

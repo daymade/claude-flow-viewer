@@ -1,7 +1,7 @@
 /// <reference types="node" />
 // @vitest-environment jsdom
 import {webcrypto} from 'node:crypto'
-import {projectDeferredOriginalPage} from './lib/deferred-original'
+import {projectDeferredOriginalPage,type DeferredOriginalRecord} from './lib/deferred-original'
 import type {ConversationPage} from './lib/reader-page'
 import {afterEach,it,expect,vi} from 'vitest'
 import {act} from 'react'
@@ -128,6 +128,42 @@ it('deferred original: explicit opt-in requests projections and verifies a share
  }finally{window.removeEventListener('message',receive)}
 });
 
+it('deferred original: negotiated capability 2 projects strict Raw original detail and hydrates the frozen record',async()=>{
+ vi.stubGlobal('crypto',webcrypto);
+ const full=deferredFullPage();
+ const fullRecord=full.records[1] as unknown as {message:{content:string;sourceRecordRaw:string;sourceRecord:{payload:{output:Array<Record<string,unknown>>}}}};
+ fullRecord.message.sourceRecord.payload.output[1].detail='original';
+ fullRecord.message.content=JSON.stringify(fullRecord.message.sourceRecord.payload.output,null,2);
+ fullRecord.message.sourceRecordRaw=JSON.stringify(fullRecord.message.sourceRecord)+'\n';
+ const projected=await projectDeferredOriginalPage(full,2),projectedRecord=projected.records[1] as DeferredOriginalRecord;
+ const endpoint='/api/sources/tasks/deferred-strict-original/original-context',received:unknown[]=[];
+ expect(projectedRecord.original.representation).toBe('strict-raw-utf8-v1');
+ expect(projectedRecord.presentation.parts[1]).toMatchObject({kind:'image',detail:'original'});
+ expect(projectedRecord.presentation).not.toHaveProperty('sourceRecordRaw');
+ const fetchMock=vi.fn<typeof fetch>(async input=>{
+  const url=new URL(String(input),location.origin);
+  if(url.searchParams.get('limit')==='1')return {ok:true,json:async()=>({...full,offset:1,next_offset:2,records:[full.records[1]],has_earlier:true,has_later:true})} as Response;
+  return {ok:true,json:async()=>projected} as Response;
+ });vi.stubGlobal('fetch',fetchMock);
+ const receive=(event:MessageEvent)=>received.push(event.data);window.addEventListener('message',receive);
+ try{
+  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'deferred-strict-original',deferred_original:'2'}));
+  expect(new URL(String(fetchMock.mock.calls[0][0]),location.origin).searchParams.get('deferred_original')).toBe('2');
+  await waitFor(()=>expect(readyMessages(received)[0]).toMatchObject({deferredOriginalPayload:2}));
+  expect(document.body.innerHTML).not.toContain('base64,');
+  const row=document.querySelector('[data-message-index="1"]')!;
+  const result=row.querySelector('details')!;
+  act(()=>{result.open=true;fireEvent(result,new Event('toggle'))});
+  await waitFor(()=>expect(row.querySelectorAll('img')).toHaveLength(1));
+  const url=new URL(String(fetchMock.mock.calls[1][0]),location.origin);
+  expect(url.pathname).toBe(endpoint);expect(Object.fromEntries(url.searchParams)).toEqual({offset:'1',limit:'1',revision:'rev-one',until:'original:3'});
+  const raw=[...row.querySelectorAll('details')].find(details=>details.querySelector('summary')?.textContent==='Original native record')!;
+  act(()=>{raw.open=true;fireEvent(raw,new Event('toggle'))});await flush();
+  expect(raw.querySelector('pre')?.textContent).toBe(fullRecord.message.sourceRecordRaw);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+ }finally{window.removeEventListener('message',receive)}
+});
+
 it('deferred original: absent opt-in keeps full original requests and ready messages unchanged',async()=>{
  const endpoint='/api/sources/tasks/deferred-legacy/original-context',fetchMock=vi.fn<typeof fetch>(async()=>({ok:true,json:async()=>deferredFullPage()}) as Response);vi.stubGlobal('fetch',fetchMock);
  await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint,session:'sess-1',channel:'deferred-legacy'}));
@@ -158,7 +194,7 @@ it('deferred original: legacy full pages without WebCrypto keep their omitted-fo
  expect(fetchMock.mock.calls.every(([input])=>!new URL(String(input),location.origin).searchParams.has('deferred_original'))).toBe(true);
 });
 
-it.each(['deferred_original=2','deferred_original=1&deferred_original=1'])('deferred original: rejects malformed opt-in %s without reading',async mode=>{
+it.each(['deferred_original=3','deferred_original=1&deferred_original=1'])('deferred original: rejects malformed opt-in %s without reading',async mode=>{
  const fetchMock=stubFetch();await mountEmbed('/reader/embed.html?'+new URLSearchParams({endpoint:'/api/sources/tasks/deferred-invalid/original-context',session:'sess-1',channel:'deferred-invalid'})+'&'+mode);
  expect(fetchMock).not.toHaveBeenCalled();expect(screen.getByText('Invalid deferred original binding')).toBeTruthy();
 });

@@ -12,7 +12,7 @@ import './embed.css'
 const CONVERSATION_FILTER = {thinking:false,toolCalls:false,toolResults:false}
 const INVALID_INITIAL_BINDING='Invalid initial record binding'
 const INVALID_WINDOW_FOCUS_BINDING='Invalid conversation window focus binding'
-type SourceBinding={endpoint:string;session:string;recordId:string|null;windowFocus:typeof LATEST_CONVERSATION|null;deferredOriginal:boolean}
+type SourceBinding={endpoint:string;session:string;recordId:string|null;windowFocus:typeof LATEST_CONVERSATION|null;deferredOriginal:boolean;strictDeferredOriginal:boolean}
 function isValidRecordId(value:unknown):value is string{
   if(typeof value!=='string'||value.length===0||value.length>1024||value.trim()!==value)return false
   return ![...value].some(character=>{const code=character.charCodeAt(0);return code<=31||code===127})
@@ -37,6 +37,7 @@ function initialSourcePage(value:unknown,binding:SourceBinding,conversationView:
   }else if(next.window_focus!=null)throw new Error('Unexpected initial conversation window focus')
   adapt(next)
   if(next.records.some(record=>'kind' in record&&record.kind==='deferred-tool-result')&&!binding.deferredOriginal)throw new Error('Deferred original payload was not requested')
+  if(next.records.some(record=>'kind' in record&&record.kind==='deferred-tool-result'&&record.original.representation==='strict-raw-utf8-v1')&&!binding.strictDeferredOriginal)throw new Error('Strict deferred original payload was not negotiated')
   if(binding.recordId&&resolveConversationAnchor(next,binding.recordId)<0)
     throw new Error('Requested source record is not uniquely available in this reading window')
   return next
@@ -126,7 +127,7 @@ export function ReaderEmbed() {
   const windowFocusBindingError=windowFocusValues.length>0&&(!urlWindowFocus||!conversationView||!urlEndpoint||!new URL(urlEndpoint,location.origin).pathname.endsWith('/original-context')||!urlSession?.trim()||!channel?.trim()||hasInitial)
   const handoffValues=parameters.getAll('initial_handoff'),handoffMode=handoffValues.length===1&&['1','source-page-v1'].includes(handoffValues[0])
   const deferredHandoff=handoffMode&&!parameters.has('endpoint')&&!parameters.has('session')
-  const deferredValues=parameters.getAll('deferred_original'),deferredOriginal=deferredValues.length===1&&deferredValues[0]==='1'
+  const deferredValues=parameters.getAll('deferred_original'),deferredOriginal=deferredValues.length===1&&['1','2'].includes(deferredValues[0]),strictDeferredOriginal=deferredOriginal&&deferredValues[0]==='2'
   const deferredBindingError=deferredValues.length>0&&(!deferredOriginal||!isValidRecordId(channel)||parameters.getAll('channel').length!==1
     ||(!deferredHandoff&&(!urlEndpoint||!new URL(urlEndpoint,location.origin).pathname.endsWith('/original-context')||!isValidRecordId(urlSession)
       ||parameters.getAll('endpoint').length!==1||parameters.getAll('session').length!==1)))
@@ -225,6 +226,7 @@ export function ReaderEmbed() {
     if(selectedSession && next.session_id!==selectedSession)throw new Error('Selected session identity changed')
     if(previous && ['earlier','later'].includes(mode) && next.session_id!==previous.session_id)throw new Error('Selected session identity changed')
     if(next.records.some(record=>'kind' in record&&record.kind==='deferred-tool-result')&&!deferredOriginal)throw new Error('Deferred original payload was not requested')
+    if(next.records.some(record=>'kind' in record&&record.kind==='deferred-tool-result'&&record.original.representation==='strict-raw-utf8-v1')&&!strictDeferredOriginal)throw new Error('Strict deferred original payload was not negotiated')
     const merged=mode==='earlier' && previous ? {...next,records:[...next.records,...previous.records],next_offset:previous.next_offset,has_later:previous.has_later} : mode==='later' && previous ? {...next,offset:previous.offset,has_earlier:previous.has_earlier,records:[...previous.records,...next.records]} : next
     if(previous&&['earlier','later'].includes(mode))merged.imageResources=mergeConversationImageResources(previous,next)
     adoptedGeneration.current=generation.current;current.current=merged;setPage(merged)
@@ -251,7 +253,7 @@ export function ReaderEmbed() {
     const query=new URLSearchParams({limit:String(earlier?.limit??80),offset:mode==='earlier' ? String(earlier?.offset??0) : mode==='later' ? String(previous?.next_offset ?? 0) : mode==='first' ? '0' : '-1'})
     const focused=(binding?binding.windowFocus:windowFocusMode)===LATEST_CONVERSATION&&conversationView&&mode==='latest'&&!anchor
     if(focused)query.set('window_focus',LATEST_CONVERSATION)
-    if(deferredOriginal)query.set('deferred_original','1')
+    if(deferredOriginal)query.set('deferred_original',strictDeferredOriginal?'2':'1')
     if (anchor) query.set('anchor',anchor)
     if (['earlier','later'].includes(mode) && previous) {
       if(previous.revision)query.set('revision',previous.revision)
@@ -265,7 +267,7 @@ export function ReaderEmbed() {
       accept(next,mode,anchor,previous,findVersion,binding??undefined)
     } catch(e) {if(version===generation.current)setError(e instanceof Error ? e.message : String(e))}
     finally {if(version===generation.current)setBusy(false)}
-  },[endpoint,accept,initialBindingError,bindingError,handoffMode,windowFocusMode,conversationView,deferredOriginal])
+  },[endpoint,accept,initialBindingError,bindingError,handoffMode,windowFocusMode,conversationView,deferredOriginal,strictDeferredOriginal])
   useEffect(()=>{
     if(!initialBindingError&&!handoffMode)void read(initialRecordId?'question':'latest',initialRecordId??undefined)
     if(!handoffMode){const counter=generation;return()=>{counter.current++}}
@@ -282,7 +284,7 @@ export function ReaderEmbed() {
           ||!Object.hasOwn(message,'recordId')||message.recordId!==null&&!isValidRecordId(message.recordId)
           ||!Object.hasOwn(message,'windowFocus')||message.windowFocus!==null&&message.windowFocus!==LATEST_CONVERSATION)return
         if(deferredOriginal&&!new URL(message.endpoint,location.origin).pathname.endsWith('/original-context'))return
-        const binding:SourceBinding={endpoint:message.endpoint,session:message.session,recordId:message.recordId,windowFocus:message.windowFocus,deferredOriginal}
+        const binding:SourceBinding={endpoint:message.endpoint,session:message.session,recordId:message.recordId,windowFocus:message.windowFocus,deferredOriginal,strictDeferredOriginal}
         const prior=sourceBindingRef.current
         if(prior?(Object.keys(prior) as Array<keyof SourceBinding>).some(key=>prior[key]!==binding[key])
           :!deferredHandoff&&(binding.endpoint!==urlEndpoint||binding.session!==urlSession||binding.recordId!==urlRecordId||binding.windowFocus!==urlWindowFocus))return
@@ -319,11 +321,11 @@ export function ReaderEmbed() {
     }
     addEventListener('message',receive)
     if(!handoffMode||!readySent.current){
-      parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel,...(!initialBindingError&&initialRecordId?{initialRecordId}:{}),...(!initialBindingError&&windowFocusMode?{windowFocusMode}:{}),...(!initialBindingError&&handoffMode?{initialHandoff:1}:{}),...(!initialBindingError&&deferredOriginal?{deferredOriginalPayload:1}:{})},location.origin)
+      parent.postMessage({type:'cfv:ready',endpoint,session:expectedSession,channel,...(!initialBindingError&&initialRecordId?{initialRecordId}:{}),...(!initialBindingError&&windowFocusMode?{windowFocusMode}:{}),...(!initialBindingError&&handoffMode?{initialHandoff:1}:{}),...(!initialBindingError&&deferredOriginal?{deferredOriginalPayload:strictDeferredOriginal?2:1}:{})},location.origin)
       readySent.current=true
     }
     return()=>removeEventListener('message',receive)
-  },[endpoint,expectedSession,channel,read,accept,initialBindingError,initialRecordId,windowFocusMode,handoffMode,deferredHandoff,urlEndpoint,urlSession,urlRecordId,urlWindowFocus,conversationView,mountPath,deferredOriginal])
+  },[endpoint,expectedSession,channel,read,accept,initialBindingError,initialRecordId,windowFocusMode,handoffMode,deferredHandoff,urlEndpoint,urlSession,urlRecordId,urlWindowFocus,conversationView,mountPath,deferredOriginal,strictDeferredOriginal])
   const readDeferredOriginal=useCallback(async(record:DeferredOriginalRecord)=>{
     const selected=current.current,version=generation.current
     if(!deferredOriginal||!endpoint||!channel||!selected||selected!==page||selected.session_id!==expectedSession||adoptedGeneration.current!==version)throw new Error('No bound deferred original reader')
@@ -342,7 +344,7 @@ export function ReaderEmbed() {
     if(!owned())throw new Error('Original read belongs to an earlier reader source')
     return complete
   },[deferredOriginal,endpoint,channel,expectedSession,page])
-  const deferredOriginalScope=page&&deferredOriginal?JSON.stringify([endpoint,channel,expectedSession,generation.current,page.identity,page.revision,page.until,page.offset,page.next_offset]):null
+  const deferredOriginalScope=page&&deferredOriginal?JSON.stringify([endpoint,channel,expectedSession,generation.current,page.identity,page.revision,page.until,page.offset,page.next_offset,strictDeferredOriginal]):null
   const readToolResult=useCallback(async (relativePath:string)=>{
     if(!endpoint)throw new Error('No bound session endpoint')
     const response=await fetch(embedRequestUrl(endpoint,new URLSearchParams({path:relativePath}),'/tool-output'),{credentials:'same-origin'})

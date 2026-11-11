@@ -19,7 +19,7 @@ export interface DeferredOriginalImage {
 }
 export type DeferredOriginalPart =
   | {kind: 'text'; type: 'input_text' | 'output_text' | 'text'; text: string}
-  | {kind: 'image'; type: 'input_image'; image: DeferredOriginalImage; detail?: 'auto' | 'low' | 'high'}
+  | {kind: 'image'; type: 'input_image'; image: DeferredOriginalImage; detail?: 'auto' | 'low' | 'high' | 'original'}
 
 export interface DeferredOriginalDescriptor {
   version: 1
@@ -38,6 +38,9 @@ export interface DeferredOriginalDescriptor {
   recordSha256: string
   contentSha256: string
   images: DeferredOriginalImage[]
+  /** Both fields are absent for the existing object-only representation. */
+  representation?: 'strict-raw-utf8-v1'
+  sourceRecordRaw?: {hashAlgorithm: 'sha256-utf8-v1'; utf8Bytes: number; sha256: string}
 }
 
 /** This is deliberately not a FlowConversationRecord or a SessionMessage. */
@@ -80,6 +83,18 @@ export function validateDeferredOriginalRecord(page: OriginalPageBinding, index:
       || presentation.sourceRecordMetadata.ordinal !== binding.sourceOrdinal
       || !Array.isArray(presentation.parts) || !Array.isArray(descriptor.images) || descriptor.images.length === 0
       || ![descriptor.recordSha256, descriptor.contentSha256].every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))) return invalid()
+  const strict = Object.hasOwn(descriptor, 'representation') || Object.hasOwn(descriptor, 'sourceRecordRaw')
+  const descriptorKeys = ['version', 'hashAlgorithm', 'binding', 'recordSha256', 'contentSha256', 'images',
+    ...(strict ? ['representation', 'sourceRecordRaw'] : [])]
+  if (Object.keys(descriptor).some(key => !descriptorKeys.includes(key))
+      || Object.hasOwn(presentation, 'sourceRecordRaw')) return invalid()
+  if (strict) {
+    const raw = descriptor.sourceRecordRaw
+    if (descriptor.representation !== 'strict-raw-utf8-v1' || !object(raw)
+        || Object.keys(raw).sort().join(',') !== 'hashAlgorithm,sha256,utf8Bytes'
+        || raw.hashAlgorithm !== 'sha256-utf8-v1' || !integer(raw.utf8Bytes) || raw.utf8Bytes === 0
+        || typeof raw.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.sha256)) return invalid()
+  }
   const images: unknown[] = []
   for (const [index, part] of presentation.parts.entries()) {
     if (!object(part)) return invalid()
@@ -90,7 +105,7 @@ export function validateDeferredOriginalRecord(page: OriginalPageBinding, index:
       if (part.type !== 'input_image' || !object(image) || image.index !== index || !nonempty(image.mediaType)
           || !integer(image.uriUtf8Bytes) || image.uriUtf8Bytes === 0 || !integer(image.decodedBytes) || image.decodedBytes === 0
           || ![image.uriSha256, image.decodedSha256].every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))
-          || ('detail' in part && !['auto', 'low', 'high'].includes(String(part.detail)))) return invalid()
+          || ('detail' in part && !['auto', 'low', 'high'].includes(String(part.detail)) && !(strict && part.detail === 'original'))) return invalid()
       images.push(image)
     } else return invalid()
   }
@@ -134,20 +149,34 @@ function imageBytes(uri: string): {mediaType: string; bytes: Uint8Array<ArrayBuf
   } catch { return null }
 }
 
-async function projectRecord(page: OriginalPageBinding, index: number, value: unknown): Promise<DeferredOriginalRecord | null> {
+async function projectRecord(page: OriginalPageBinding, index: number, value: unknown, strictRaw = false): Promise<DeferredOriginalRecord | null> {
   const bound = context(page)
   if (!bound || !object(value) || value.kind !== 'flow-message' || !nonempty(value.id)
       || value.id !== `original:${page.offset + index}` || !nonempty(value.source_session)
       || !integer(value.source_ordinal) || !object(value.message)) return null
   const message = value.message
   if (message.kind !== 'tool-result' || typeof message.content !== 'string' || typeof message.isError !== 'boolean'
-      || 'sourceRecordRaw' in message || !object(message.sourceRecord)) return null
-  if (Object.keys(message).some(key => !['kind', 'content', 'isError', 'sourceRecord', 'sourceRecordId', 'timestamp', 'toolUseId', 'externalFile', 'totalSize'].includes(key))) return null
+      || !object(message.sourceRecord)) return null
+  if (Object.keys(message).some(key => !['kind', 'content', 'isError', 'sourceRecord', 'sourceRecordRaw', 'sourceRecordId', 'timestamp', 'toolUseId', 'externalFile', 'totalSize'].includes(key))) return null
   const source = message.sourceRecord
   const payload = source.payload
   if (source.type !== 'response_item' || source.ordinal !== value.source_ordinal || !object(payload)
       || !['custom_tool_call_output', 'function_call_output'].includes(String(payload.type))
       || !Array.isArray(payload.output) || message.content !== JSON.stringify(payload.output, null, 2)) return null
+  let rawWitness: DeferredOriginalDescriptor['sourceRecordRaw']
+  if (Object.hasOwn(message, 'sourceRecordRaw')) {
+    if (!strictRaw) return null
+    const raw = message.sourceRecordRaw
+    if (typeof raw !== 'string' || raw.length === 0 || !raw.endsWith('\n')) return null
+    const bytes = utf8(raw)
+    // Raw is authoritative for integer tokens, -0, whitespace and unknown fields.
+    // Validate its relation to the browser's object view, never rebuild the raw line.
+    try {
+      if (new TextDecoder('utf-8', {fatal: true}).decode(bytes) !== raw
+          || orderedJson(JSON.parse(raw)) !== orderedJson(snapshot(source))) return null
+    } catch { return null }
+    rawWitness = {hashAlgorithm: 'sha256-utf8-v1', utf8Bytes: bytes.length, sha256: await hash(bytes)}
+  }
   const parts: DeferredOriginalPart[] = [], images: DeferredOriginalImage[] = []
   for (const [index, part] of payload.output.entries()) {
     if (!object(part)) return null
@@ -157,7 +186,7 @@ async function projectRecord(page: OriginalPageBinding, index: number, value: un
       parts.push({kind: 'text', type: part.type as 'input_text' | 'output_text' | 'text', text: part.text})
     } else if (part.type === 'input_image') {
       if (keys.some(key => !['type', 'image_url', 'detail'].includes(key)) || typeof part.image_url !== 'string'
-          || ('detail' in part && !['auto', 'low', 'high'].includes(String(part.detail)))) return null
+          || ('detail' in part && !['auto', 'low', 'high'].includes(String(part.detail)) && !(strictRaw && rawWitness && part.detail === 'original'))) return null
       const decoded = imageBytes(part.image_url)
       if (!decoded) return null
       const uri = utf8(part.image_url)
@@ -165,12 +194,12 @@ async function projectRecord(page: OriginalPageBinding, index: number, value: un
         decodedBytes: decoded.bytes.length, decodedSha256: await hash(decoded.bytes)}
       images.push(image)
       parts.push({kind: 'image', type: 'input_image', image,
-        ...('detail' in part ? {detail: part.detail as 'auto' | 'low' | 'high'} : {})})
+        ...('detail' in part ? {detail: part.detail as 'auto' | 'low' | 'high' | 'original'} : {})})
     } else return null
   }
   if (images.length === 0) return null
   const payloadMetadata = without(payload, ['output'])
-  const messageMetadata = without(message, ['content', 'sourceRecord', 'kind'])
+  const messageMetadata = without(message, ['content', 'sourceRecord', 'sourceRecordRaw', 'kind'])
   const recordMetadata = without(value, ['message', 'kind'])
   return {
     ...recordMetadata,
@@ -180,7 +209,8 @@ async function projectRecord(page: OriginalPageBinding, index: number, value: un
     original: {version: 1, hashAlgorithm: DEFERRED_ORIGINAL_HASH,
       binding: {...bound, recordId: value.id, offset: page.offset + index,
         sourceSession: value.source_session, sourceOrdinal: value.source_ordinal},
-      recordSha256: await jsonHash(value), contentSha256: await hash(utf8(message.content)), images},
+      recordSha256: await jsonHash(snapshot(value)), contentSha256: await hash(utf8(message.content)), images,
+      ...(rawWitness ? {representation: 'strict-raw-utf8-v1' as const, sourceRecordRaw: rawWitness} : {})},
   }
 }
 
@@ -189,12 +219,12 @@ async function projectRecord(page: OriginalPageBinding, index: number, value: un
  * Find/Raw completeness requires hydration; presentation.parts is not the original content.
  */
 export async function projectDeferredOriginalPage<T extends DeferredOriginalSourcePage>(page: T, capability?: number): Promise<T | DeferredOriginalPage<T>> {
-  if (capability !== DEFERRED_ORIGINAL_VERSION || !context(page)) return page
+  if ((capability !== DEFERRED_ORIGINAL_VERSION && capability !== 2) || !context(page)) return page
   const ids = page.records.map(record => record.id)
   if (new Set(ids).size !== ids.length) return page
   let changed = false
   const records = await Promise.all(page.records.map(async (record, index) => {
-    const projected = await projectRecord(page, index, record)
+    const projected = await projectRecord(page, index, record, capability === 2)
     if (projected) changed = true
     return projected ?? record
   }))
@@ -221,7 +251,7 @@ export async function hydrateDeferredOriginalRecord(
   if (!integer(index) || index >= page.records.length
       || page.records.filter(record => object(record) && record.id === projectedSnapshot.id).length !== 1
       || orderedJson(snapshot(page.records[index])) !== orderedJson(projectedSnapshot)) throw new Error('Deferred original is not the unique current page record')
-  const expected = await projectRecord(pageBinding, index, recordSnapshot)
+  const expected = await projectRecord(pageBinding, index, recordSnapshot, true)
   if (!expected || orderedJson(expected) !== orderedJson(projectedSnapshot)) throw new Error('Deferred original integrity or source binding mismatch')
   return recordSnapshot as OriginalRecord
 }

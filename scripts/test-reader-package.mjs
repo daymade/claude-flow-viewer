@@ -94,6 +94,31 @@ assert.equal(oldPayload.status,0,oldPayload.stderr);assert.deepEqual(JSON.parse(
 const invalidPayload=payloadCli({version:1,page:payloadPage,capability:null});
 assert.notEqual(invalidPayload.status,0);assert.equal(invalidPayload.stdout,'');
 console.log('PASS built deferred-original producer, consumer and hydration agree; legacy input stays complete and malformed capability fails closed');
+const strictPayloadPage=JSON.parse(JSON.stringify(payloadPage));
+const strictRecord=strictPayloadPage.records[0];
+const strictRaw=JSON.stringify({...strictRecord.message.sourceRecord,future:{counter:'__COUNTER__',negativeZero:'__ZERO__'}})
+  .replace('"__COUNTER__"','9007199254740993').replace('"__ZERO__"','-0.0')+'\r\n';
+strictRecord.message.sourceRecord=JSON.parse(strictRaw);
+strictRecord.message.sourceRecordRaw=strictRaw;
+const legacyStrictPayload=payloadCli({version:1,page:strictPayloadPage,capability:1});
+assert.equal(legacyStrictPayload.status,0,legacyStrictPayload.stderr);
+assert.equal(JSON.stringify(JSON.parse(legacyStrictPayload.stdout).page),JSON.stringify(strictPayloadPage));
+assert.equal(JSON.parse(legacyStrictPayload.stdout).page.records[0].message.sourceRecordRaw,strictRaw);
+const strictPayload=payloadCli({version:1,page:strictPayloadPage,capability:2});
+assert.equal(strictPayload.status,0,strictPayload.stderr);
+const strictPayloadResult=JSON.parse(strictPayload.stdout).page;
+assert.equal(strictPayloadResult.records[0].original.representation,'strict-raw-utf8-v1');
+assert.equal(JSON.stringify(strictPayloadResult).includes('base64,'),false);
+assert.equal(Object.hasOwn(strictPayloadResult.records[0].presentation,'sourceRecordRaw'),false);
+const strictRestored=await hydrateDeferredOriginalRecord(strictPayloadResult,strictPayloadResult.records[0],strictRecord);
+assert.equal(strictRestored.message.sourceRecordRaw,strictRaw);
+assert.equal(renderToStaticMarkup(createElement(SessionReader,{data:normalizeConversationPage({...strictPayloadPage,records:[strictRestored]})})).includes('Original native record'),true);
+const unsafeInput=JSON.stringify({version:1,page:{...strictPayloadPage,unknownCounter:'__UNSAFE__',records:[...strictPayloadPage.records,{kind:'flow-message',id:'original:1',source_session:'payload-session',source_ordinal:125,message:{kind:'ai-text',text:'Unchanged',sourceRecord:{future:'__UNSAFE__'}}}]},capability:2}).replaceAll('"__UNSAFE__"','9007199254740993');
+const unsafeWire=spawnSync(process.execPath,['dist-reader/server/codex-original-payload.mjs'],{input:unsafeInput,encoding:'utf8'});
+assert.equal(unsafeWire.status,0,unsafeWire.stderr);
+assert.match(unsafeWire.stdout,/"unknownCounter":9007199254740993/);
+assert.match(unsafeWire.stdout,/"future":9007199254740993/);
+console.log('PASS built strict Raw projection, exact hydration and unsafe unknown integer wire tokens');
 
 const unicodeText='ASCII/汉字/😀/e\u0301\n'.repeat(20000);
 const unicodePage={...payloadPage,records:[{kind:'flow-message',id:'original:0',source_session:'payload-session',source_ordinal:124,message:{kind:'ai-text',text:unicodeText}}]};
