@@ -316,6 +316,35 @@ it('initial source handoff: rejects foreign sender, malformed binding and incomp
  }finally{window.removeEventListener('message',receive)}
 });
 
+it('initial source handoff: anchored one-record window is visible and continues through the complete frozen original',async()=>{
+ const channel='anchored-small-window',endpoint='/minions/api/history/history-synthetic/conversation',received:unknown[]=[];
+ const revision='a'.repeat(64),until='original:161';
+ const record=(index:number)=>({kind:'flow-message',id:`original:${index}`,message:{kind:'ai-text',text:index===80?'complete selected original':`complete original ${index}`,sourceRecordId:index===80?'selected-native-id':`native-${index}`}});
+ const pageWindow=(offset:number,count:number)=>({...page,provider:'codex',session_id:'sess-1',records:Array.from({length:count},(_,i)=>record(offset+i)),total:162,offset,next_offset:offset+count,has_earlier:offset>0,has_later:offset+count<162,revision,until});
+ const fetchMock=vi.fn(async(input:RequestInfo|URL)=>{
+  const url=new URL(String(input),location.origin),offset=Number(url.searchParams.get('offset'));
+  return jsonResponse(pageWindow(offset,Math.min(80,162-offset)));
+ });vi.stubGlobal('fetch',fetchMock);
+ const receive=(event:MessageEvent)=>received.push(event.data);window.addEventListener('message',receive);
+ try{
+  await mountEmbed('/minions/reader/embed.html?'+new URLSearchParams({initial_handoff:'source-page-v1',channel,view:'conversation'}));
+  const seed=pageWindow(80,1),message={type:'cfv:initial-source',version:1,endpoint,session:'sess-1',channel,recordId:'selected-native-id',windowFocus:null,page:seed};
+  for(const change of [{records:[]},{records:Array.from({length:81},(_,i)=>record(i))},{next_offset:82},{has_earlier:false},{session_id:'another-session'}])act(()=>sendHostMessage({...message,page:{...seed,...change}}));
+  act(()=>sendHostMessage({...message,recordId:null}));
+  await flush();expect(received.filter(value=>(value as {type?:string})?.type==='cfv:initial-source-ack')).toHaveLength(0);expect(fetchMock).not.toHaveBeenCalled();
+  act(()=>sendHostMessage(message));await screen.findByText('complete selected original');await waitFor(()=>expect(ringAt(0)).toContain('ring-1'));
+  expect(received.filter(value=>(value as {type?:string})?.type==='cfv:initial-source-ack')).toHaveLength(1);expect(fetchMock).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button',{name:'加载更早的对话'}));await screen.findByText('complete original 0');
+  fireEvent.click(screen.getByRole('button',{name:'继续查看'}));await screen.findByText('complete original 160');
+  fireEvent.click(screen.getByRole('button',{name:'继续查看'}));await screen.findByText('complete original 161');
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  expect(fetchMock.mock.calls.map(([input])=>new URL(String(input),location.origin).searchParams.get('offset'))).toEqual(['0','81','161']);
+  for(const [input] of fetchMock.mock.calls){const url=new URL(String(input),location.origin);expect(url.pathname).toBe(endpoint);expect(url.searchParams.get('revision')).toBe(revision);expect(url.searchParams.get('until')).toBe(until);}
+  const messages=adaptSpy.calls.at(-1)!.data.messages as Array<{sourceRecordId:string}>;expect(messages).toHaveLength(162);expect(new Set(messages.map(value=>value.sourceRecordId)).size).toBe(162);
+  expect((screen.getByRole('button',{name:'加载更早的对话'}) as HTMLButtonElement).disabled).toBe(true);expect((screen.getByRole('button',{name:'继续查看'}) as HTMLButtonElement).disabled).toBe(true);
+ }finally{window.removeEventListener('message',receive)}
+});
+
 it('initial source handoff: deferred original context uses the official full window and later paging retains frozen coordinates',async()=>{
  const channel='deferred-original',endpoint='/api/sources/tasks/deferred-original/original-context',received:unknown[]=[];
  const records=Array.from({length:80},(_,i)=>({kind:'flow-message',id:`original:${20+i}`,message:{kind:i===40?'ai-text':'ai-tool-use',...(i===40?{text:'complete supplied answer'}:{name:'fixture',summary:'tool',input:{}}),sourceRecordRaw:`{"ordinal":${20+i}}\n`}}));
