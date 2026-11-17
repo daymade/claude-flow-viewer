@@ -23,7 +23,9 @@ function initialSourcePage(value:unknown,binding:SourceBinding,conversationView:
   if(!['claude','codex'].includes(next.provider)||next.session_id!==binding.session
     ||!Array.isArray(next.records)||!Number.isSafeInteger(next.total)||next.total<0
     ||!Number.isSafeInteger(next.offset)||next.offset<0||next.offset>next.total
-    ||next.records.length!==Math.min(80,next.total-next.offset)
+    ||(binding.recordId
+      ? next.records.length<1||next.records.length>Math.min(80,next.total-next.offset)
+      : next.records.length!==Math.min(80,next.total-next.offset))
     ||next.next_offset!==next.offset+next.records.length
     ||next.has_earlier!==(next.offset>0)||next.has_later!==(next.next_offset<next.total)
     ||typeof next.read_at!=='string'||typeof next.boundary!=='string'
